@@ -1,5 +1,5 @@
 // EMG craneocervical - Atlas2030 / Nuevo Amanecer
-// Versión mínima: ADC -> quitar offset -> notch 60 Hz -> RMS móvil de 200 ms.
+// Versión mínima: ADC -> restar nivel de reposo fijo -> notch 60 Hz -> RMS móvil de 200 ms.
 #include <math.h>
 
 const int EMG_PIN = A1;
@@ -15,12 +15,11 @@ const float F_NOTCH = 60.0f;
 const float Q_NOTCH = 20.0f;
 const int N_RMS = 400;  // 200 ms
 
-const float ALFA_BASELINE = 1.0f / FS;  // seguidor de offset, tau = 1 s
-
 // Coeficientes y memoria del notch
 float b0, b1, b2, a1, a2;
 float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
 
+// Nivel DC del ADC (el offset analógico ya centra la señal): se mide una vez al inicio
 float baseline = 0;
 
 // RMS móvil exacto (enteros, sin deriva)
@@ -49,7 +48,7 @@ void setup() {
   a1 = -2.0f * c / a0;
   a2 = (1.0f - alpha) / a0;
 
-  // Offset inicial (0.5 s, músculo relajado)
+  // Nivel DC inicial (0.5 s, músculo relajado)
   siguienteMuestra = micros();
   for (int i = 0; i < 1000; i++) {
     while ((int32_t)(micros() - siguienteMuestra) < 0) {}
@@ -74,8 +73,7 @@ void loop() {
   if (adc < minRaw) minRaw = adc;
   if (adc > maxRaw) maxRaw = adc;
 
-  // Offset adaptativo
-  baseline += ALFA_BASELINE * (adc - baseline);
+  // Restar nivel DC fijo
   float x = adc - baseline;
 
   // Notch 60 Hz
