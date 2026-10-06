@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sEMG Cervical – Monitor de terapia</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f766e'/%3E%3Cpath d='M3 17h6l3-9 5 16 3-7h9' stroke='%23fff' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="brand" id="btn-home" type="button">
+    <span class="logo">∿</span><span>sEMG Cervical <small>(nombre por definir)</small></span>
+  </button>
+  <div class="topbar-right">
+    <div class="chip" id="conn-chip" title="Estado de la conexión con el Arduino">
+      <span class="dot" id="conn-dot"></span><span id="conn-text">Arduino: sin conexión</span>
+    </div>
+    <button class="btn small" id="btn-connect" type="button">Conectar Arduino</button>
+    <button class="btn small ghost" id="btn-sim" type="button">Simulación</button>
+    <select class="btn small ghost" id="sim-fault" hidden title="Probar alarmas">
+      <option value="">Simular falla…</option><option value="disconnect">Electrodo desconectado</option><option value="flat">Señal plana</option>
+      <option value="noise60">Ruido 60 Hz</option><option value="nodata">Cable USB sin datos</option>
+    </select>
+    <button class="btn small ghost" id="btn-settings" type="button">⚙ Ajustes</button>
+  </div>
+</header>
+
+<div id="alarms" class="alarms" role="alert" aria-live="assertive"></div>
+
+<main>
+  <!-- ========== INICIO ========== -->
+  <section id="view-home" class="view">
+    <div class="card hero">
+      <h1>Monitor de control cervical</h1>
+      <p class="muted">Registra o busca a un paciente para iniciar la terapia con sEMG.</p>
+      <div class="home-actions">
+        <button class="btn big green" id="go-register" type="button">Registrar paciente</button>
+        <button class="btn big blue" id="go-search" type="button">Buscar paciente</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Resumen</h3>
+      <p id="home-stats" class="muted"></p>
+      <p class="muted small-text">Los datos se guardan <b>solo en este navegador</b>. Haz respaldos periódicos desde Ajustes.
+        Nunca subas CSV ni respaldos de pacientes a GitHub.</p>
+    </div>
+  </section>
+
+  <!-- ========== REGISTRO ========== -->
+  <section id="view-register" class="view" hidden>
+    <form id="form-register" class="card form-card green-border" autocomplete="off">
+      <h2>Registrar paciente</h2>
+      <div class="grid2">
+        <label>Nombre(s) *<input name="nombres" required></label>
+        <label>Apellidos *<input name="apellidos" required></label>
+        <label>Fecha de nacimiento *<input name="nacimiento" type="date" required></label>
+        <label>Nivel GMFCS *
+          <select name="gmfcs" required>
+            <option value="">Selecciona…</option>
+            <option>I</option><option>II</option><option>III</option><option>IV</option><option>V</option>
+          </select>
+        </label>
+      </div>
+      <details class="more">
+        <summary>Datos clínicos opcionales (recomendados)</summary>
+        <div class="grid2">
+          <label>ID / expediente<input name="expediente"></label>
+          <label>Sexo
+            <select name="sexo"><option value="">—</option><option>Femenino</option><option>Masculino</option><option>Otro</option></select>
+          </label>
+          <label>Diagnóstico / tipo de PC
+            <select name="diagnostico">
+              <option value="">—</option><option>PC espástica</option><option>PC discinética</option>
+              <option>PC atáxica</option><option>PC mixta</option><option>Otro / en estudio</option>
+            </select>
+          </label>
+          <label>Edad gestacional al nacer (semanas)<input name="gestacion" type="number" min="22" max="44"></label>
+          <label>Tutor / contacto<input name="contacto"></label>
+          <label>Medicación / toxina botulínica / cirugías<input name="medicacion"></label>
+        </div>
+        <label>Notas<textarea name="notas" rows="2"></textarea></label>
+        <label class="check"><input type="checkbox" name="consentimiento"> Consentimiento informado firmado por el tutor</label>
+      </details>
+      <div class="form-actions">
+        <button class="btn ghost" type="button" data-nav="home">← Atrás</button>
+        <button class="btn green" type="submit">Guardar</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- ========== BUSCAR ========== -->
+  <section id="view-search" class="view" hidden>
+    <div class="card form-card blue-border">
+      <h2>Buscar paciente</h2>
+      <div class="search-layout">
+        <div class="search-col">
+          <div class="searchbox">
+            <input id="search-input" placeholder="Nombre completo…" autocomplete="off">
+            <span class="search-ico">🔍</span>
+          </div>
+          <ul id="suggestions" class="suggestions"></ul>
+        </div>
+        <div class="data-col card inner" id="patient-data">
+          <h3>Datos</h3>
+          <p class="muted" id="pd-empty">Selecciona un paciente de la lista.</p>
+          <dl id="pd-body" hidden></dl>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn ghost" type="button" data-nav="home">← Atrás</button>
+        <button class="btn ghost" id="btn-history" type="button" disabled>Ver historial</button>
+        <button class="btn blue" id="btn-start-therapy" type="button" disabled>Iniciar terapia</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== SESIÓN ========== -->
+  <section id="view-session" class="view" hidden>
+    <div class="session-head card">
+      <div>
+        <h2 id="s-name">—</h2>
+        <p class="muted" id="s-dob">—</p>
+      </div>
+      <div class="timer"><span class="muted">Tiempo de sesión</span><b id="s-time">00:00</b></div>
+    </div>
+
+    <!-- Calibración -->
+    <div class="card" id="cal-card">
+      <h3>Calibración</h3>
+      <div id="cal-intro">
+        <div class="grid3 session-meta">
+          <label>Músculo / lado de los electrodos<input id="m-electrodo" placeholder="p. ej. extensores cervicales, bilateral"></label>
+          <label>Posición del niño<input id="m-posicion" placeholder="p. ej. prono sobre cuña"></label>
+          <label>Fisioterapeuta<input id="m-fisio"></label>
+        </div>
+        <label>Notas de la sesión<input id="m-notas"></label>
+        <p class="muted small-text" id="cal-plan"></p>
+        <div class="form-actions left">
+          <button class="btn primary" id="btn-cal-start" type="button">Iniciar calibración</button>
+          <button class="btn ghost" id="btn-cal-reuse" type="button" hidden>Usar calibración de la última sesión</button>
+        </div>
+      </div>
+
+      <div id="cal-progress" hidden>
+        <ol class="stepper">
+          <li id="st-rest"><b>1 · Reposo</b><span class="st-time"></span></li>
+          <li id="st-passive"><b>2 · Pasiva</b><span class="st-time"></span></li>
+          <li id="st-active"><b>3 · Activa</b><span class="st-time"></span></li>
+        </ol>
+        <div class="cue" id="cue">
+          <div class="cue-title" id="cue-title">—</div>
+          <div class="cue-text" id="cue-text"></div>
+          <div class="cue-count" id="cue-count"></div>
+        </div>
+        <div class="bar"><div id="cal-bar"></div></div>
+        <div class="form-actions left"><button class="btn ghost" id="btn-cal-cancel" type="button">Cancelar calibración</button></div>
+      </div>
+
+      <div id="cal-result" hidden>
+        <p><b>Calibración lista.</b> <span class="muted" id="cal-result-date"></span></p>
+        <div class="cal-grid" id="cal-values"></div>
+        <ul class="warnings" id="cal-warnings"></ul>
+        <div class="form-actions left">
+          <button class="btn primary" id="btn-run-start" type="button">▶ Comenzar monitoreo</button>
+          <button class="btn ghost" id="btn-cal-redo" type="button">Repetir calibración</button>
+        </div>
+      </div>
+
+      <div id="cal-compact" hidden class="muted small-text"></div>
+    </div>
+
+    <!-- Gráfica en vivo -->
+    <div class="card">
+      <div class="row-between">
+        <h3>Señal EMG (tiempo real)</h3>
+        <div class="legend">
+          <span><i class="sw sw-signal"></i>EMG filtrada</span>
+          <span><i class="sw sw-env"></i>Envolvente</span>
+          <span><i class="sw sw-thr"></i>Umbral</span>
+          <span><i class="sw sw-valid"></i>Activación válida</span>
+          <label class="inline">Ventana
+            <select id="win-sel"><option value="10">10 s</option><option value="15" selected>15 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
+          </label>
+        </div>
+      </div>
+      <canvas id="live" class="live"></canvas>
+      <div class="gauge-row"><span class="muted">Activación ahora</span>
+        <div class="gauge"><div id="gauge-fill"></div><div id="gauge-mark"></div></div>
+        <b id="gauge-val">—</b></div>
+    </div>
+
+    <!-- Métricas -->
+    <div class="kpis">
+      <div class="kpi"><span>Activaciones cervicales válidas</span><b id="k-count">0</b><small id="k-disc"></small></div>
+      <div class="kpi"><span>Tiempo activo válido total</span><b id="k-active">0.0 s</b><small id="k-pct"></small></div>
+      <div class="kpi"><span>Contracción más larga</span><b id="k-max">0.0 s</b><small id="k-cur"></small></div>
+      <div class="kpi"><span>RMS normalizado (media)</span><b id="k-rms">—</b><small>% de la contracción de referencia</small></div>
+      <div class="kpi"><span>Tiempo total de sesión</span><b id="k-time">00:00</b><small id="k-cal"></small></div>
+    </div>
+
+    <!-- Tabla -->
+    <div class="card">
+      <div class="row-between">
+        <h3>Activaciones</h3>
+        <label class="inline"><input type="checkbox" id="tech-toggle"> Mostrar valores técnicos (RMS, MAV, MDF, MNF)</label>
+      </div>
+      <div class="table-wrap">
+        <table id="act-table">
+          <thead><tr>
+            <th>Activación</th><th>Inicio</th><th>Duración (s)</th><th>RMS norm. (%)</th>
+            <th class="tech">RMS (mV)</th><th class="tech">MAV (mV)</th><th class="tech">MDF (Hz)</th><th class="tech">MNF (Hz)</th>
+          </tr></thead>
+          <tbody id="act-body"><tr><td colspan="8" class="muted">Sin activaciones todavía.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="form-actions bottom">
+      <button class="btn ghost" id="btn-csv" type="button">Guardar datos en CSV</button>
+      <button class="btn danger" id="btn-finish" type="button">Finalizar terapia</button>
+    </div>
+  </section>
+
+  <!-- ========== HISTORIAL ========== -->
+  <section id="view-history" class="view" hidden>
+    <div class="card">
+      <div class="row-between">
+        <div><h2 id="h-name">—</h2><p class="muted" id="h-sub"></p></div>
+        <div class="form-actions left">
+          <button class="btn ghost" id="btn-hist-csv" type="button">Exportar historial CSV</button>
+          <button class="btn ghost" data-nav="search" type="button">← Pacientes</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row-between">
+        <h3>Progreso entre sesiones</h3>
+        <label class="inline">Métrica
+          <select id="h-metric">
+            <option value="pctActivo">% del tiempo con cabeza arriba</option>
+            <option value="maxContrS">Contracción más larga (s)</option>
+            <option value="medContrS">Duración media de contracción (s)</option>
+            <option value="activaciones">N.º de activaciones válidas</option>
+            <option value="tiempoActivoS">Tiempo activo válido total (s)</option>
+            <option value="rmsNormMedio">RMS normalizado medio (%)</option>
+            <option value="mdfMedio">Frecuencia mediana MDF (Hz)</option>
+          </select>
+        </label>
+      </div>
+      <div class="chart-wrap"><canvas id="prog" class="prog"></canvas><div id="prog-tip" class="tip" hidden></div></div>
+      <p id="h-summary" class="summary"></p>
+      <p class="muted small-text">Línea punteada = tendencia. El % de tiempo y la contracción más larga son las más comparables entre sesiones
+        de distinta duración. Ten en cuenta que la colocación de electrodos y la calibración cambian de una sesión a otra.</p>
+    </div>
+    <div class="card">
+      <h3>Sesiones</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Fecha</th><th>Duración</th><th>Activ.</th><th>T. activo (s)</th><th>% activo</th><th>Máx (s)</th><th>RMS norm. (%)</th><th></th></tr></thead>
+        <tbody id="h-body"></tbody>
+      </table></div>
+    </div>
+  </section>
+</main>
+
+<!-- ========== AJUSTES ========== -->
+<dialog id="dlg-settings">
+  <form method="dialog" id="form-settings">
+    <h2>Ajustes</h2>
+    <div id="settings-fields" class="grid3"></div>
+    <hr>
+    <h3>Datos</h3>
+    <div class="form-actions left">
+      <button class="btn ghost" type="button" id="btn-backup">Descargar respaldo (JSON)</button>
+      <button class="btn ghost" type="button" id="btn-restore">Importar respaldo…</button>
+      <input type="file" id="file-restore" accept=".json" hidden>
+    </div>
+    <div class="form-actions">
+      <button class="btn ghost" value="cancel" type="submit">Cancelar</button>
+      <button class="btn primary" id="btn-save-settings" type="button">Guardar</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="js/dsp.js"></script>
+<script src="js/calibration.js"></script>
+<script src="js/sources.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
