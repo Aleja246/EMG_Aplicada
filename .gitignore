@@ -1,0 +1,6 @@
+# Nunca subas datos de pacientes a GitHub
+*.csv
+*.xlsx
+backup-*.json
+.DS_Store
+node_modules/
