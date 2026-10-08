@@ -18,7 +18,7 @@ Electrodos → sensor sEMG → pin A1 (ADC 14 bits, 2000 Hz) → Arduino → USB
 - El Arduino **solo muestrea y envía** números crudos (`emg_stream.ino`), en paquetes de 20 muestras (10 ms) con contador y checksum.
 - La página pide permiso para usar el puerto serial (**Conectar Arduino** → eliges el puerto; el navegador lo exige por seguridad, una vez por sesión).
 - Requisitos: Chrome/Edge de escritorio (Firefox y Safari no soportan Web Serial), HTTPS o `localhost`/archivo local, y **Monitor Serie cerrado**.
-- Todo el procesamiento (notch, pasa altas, envolvente, RMS/MAV/MNF/MDF) se hace en el navegador, igual que en tu código base. Así puedes cambiar filtros y umbrales sin re-flashear.
+- Todo el procesamiento (notch, pasa altas, envolvente, RMS/MAV) se hace en el navegador, igual que en tu código base. Así puedes cambiar filtros y umbrales sin re-flashear.
 - Si tu placa no es de 14 bits, ajusta «Máximo del ADC» en Ajustes (1023 para 10 bits). La frecuencia de muestreo debe coincidir con el firmware (2000 Hz).
 
 ### Indicadores de conexión y alarmas
@@ -34,7 +34,7 @@ Arriba a la derecha: chip **verde con punto que pulsa** = llegan datos (muestra 
 Con **Simulación → «Simular falla…»** puedes ver cada alarma sin hardware.
 
 ## 3. Tiempo real y números
-La gráfica (señal filtrada + envolvente) se redibuja a ~60 cuadros/s, sin retraso apreciable (el retardo propio de la envolvente a 5 Hz es ~100 ms). Los números (activaciones, tiempos, RMS) se refrescan 4 veces por segundo: es suficiente para leerlos y no satura la pantalla. Las métricas por activación (RMS, MAV, MNF, MDF) se fijan cuando la activación termina.
+La gráfica (señal filtrada + envolvente) se redibuja a ~60 cuadros/s, sin retraso apreciable (el retardo propio de la envolvente a 5 Hz es ~100 ms). Los números (activaciones, tiempos, RMS) se refrescan 4 veces por segundo: es suficiente para leerlos y no satura la pantalla. Las métricas por activación (RMS, MAV) se fijan cuando la activación termina.
 
 ## 4. Calibración (10 s reposo · 10 s pasiva · 5 repeticiones activas)
 | Fase | Qué se mide | Para qué |
@@ -51,13 +51,13 @@ El sistema las trata así: una activación solo es **válida** si la envolvente 
 ## 5. Métricas y progreso
 Métricas solicitadas: número de activaciones cervicales válidas, tiempo activo válido total, duración de cada contracción, RMS normalizado, tiempo total de sesión.
 
-**¿Mostrar RMS/MAV/MNF/MDF crudos?** Para el fisioterapeuta lo útil es: duración, % del tiempo con la cabeza arriba y RMS normalizado (esfuerzo relativo). Los valores crudos dependen de electrodos y ganancia y no son comparables entre días; por eso van ocultos por defecto y se activan con «Mostrar valores técnicos». MDF/MNF sirven para ver **fatiga** (bajan al sostener).
+**¿Mostrar RMS/MAV crudos?** Para el fisioterapeuta lo útil es: duración, % del tiempo con la cabeza arriba y RMS normalizado (esfuerzo relativo). Los valores crudos dependen de electrodos y ganancia y no son comparables entre días; por eso van ocultos por defecto y se activan con «Mostrar valores técnicos».
 
 **Cómo cuantificar el progreso** (el objetivo: mantener la cabeza arriba más tiempo):
 1. **% del tiempo de sesión con cabeza arriba** (tiempo activo válido / tiempo total) — métrica principal.
 2. **Contracción más larga** y **duración media** — resistencia.
 3. **N.º de activaciones** — sirve si crece el tiempo con pocas interrupciones, o decrece con mayor duración cada una.
-4. **RMS normalizado** y **MDF** — calidad del esfuerzo y fatiga.
+4. **RMS normalizado** — esfuerzo relativo.
 
 En **Historial** se grafica cualquiera de estas por sesión con línea de tendencia y la comparación «primeras 3 vs. últimas 3 sesiones». Precaución: la colocación de electrodos y la calibración varían entre sesiones; por eso la normalización se hace por sesión y los tiempos (1–2) son lo más confiable. Mantén sesiones de duración y posición similares y anótalas (campos «Posición» y «Músculo/electrodos»).
 

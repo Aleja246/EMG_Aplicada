@@ -203,15 +203,15 @@
     <div class="card">
       <div class="row-between">
         <h3>Activaciones</h3>
-        <label class="inline"><input type="checkbox" id="tech-toggle"> Mostrar valores técnicos (RMS, MAV, MDF, MNF)</label>
+        <label class="inline"><input type="checkbox" id="tech-toggle"> Mostrar valores técnicos (RMS, MAV)</label>
       </div>
       <div class="table-wrap">
         <table id="act-table">
           <thead><tr>
             <th>Activación</th><th>Inicio</th><th>Duración (s)</th><th>RMS norm. (%)</th>
-            <th class="tech">RMS (mV)</th><th class="tech">MAV (mV)</th><th class="tech">MDF (Hz)</th><th class="tech">MNF (Hz)</th>
+            <th class="tech">RMS (mV)</th><th class="tech">MAV (mV)</th>
           </tr></thead>
-          <tbody id="act-body"><tr><td colspan="8" class="muted">Sin activaciones todavía.</td></tr></tbody>
+          <tbody id="act-body"><tr><td colspan="6" class="muted">Sin activaciones todavía.</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -244,7 +244,6 @@
             <option value="activaciones">N.º de activaciones válidas</option>
             <option value="tiempoActivoS">Tiempo activo válido total (s)</option>
             <option value="rmsNormMedio">RMS normalizado medio (%)</option>
-            <option value="mdfMedio">Frecuencia mediana MDF (Hz)</option>
           </select>
         </label>
       </div>

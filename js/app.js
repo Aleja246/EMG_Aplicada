@@ -338,9 +338,9 @@
   }
   function renderTable(live, liveValid) {
     const tb = $('act-body'); tb.innerHTML = '';
-    const rows = acts.map((s, i) => [i + 1, clock(s.tStart), f1(s.dur), Math.round(s.rmsNorm), f2(s.rms), f2(s.mav), f1(s.mdf), f1(s.mnf)]);
-    if (liveValid) rows.push([acts.length + 1 + ' (en curso)', clock(live.tStart || 0), f1(live.dur), Math.round(100 * live.rms / calResult.activeRms), f2(live.rms), f2(live.mav), '…', '…']);
-    if (!rows.length) { tb.innerHTML = '<tr><td colspan="8" class="muted">Sin activaciones todavía.</td></tr>'; return; }
+    const rows = acts.map((s, i) => [i + 1, clock(s.tStart), f1(s.dur), Math.round(s.rmsNorm), f2(s.rms), f2(s.mav)]);
+    if (liveValid) rows.push([acts.length + 1 + ' (en curso)', clock(live.tStart || 0), f1(live.dur), Math.round(100 * live.rms / calResult.activeRms), f2(live.rms), f2(live.mav)]);
+    if (!rows.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">Sin activaciones todavía.</td></tr>'; return; }
     rows.slice().reverse().forEach((r, k) => {
       const tr = document.createElement('tr'); if (liveValid && k === 0) tr.className = 'live-row';
       r.forEach((v, c) => { const td = document.createElement('td'); td.textContent = v; if (c > 3) td.className = 'tech'; tr.appendChild(td); });
@@ -359,13 +359,13 @@
       electrodo: $('m-electrodo').value.trim(), posicion: $('m-posicion').value.trim(), fisio: $('m-fisio').value.trim(), notas: $('m-notas').value.trim(),
       calibracion: calResult, umbralMV: thr ? thr.onThr : null,
       resumen: { activaciones: acts.length, tiempoActivoS: tot, pctActivo: t > 0 ? 100 * tot / t : 0, maxContrS: Math.max(0, ...acts.map(s => s.dur)),
-        medContrS: acts.length ? tot / acts.length : 0, rmsNormMedio: mean('rmsNorm'), mdfMedio: mean('mdf'), mnfMedio: mean('mnf'), descartadas: discarded },
-      activaciones: acts.map((s, i) => ({ n: i + 1, inicioS: s.tStart, finS: s.tEnd, durS: s.dur, rms: s.rms, mav: s.mav, mdf: s.mdf, mnf: s.mnf, rmsNorm: s.rmsNorm }))
+        medContrS: acts.length ? tot / acts.length : 0, rmsNormMedio: mean('rmsNorm'), descartadas: discarded },
+      activaciones: acts.map((s, i) => ({ n: i + 1, inicioS: s.tStart, finS: s.tEnd, durS: s.dur, rms: s.rms, mav: s.mav, rmsNorm: s.rmsNorm }))
     };
   }
   function activationsCSV(rec, p) {
-    const H = ['paciente', 'expediente', 'gmfcs', 'fecha_sesion', 'activacion', 'inicio_s', 'fin_s', 'duracion_s', 'rms_mV', 'mav_mV', 'mdf_Hz', 'mnf_Hz', 'rms_norm_pct', 'rms_referencia_mV'];
-    const rows = rec.activaciones.map(a => [fullName(p), p.expediente || '', p.gmfcs, rec.fecha, a.n, a.inicioS, a.finS, a.durS, a.rms, a.mav, a.mdf, a.mnf, a.rmsNorm, rec.calibracion ? rec.calibracion.activeRms : '']);
+    const H = ['paciente', 'expediente', 'gmfcs', 'fecha_sesion', 'activacion', 'inicio_s', 'fin_s', 'duracion_s', 'rms_mV', 'mav_mV', 'rms_norm_pct', 'rms_referencia_mV'];
+    const rows = rec.activaciones.map(a => [fullName(p), p.expediente || '', p.gmfcs, rec.fecha, a.n, a.inicioS, a.finS, a.durS, a.rms, a.mav, a.rmsNorm, rec.calibracion ? rec.calibracion.activeRms : '']);
     E.download(E.slug(fullName(p)) + '_' + rec.fecha.slice(0, 16).replace(/[:T]/g, '-') + '_activaciones.csv', E.toCSV(H, rows));
   }
   $('btn-csv').addEventListener('click', () => {
@@ -391,7 +391,7 @@
 
   /* ---------- historial ---------- */
   const METRICS = { pctActivo: ['% del tiempo', '%'], maxContrS: ['Contracción más larga', 's'], medContrS: ['Duración media', 's'], activaciones: ['Activaciones', ''],
-    tiempoActivoS: ['Tiempo activo', 's'], rmsNormMedio: ['RMS normalizado', '%'], mdfMedio: ['MDF', 'Hz'] };
+    tiempoActivoS: ['Tiempo activo', 's'], rmsNormMedio: ['RMS normalizado', '%'] };
   function renderHistory() {
     const p = patient; if (!p) return show('search');
     const ses = E.Store.sessionsFor(p.id);
@@ -423,8 +423,8 @@
   $('h-metric').addEventListener('change', renderHistory);
   $('btn-hist-csv').addEventListener('click', () => {
     const ses = E.Store.sessionsFor(patient.id);
-    const H = ['paciente', 'expediente', 'gmfcs', 'fecha', 'duracion_s', 'activaciones', 'tiempo_activo_s', 'pct_activo', 'max_contraccion_s', 'media_contraccion_s', 'rms_norm_medio_pct', 'mdf_medio_Hz', 'mnf_medio_Hz', 'descartadas', 'electrodo', 'posicion', 'fisio', 'notas'];
-    E.download(E.slug(fullName(patient)) + '_historial.csv', E.toCSV(H, ses.map(s => [fullName(patient), patient.expediente || '', patient.gmfcs, s.fecha, s.duracionS, s.resumen.activaciones, s.resumen.tiempoActivoS, s.resumen.pctActivo, s.resumen.maxContrS, s.resumen.medContrS, s.resumen.rmsNormMedio, s.resumen.mdfMedio, s.resumen.mnfMedio, s.resumen.descartadas, s.electrodo, s.posicion, s.fisio, s.notas])));
+    const H = ['paciente', 'expediente', 'gmfcs', 'fecha', 'duracion_s', 'activaciones', 'tiempo_activo_s', 'pct_activo', 'max_contraccion_s', 'media_contraccion_s', 'rms_norm_medio_pct', 'descartadas', 'electrodo', 'posicion', 'fisio', 'notas'];
+    E.download(E.slug(fullName(patient)) + '_historial.csv', E.toCSV(H, ses.map(s => [fullName(patient), patient.expediente || '', patient.gmfcs, s.fecha, s.duracionS, s.resumen.activaciones, s.resumen.tiempoActivoS, s.resumen.pctActivo, s.resumen.maxContrS, s.resumen.medContrS, s.resumen.rmsNormMedio, s.resumen.descartadas, s.electrodo, s.posicion, s.fisio, s.notas])));
   });
 
   /* ---------- ajustes ---------- */
