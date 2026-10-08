@@ -2,7 +2,7 @@
  * Cadena: raw ADC -> quitar DC -> pasa altas 4º orden (latido/movimiento)
  *         -> notch 60 Hz -> señal filtrada (mV)
  *         -> |x| -> pasa bajas 5 Hz -> envolvente (mV)
- * Métricas por contracción: RMS, MAV, MNF, MDF (Welch 1024 pts).
+ * Métricas por contracción: RMS y MAV.
  */
 (function () {
   'use strict';
@@ -23,7 +23,7 @@
     trimStart: 0,    // s ignorados al inicio de cada activación para RMS/MAV
     restS: 10, passiveS: 10, reps: 5, holdS: 4, relaxS: 4,
     winS: 15,        // ventana visible de la gráfica (s)
-    techView: false, // mostrar RMS/MAV/MNF/MDF crudos en la tabla
+    techView: false, // mostrar RMS/MAV crudos en la tabla
     sound: true,
     sheetsUrl: '', sheetsName: false
   };
@@ -82,60 +82,6 @@
     }
   }
 
-  function fft(re, im) {
-    const n = re.length;
-    for (let i = 1, j = 0; i < n; i++) {
-      let bit = n >> 1;
-      for (; j & bit; bit >>= 1) j ^= bit;
-      j ^= bit;
-      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
-    }
-    for (let len = 2; len <= n; len <<= 1) {
-      const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
-      for (let i = 0; i < n; i += len) {
-        let cr = 1, ci = 0;
-        for (let k = 0; k < len / 2; k++) {
-          const a = i + k, b = a + len / 2;
-          const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
-          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
-          const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
-        }
-      }
-    }
-  }
-
-  // Frecuencia media (MNF) y mediana (MDF) con periodograma de Welch, 20-450 Hz
-  function spectralFreqs(x, fs, nfft) {
-    nfft = nfft || 1024;
-    const psd = new Float64Array(nfft / 2 + 1);
-    const re = new Float64Array(nfft), im = new Float64Array(nfft);
-    const win = new Float64Array(nfft);
-    for (let i = 0; i < nfft; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (nfft - 1));
-    let mean = 0;
-    for (let i = 0; i < x.length; i++) mean += x[i];
-    mean /= x.length;
-    const step = nfft / 2;
-    const starts = [];
-    for (let s = 0; s + nfft <= x.length; s += step) starts.push(s);
-    if (!starts.length) starts.push(0); // segmentos cortos: relleno con ceros
-    for (const s of starts) {
-      for (let i = 0; i < nfft; i++) {
-        const v = s + i < x.length ? x[s + i] - mean : 0;
-        re[i] = v * win[i]; im[i] = 0;
-      }
-      fft(re, im);
-      for (let k = 0; k <= nfft / 2; k++) psd[k] += re[k] * re[k] + im[k] * im[k];
-    }
-    const df = fs / nfft;
-    let tot = 0, wsum = 0;
-    const lo = Math.ceil(20 / df), hi = Math.floor(450 / df);
-    for (let k = lo; k <= hi; k++) { tot += psd[k]; wsum += psd[k] * k * df; }
-    if (tot <= 0) return { mnf: NaN, mdf: NaN };
-    let acc = 0, mdf = lo * df;
-    for (let k = lo; k <= hi; k++) { acc += psd[k]; if (acc >= tot / 2) { mdf = k * df; break; } }
-    return { mnf: wsum / tot, mdf };
-  }
-
   // Detecta activaciones sobre la envolvente con histéresis.
   class ActivationDetector {
     constructor(o) {
@@ -182,8 +128,6 @@
         for (let i = 0; i < x.length; i++) { sq += x[i] * x[i]; ab += Math.abs(x[i]); }
         seg.rms = Math.sqrt(sq / x.length);
         seg.mav = ab / x.length;
-        const f = spectralFreqs(x, this.fs, 1024);
-        seg.mnf = f.mnf; seg.mdf = f.mdf;
       }
       this.reset();
       return seg;
@@ -216,5 +160,5 @@
     }
   }
 
-  Object.assign(EMG, { Biquad, Processor, ActivationDetector, SignalQuality, spectralFreqs, fft });
+  Object.assign(EMG, { Biquad, Processor, ActivationDetector, SignalQuality });
 })();

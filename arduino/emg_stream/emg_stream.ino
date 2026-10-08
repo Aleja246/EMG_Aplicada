@@ -1,7 +1,7 @@
 /*
   emg_stream.ino — Envía la señal sEMG CRUDA a la página web por USB.
 
-  Todo el procesamiento (notch, pasa altas, envolvente, RMS, MAV, MNF/MDF) se hace
+  Todo el procesamiento (notch, pasa altas, envolvente, RMS, MAV) se hace
   en el navegador, así que aquí solo se muestrea a 2000 Hz y se transmite.
 
   Protocolo (binario, 20 muestras = 10 ms por paquete):

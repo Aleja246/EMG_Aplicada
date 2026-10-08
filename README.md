@@ -15,7 +15,7 @@ calibración en 3 fases, señal y envolvente en tiempo real, métricas por activ
 |---|---|
 | `index.html` | Todas las pantallas (inicio, registro, búsqueda, sesión, historial, ajustes) |
 | `css/style.css` | Estilos |
-| `js/dsp.js` | Filtros (pasa altas, notch, envolvente), RMS, MAV, MNF/MDF, detección de activaciones, calidad de señal |
+| `js/dsp.js` | Filtros (pasa altas, notch, envolvente), RMS, MAV, detección de activaciones, calidad de señal |
 | `js/calibration.js` | Calibración reposo / pasiva / activa y cálculo de umbrales |
 | `js/sources.js` | Conexión con Arduino (Web Serial) y simulador |
 | `js/storage.js` | Guardado local, CSV, respaldo, envío a Google Sheets |
