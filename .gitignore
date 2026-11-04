@@ -6,3 +6,5 @@ backup-*.json
 arduino_secrets.h
 .DS_Store
 node_modules/
+__pycache__/
+*.pyc
