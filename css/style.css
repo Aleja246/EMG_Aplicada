@@ -123,3 +123,14 @@ dialog::backdrop { background: rgba(15,23,42,.5); }
   .grid2, .grid3, .search-layout { grid-template-columns: 1fr; }
   .timer { text-align: left; } canvas.live { height: 240px; }
 }
+
+/* Registro de señal y monitor */
+.rec-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .7rem; padding-top: .7rem; border-top: 1px solid var(--line); }
+.rec-bar.recording .rec-status { color: var(--red); font-weight: 700; }
+.rec-bar.recording .rec-start { background: var(--red); border-color: var(--red); }
+.src-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .6rem; margin: .6rem 0; }
+.src-grid div { background: #f3f6f8; padding: .5rem .7rem; border-radius: 8px; }
+.src-grid span { display: block; font-size: .8rem; color: var(--muted); }
+.src-grid b { font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+.src-grid .bad b { color: var(--red); } .src-grid .ok b { color: var(--green); }
+#btn-wifi.on { background: var(--green); border-color: var(--green); }

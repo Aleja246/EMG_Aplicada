@@ -18,6 +18,7 @@
   /* Señal EMG + envolvente en tiempo real (buffer circular, mín/máx por columna de píxeles). */
   class LiveChart {
     constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.thr = null; this.setWindow(15); }
+    setFs(fs) { if (fs && fs !== this.fs) { this.fs = fs; this.setWindow(this.win); } }
     setWindow(s) {
       this.win = s; this.N = Math.round(s * this.fs);
       this.sig = new Float32Array(this.N); this.env = new Float32Array(this.N);

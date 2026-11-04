@@ -1,7 +1,11 @@
 /* Procesamiento digital de la señal sEMG (corre en el navegador).
- * Cadena: raw ADC -> quitar DC -> pasa altas 4º orden (latido/movimiento)
- *         -> notch 60 Hz -> señal filtrada (mV)
- *         -> |x| -> pasa bajas 5 Hz -> envolvente (mV)
+ * Entrada 'cuentas' (Arduino por USB, emg_stream.ino):
+ *   raw ADC -> quitar DC -> pasa altas 4º orden (latido/movimiento)
+ *           -> notch 60 Hz -> señal filtrada (mV)
+ * Entrada 'mV' (Arduino UNO R4 por WiFi, diagnostico_emg_enlace_wifi.ino):
+ *   la señal ya llega filtrada por el Arduino (DC, notch 60..420 Hz): se usa tal cual,
+ *   es la misma SinArm de la que sale el RMS que va al ESP32.
+ * En ambos casos: |x| -> pasa bajas 5 Hz -> envolvente (mV).
  * Métricas por contracción: RMS y MAV.
  */
 (function () {
@@ -25,7 +29,8 @@
     winS: 15,        // ventana visible de la gráfica (s)
     techView: false, // mostrar RMS/MAV crudos en la tabla
     sound: true,
-    sheetsUrl: '', sheetsName: false
+    sheetsUrl: '', sheetsName: false,
+    wifiUrl: 'ws://127.0.0.1:8787'   // puente local (puente/puente_emg.py)
   };
 
   // Filtro biquad (forma transpuesta II), coeficientes RBJ
@@ -64,10 +69,17 @@
       this.notch = Biquad.notch(o.notchHz, o.notchQ, fs);
       this.lp = Biquad.lowpass(o.lpHz, 0.7071, fs);
       this.scale = o.vref / o.adcMax / o.gain; // cuentas -> mV
+      this.mV = o.entrada === 'mV';            // la señal ya viene filtrada y en mV
       this.dc = null;
       this.x = 0; this.env = 0; this.hpOut = 0;
     }
     process(raw) {
+      if (this.mV) {
+        this.hpOut = raw; this.x = raw;
+        this.env = this.lp.process(Math.abs(raw));
+        if (this.env < 0) this.env = 0;
+        return raw;
+      }
       if (this.dc === null) this.dc = raw;        // evita transitorio inicial
       this.dc += 0.001 * (raw - this.dc);
       let v = (raw - this.dc) * this.scale;
@@ -136,11 +148,12 @@
 
   // Calidad de señal / conexión: se evalúa cada ~500 ms
   class SignalQuality {
-    constructor(adcMax) { this.adcMax = adcMax; this.reset(); }
+    // entrada 'cuentas': valores del ADC; 'mV': señal ya filtrada (sin DC) del Arduino por WiFi
+    constructor(adcMax, entrada) { this.adcMax = adcMax; this.mV = entrada === 'mV'; this.reset(); }
     reset() { this.n = 0; this.sum = 0; this.sumsq = 0; this.sat = 0; this.hpE = 0; this.nE = 0; }
     feed(raw, hp, xn) {
       this.n++; this.sum += raw; this.sumsq += raw * raw;
-      if (raw <= this.adcMax * 0.01 || raw >= this.adcMax * 0.99) this.sat++;
+      if (this.mV ? Math.abs(raw) >= 2000 : (raw <= this.adcMax * 0.01 || raw >= this.adcMax * 0.99)) this.sat++;
       this.hpE += hp * hp; this.nE += xn * xn;
     }
     evaluate() {
@@ -149,11 +162,12 @@
       const sd = Math.sqrt(Math.max(0, this.sumsq / this.n - mean * mean));
       const satFrac = this.sat / this.n;
       const ratio60 = this.hpE > 0 ? 1 - this.nE / this.hpE : 0; // energía que quitó el notch
+      const plano = this.mV ? 0.2 : 1.5;     // mV (≈ 2/3 de un paso del ADC de 14 bits) o cuentas ADC
       const r = {
         sd, satFrac, ratio60,
         saturated: satFrac > 0.2,
-        flat: sd < 1.5,                       // cuentas ADC
-        noisy60: ratio60 > 0.7 && sd >= 1.5
+        flat: sd < plano,
+        noisy60: !this.mV && ratio60 > 0.7 && sd >= plano   // por WiFi el Arduino ya quitó la red
       };
       this.reset();
       return r;

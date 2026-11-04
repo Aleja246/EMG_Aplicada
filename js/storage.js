@@ -62,6 +62,14 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
+  // Archivos grandes: se arma por partes (no un solo string gigante)
+  function downloadParts(filename, parts, mime) {
+    const blob = new Blob(['\ufeff'].concat(parts), { type: (mime || 'text/csv') + ';charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
   const slug = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '');
 
   async function sendToSheets(url, payload) {
@@ -70,5 +78,5 @@
       body: JSON.stringify(payload) });
   }
 
-  EMG.Store = Store; EMG.toCSV = toCSV; EMG.download = download; EMG.slug = slug; EMG.sendToSheets = sendToSheets;
+  EMG.Store = Store; EMG.toCSV = toCSV; EMG.download = download; EMG.downloadParts = downloadParts; EMG.slug = slug; EMG.sendToSheets = sendToSheets;
 })();

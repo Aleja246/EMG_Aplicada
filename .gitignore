@@ -2,5 +2,7 @@
 *.csv
 *.xlsx
 backup-*.json
+# Clave del WiFi del Arduino (usa arduino_secrets_ejemplo.h como plantilla)
+arduino_secrets.h
 .DS_Store
 node_modules/

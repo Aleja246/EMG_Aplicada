@@ -12,11 +12,14 @@ Este trabajo está en la rama `claude/semg-web-interface-9g04cw`. Para publicarl
 Alternativa sin GitHub: doble clic en `index.html`. Funciona igual (los datos se guardan por navegador y por dirección, así que no se comparten entre «archivo local» y «GitHub Pages»; usa el respaldo JSON para moverlos).
 
 ## 2. Cómo se comunica el Arduino con la página
+
+> **ASTRA con Arduino UNO R4 WiFi (inalámbrico):** ver [`WIFI.md`](WIFI.md). Esta sección describe la conexión por cable USB.
+
 ```
 Electrodos → sensor sEMG → pin A1 (ADC 14 bits, 2000 Hz) → Arduino → USB (serial) → Navegador (Web Serial) → filtros/métricas en JavaScript → pantalla
 ```
 - El Arduino **solo muestrea y envía** números crudos (`emg_stream.ino`), en paquetes de 20 muestras (10 ms) con contador y checksum.
-- La página pide permiso para usar el puerto serial (**Conectar Arduino** → eliges el puerto; el navegador lo exige por seguridad, una vez por sesión).
+- La página pide permiso para usar el puerto serial (**Arduino USB** → eliges el puerto; el navegador lo exige por seguridad, una vez por sesión).
 - Requisitos: Chrome/Edge de escritorio (Firefox y Safari no soportan Web Serial), HTTPS o `localhost`/archivo local, y **Monitor Serie cerrado**.
 - Todo el procesamiento (notch, pasa altas, envolvente, RMS/MAV) se hace en el navegador, igual que en tu código base. Así puedes cambiar filtros y umbrales sin re-flashear.
 - Si tu placa no es de 14 bits, ajusta «Máximo del ADC» en Ajustes (1023 para 10 bits). La frecuencia de muestreo debe coincidir con el firmware (2000 Hz).

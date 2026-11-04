@@ -16,7 +16,8 @@
     <div class="chip" id="conn-chip" title="Estado de la conexión con el Arduino">
       <span class="dot" id="conn-dot"></span><span id="conn-text">Arduino: sin conexión</span>
     </div>
-    <button class="btn small" id="btn-connect" type="button">Conectar Arduino</button>
+    <button class="btn small" id="btn-connect" type="button" title="Arduino conectado por cable USB (Web Serial)">Arduino USB</button>
+    <button class="btn small" id="btn-wifi" type="button" title="Arduino UNO R4 WiFi a través del puente local (puente_emg.py)">Arduino WiFi</button>
     <button class="btn small ghost" id="btn-sim" type="button">Simulación</button>
     <select class="btn small ghost" id="sim-fault" hidden title="Probar alarmas">
       <option value="">Simular falla…</option><option value="disconnect">Electrodo desconectado</option><option value="flat">Señal plana</option>
@@ -38,6 +39,7 @@
         <button class="btn big green" id="go-register" type="button">Registrar paciente</button>
         <button class="btn big blue" id="go-search" type="button">Buscar paciente</button>
       </div>
+      <p><button class="btn ghost" id="go-monitor" type="button">Monitor y registro de señal (sin paciente)</button></p>
     </div>
     <div class="card">
       <h3>Resumen</h3>
@@ -188,6 +190,12 @@
       <div class="gauge-row"><span class="muted">Activación ahora</span>
         <div class="gauge"><div id="gauge-fill"></div><div id="gauge-mark"></div></div>
         <b id="gauge-val">—</b></div>
+      <div class="rec-bar" data-rec>
+        <button class="btn small rec-start" type="button">● Iniciar registro</button>
+        <button class="btn small ghost rec-stop" type="button" disabled>■ Detener</button>
+        <button class="btn small ghost rec-dl" type="button" disabled>⬇ Descargar CSV</button>
+        <span class="rec-status muted small-text">Registro de la señal filtrada (tiempo en s, amplitud en mV).</span>
+      </div>
     </div>
 
     <!-- Métricas -->
@@ -219,6 +227,38 @@
     <div class="form-actions bottom">
       <button class="btn ghost" id="btn-csv" type="button">Guardar datos en CSV</button>
       <button class="btn danger" id="btn-finish" type="button">Finalizar terapia</button>
+    </div>
+  </section>
+
+  <!-- ========== MONITOR (sin paciente) ========== -->
+  <section id="view-monitor" class="view" hidden>
+    <div class="card">
+      <div class="row-between">
+        <div><h2>Monitor de señal</h2>
+          <p class="muted">Ver y registrar la EMG filtrada sin abrir una sesión de paciente.</p></div>
+        <button class="btn ghost" data-nav="home" type="button">← Inicio</button>
+      </div>
+      <div class="src-grid" id="src-info"></div>
+      <p class="muted small-text" id="src-help"></p>
+    </div>
+    <div class="card">
+      <div class="row-between">
+        <h3>EMG filtrada (tiempo real)</h3>
+        <div class="legend">
+          <span><i class="sw sw-signal"></i>EMG filtrada</span>
+          <span><i class="sw sw-env"></i>Envolvente</span>
+          <label class="inline">Ventana
+            <select id="win-sel-mon"><option value="2">2 s</option><option value="5">5 s</option><option value="10" selected>10 s</option><option value="30">30 s</option></select>
+          </label>
+        </div>
+      </div>
+      <canvas id="live-mon" class="live"></canvas>
+      <div class="rec-bar" data-rec>
+        <button class="btn small rec-start" type="button">● Iniciar registro</button>
+        <button class="btn small ghost rec-stop" type="button" disabled>■ Detener</button>
+        <button class="btn small ghost rec-dl" type="button" disabled>⬇ Descargar CSV</button>
+        <span class="rec-status muted small-text">Registro de la señal filtrada (tiempo en s, amplitud en mV).</span>
+      </div>
     </div>
   </section>
 

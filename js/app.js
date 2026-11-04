@@ -24,20 +24,25 @@
 
   /* ---------- estado global ---------- */
   let S = E.Store.settings();
-  let proc, quality, chart, progChart;
+  let proc, quality, chart, chartMon, progChart;
   let view = 'home', patient = null;
   let mode = 'idle';                 // idle | calibrating | calibrated | running
   let cal = null, calResult = null, thr = null, det = null, calSource = '';
-  let runSamples = 0, acts = [], discarded = 0, envT = [], envV = [], sessionStart = null;
+  let runSamples = 0, runFs = 0, acts = [], discarded = 0, envT = [], envV = [], sessionStart = null;
   let source = null, conn = { status: 'disconnected', msg: '' };
   const rx = { lastData: 0, samples: 0, lastCount: 0, lastT: performance.now(), fs: 0, lostSeen: 0, lostAt: 0, connectedAt: 0, pulse: false };
   const qCount = { sat: 0, flat: 0, noisy: 0 }; let qLast = null;
   let prevCrit = new Set();
 
+  // Frecuencia y unidades de la fuente actual (USB/simulación: Ajustes; WiFi: lo que manda el Arduino)
+  const FS = () => (source && source.fs) ? source.fs : S.fs;
+  const entrada = () => (source && source.units === 'mV') ? 'mV' : 'cuentas';
   function rebuildDsp() {
-    proc = new E.Processor(S);
-    quality = new E.SignalQuality(S.adcMax);
-    if (chart) chart.fs = S.fs;
+    const fs = FS();
+    proc = new E.Processor(Object.assign({}, S, { fs, entrada: entrada() }));
+    quality = new E.SignalQuality(S.adcMax, entrada());
+    if (chart) chart.setFs(fs);
+    if (chartMon) chartMon.setFs(fs);
   }
 
   /* ---------- navegación ---------- */
@@ -49,6 +54,7 @@
     if (name === 'search') renderSearch();
     if (name === 'history') renderHistory();
     if (name === 'session') chart.setWindow(S.winS);
+    if (name === 'monitor') { chartMon.setWindow(+$('win-sel-mon').value); renderMonitor(); }
   }
   function goHome() {
     if (view === 'session' && mode === 'running' && !confirm('La terapia sigue en curso. ¿Salir sin finalizar? Los datos de esta sesión se perderán.')) return;
@@ -59,6 +65,7 @@
   $('btn-home').addEventListener('click', goHome);
   $('go-register').addEventListener('click', () => { $('form-register').reset(); show('register'); });
   $('go-search').addEventListener('click', () => show('search'));
+  $('go-monitor').addEventListener('click', () => show('monitor'));
 
   function renderHome() {
     const p = E.Store.patients().length, s = E.Store.sessions().length;
@@ -112,47 +119,81 @@
   $('btn-start-therapy').addEventListener('click', () => { patient = selected; startSession(); });
 
   /* ---------- conexión ---------- */
+  // Cada fuente recibe su propio aviso de estado: si ya no es la fuente activa, se ignora
+  const statusFor = src => (status, msg) => { if (source === src) onStatus(status, msg); };
   function onStatus(status, msg) {
     conn = { status, msg: msg || '' };
     if (status === 'connected') { rx.connectedAt = performance.now(); rx.lastData = performance.now(); rx.lostSeen = 0; qCount.sat = qCount.flat = qCount.noisy = 0; }
     if (status === 'error') toast('Conexión perdida');
     renderConn();
   }
-  function onSamples(arr) {
-    rx.lastData = performance.now(); rx.samples += arr.length; rx.pulse = true;
-    const fs = S.fs;
+  function onSamples(arr, meta) {
+    const gap = meta && meta.gap > 0 ? meta.gap : 0;
+    rx.lastData = performance.now(); rx.samples += arr.length + gap; rx.pulse = true;
+    if (proc.o.fs !== FS()) onFsChange();
+    // Huecos (muestras perdidas por WiFi): se rellenan con 0 para que el eje de tiempo siga exacto
+    if (gap && gap <= 5 * FS()) for (let i = 0; i < gap; i++) step(0, proc.env);
+    const start = meta && meta.start != null ? meta.start : null;
     for (let i = 0; i < arr.length; i++) {
       const raw = arr[i], x = proc.process(raw);
       quality.feed(raw, proc.hpOut, x);
-      let flag = 0;
-      if (mode === 'calibrating') {
-        cal.feed(x, proc.env);
-        if (cal.done) onCalibrationDone();
-      } else if (mode === 'running') {
-        const t = runSamples++ / fs;
-        const seg = det.feed(x, proc.env, t);
-        if (seg) onSegment(seg);
-        if (det.active) flag = (t - det.startT) >= S.minDur ? 2 : 1;
-        if (runSamples % 40 === 0) { envT.push(t); envV.push(proc.env); }
-      }
-      chart.push(x, proc.env, flag);
+      if (rec.active && start !== null) recPush(start + i, x);
+      step(x, proc.env);
     }
   }
+  function step(x, env) {
+    let flag = 0;
+    if (mode === 'calibrating') {
+      cal.feed(x, env);
+      if (cal.done) onCalibrationDone();
+    } else if (mode === 'running') {
+      const t = runSamples++ / runFs;
+      const seg = det.feed(x, env, t);
+      if (seg) onSegment(seg);
+      if (det.active) flag = (t - det.startT) >= S.minDur ? 2 : 1;
+      if (runSamples % Math.max(1, Math.round(runFs / 50)) === 0) { envT.push(t); envV.push(env); }
+    }
+    chart.push(x, env, flag);
+    chartMon.push(x, env, 0);
+  }
+  function onFsChange() {
+    rebuildDsp();
+    if (mode === 'calibrating') { mode = 'idle'; cal = null; applyMode(); toast('Cambió la frecuencia de muestreo de la fuente: repite la calibración.'); }
+    if (rec.active) { recStop(); toast('Se detuvo el registro: cambió la frecuencia de muestreo.'); }
+  }
+  // No se cambia de fuente a mitad de una calibración o terapia (cambiaría fs y unidades)
+  function canSwitch() {
+    if (mode === 'calibrating' || mode === 'running') { alert('Termina o cancela la calibración/terapia antes de cambiar la fuente de señal.'); return false; }
+    if (rec.active) { recStop(); toast('Se detuvo el registro porque cambió la fuente de señal.'); }
+    return true;
+  }
   async function connectArduino() {
+    if (!canSwitch()) return;
     if (source) await disconnect();
     if (!E.SerialSource.supported()) { alert('Este navegador no soporta Web Serial. Usa Google Chrome o Microsoft Edge en una computadora.'); return; }
+    const src = new E.SerialSource(onSamples, (st, m) => statusFor(src)(st, m));
+    source = src; source.fs = S.fs;
     rebuildDsp();
-    source = new E.SerialSource(onSamples, onStatus);
     try { await source.connect(); }
     catch (e) { source = null; onStatus('disconnected'); if (e.name !== 'NotFoundError') toast('No se pudo abrir el puerto: ' + (e.message || e.name) + '. ¿Está abierto el Monitor Serie de Arduino?'); }
   }
-  function startSim() {
-    if (source) disconnect();
-    rebuildDsp();
-    source = new E.SimSource(onSamples, onStatus, () => {
+  async function startSim() {
+    if (!canSwitch()) return;
+    if (source) await disconnect();
+    const src = new E.SimSource(onSamples, (st, m) => statusFor(src)(st, m), () => {
       if (mode === 'calibrating' && cal) { const i = cal.info(); return { phase: i.phase, cueUp: i.cue === 'up' }; }
       return { phase: mode === 'running' ? 'running' : 'idle' };
     }, S.fs);
+    source = src; source.fs = S.fs;
+    rebuildDsp();
+    source.start();
+  }
+  async function startWifi() {
+    if (!canSwitch()) return;
+    if (source) await disconnect();
+    const src = new E.WifiSource(onSamples, (st, m) => statusFor(src)(st, m), S.wifiUrl || E.DEFAULTS.wifiUrl);
+    source = src;
+    rebuildDsp();
     source.start();
   }
   async function disconnect() {
@@ -161,23 +202,34 @@
     conn = { status: 'disconnected', msg: '' }; renderConn();
   }
   $('btn-connect').addEventListener('click', () => (conn.status === 'connected' && source && source.kind === 'arduino') ? disconnect() : connectArduino());
-  $('btn-sim').addEventListener('click', () => (conn.status === 'connected' && source && source.kind !== 'arduino') ? disconnect() : startSim());
+  $('btn-sim').addEventListener('click', () => (conn.status === 'connected' && source && source.kind === 'simulación') ? disconnect() : startSim());
+  $('btn-wifi').addEventListener('click', () => (source && source.kind === 'wifi') ? disconnect() : startWifi());
   $('sim-fault').addEventListener('change', e => { if (source && source.setFault) source.setFault(e.target.value || null); });
   if (navigator.serial) navigator.serial.addEventListener('disconnect', () => { if (source && source.kind === 'arduino') onStatus('error', 'Se desconectó el cable USB'); });
 
   function renderConn() {
     const chip = $('conn-chip'), t = $('conn-text'), c = conn.status;
-    const live = source && source.kind === 'arduino' ? 'Arduino' : 'Simulación';
+    const kind = source ? source.kind : null;
+    const live = kind === 'arduino' ? 'Arduino USB' : 'Simulación';
     chip.className = 'chip';
-    if (c === 'connected') {
+    if (kind === 'wifi') {
+      const d = source.detail(), stale = performance.now() - rx.lastData > 1000;
+      if (c === 'connected' && d.ok) {
+        chip.classList.add(stale ? 'bad' : 'ok');
+        t.textContent = stale ? 'WiFi: SIN DATOS' : 'WiFi: conectado · ' + FS() + ' Hz';
+      } else if (c === 'connected') { chip.classList.add('warn'); t.textContent = 'WiFi: puente listo, esperando al Arduino'; }
+      else { chip.classList.add(source.attempts > 1 ? 'bad' : 'warn'); t.textContent = 'WiFi: buscando el puente…'; }
+    } else if (c === 'connected') {
       const stale = performance.now() - rx.lastData > 1000;
-      chip.classList.add(stale ? 'bad' : (rx.fs && Math.abs(rx.fs - S.fs) > S.fs * 0.1 ? 'warn' : 'ok'));
+      chip.classList.add(stale ? 'bad' : (rx.fs && Math.abs(rx.fs - FS()) > FS() * 0.1 ? 'warn' : 'ok'));
       t.textContent = live + (stale ? ': SIN DATOS' : ': conectado · ' + Math.round(rx.fs) + ' Hz');
     } else if (c === 'connecting') { chip.classList.add('warn'); t.textContent = 'Conectando…'; }
     else if (c === 'error') { chip.classList.add('bad'); t.textContent = 'Arduino: error de conexión'; }
     else t.textContent = 'Arduino: sin conexión';
-    const ard = source && source.kind === 'arduino' && c === 'connected', sim = source && source.kind !== 'arduino' && c === 'connected';
-    $('btn-connect').textContent = ard ? 'Desconectar' : 'Conectar Arduino';
+    const ard = kind === 'arduino' && c === 'connected', sim = kind === 'simulación' && c === 'connected', wifi = kind === 'wifi';
+    $('btn-connect').textContent = ard ? 'Desconectar USB' : 'Arduino USB';
+    $('btn-wifi').textContent = wifi ? 'Desconectar WiFi' : 'Arduino WiFi';
+    $('btn-wifi').classList.toggle('on', wifi);
     $('btn-sim').textContent = sim ? 'Detener simulación' : 'Simulación';
     $('btn-sim').classList.toggle('on', !!sim);
     $('sim-fault').hidden = !sim; if (!sim) $('sim-fault').value = '';
@@ -195,12 +247,16 @@
   }
   function evalAlarms(now) {
     const A = {};
-    const c = conn.status;
+    const c = conn.status, kind = source ? source.kind : null;
     if (c === 'error') A.conn = ['crit', 'Conexión perdida: ' + conn.msg + '. Revisa el cable USB y vuelve a conectar.'];
-    else if (c === 'disconnected' && view === 'session') A.conn = ['crit', 'Arduino no conectado. Pulsa «Conectar Arduino» (o «Simulación» para probar).'];
+    else if (kind === 'wifi' && c === 'connecting' && source.attempts > 1) A.conn = ['crit', 'Sin conexión con el puente WiFi (' + source.url + '). Abre puente_emg.py en esta laptop y déjalo abierto. Si ya está abierto, revisa la dirección en Ajustes.'];
+    else if (c === 'disconnected' && (view === 'session' || view === 'monitor')) A.conn = ['crit', 'Arduino no conectado. Pulsa «Arduino WiFi», «Arduino USB» o «Simulación».'];
     if (c === 'connected') {
       const silent = now - rx.lastData;
-      if (silent > 1000) A.nodata = ['crit', 'Sin datos desde hace ' + Math.round(silent / 1000) + ' s. Revisa el cable USB, que la placa esté encendida y que el Monitor Serie esté cerrado.'];
+      if (kind === 'wifi' && !source.detail().ok) A.nodata = ['crit', 'El puente está abierto pero el Arduino no se ha conectado por WiFi. Revisa que esté encendido y en la misma red que la laptop (LED del Arduino: parpadeo rápido = buscando el puente; lento = sin red).'];
+      else if (silent > 1000) A.nodata = ['crit', 'Sin datos desde hace ' + Math.round(silent / 1000) + ' s. ' + (kind === 'wifi'
+        ? 'El Arduino sigue conectado al puente: revisa la señal WiFi y la batería.'
+        : 'Revisa el cable USB, que la placa esté encendida y que el Monitor Serie esté cerrado.')];
       else {
         const q = quality.evaluate();
         if (q) {
@@ -213,8 +269,10 @@
         else if (qCount.flat >= 2) A.flat = ['crit', 'Señal plana, sin ruido. El sensor puede no estar alimentado o el cable de señal está desconectado.'];
         else if (qCount.noisy >= 2) A.noisy = ['warn', 'Mucho ruido de 60 Hz (' + Math.round(qLast.ratio60 * 100) + '% de la energía). Revisa contacto de electrodos, referencia y cables.'];
         if (source && source.lost > rx.lostSeen) { rx.lostSeen = source.lost; rx.lostAt = now; }
-        if (now - rx.lostAt < 5000 && rx.lostAt) A.lost = ['warn', 'Se están perdiendo paquetes de datos (' + (source ? source.lost : 0) + ' en total). Evita hubs USB y cierra otros programas.'];
-        if (now - rx.connectedAt > 4000 && rx.fs && Math.abs(rx.fs - S.fs) > S.fs * 0.1) A.rate = ['warn', 'Frecuencia de muestreo medida ' + Math.round(rx.fs) + ' Hz (esperada ' + S.fs + ' Hz). Revisa que el firmware coincida con Ajustes.'];
+        if (now - rx.lostAt < 5000 && rx.lostAt) A.lost = ['warn', kind === 'wifi'
+          ? 'Se perdieron ' + source.lostSamples + ' muestras por WiFi en total (señal débil o red saturada). En el registro quedan como saltos en indice_muestra.'
+          : 'Se están perdiendo paquetes de datos (' + (source ? source.lost : 0) + ' en total). Evita hubs USB y cierra otros programas.'];
+        if (kind !== 'wifi' && now - rx.connectedAt > 4000 && rx.fs && Math.abs(rx.fs - FS()) > FS() * 0.1) A.rate = ['warn', 'Frecuencia de muestreo medida ' + Math.round(rx.fs) + ' Hz (esperada ' + FS() + ' Hz). Revisa que el firmware coincida con Ajustes.'];
       }
     }
     if (mode === 'running' && cal && !A.conn && c !== 'connected') A.run = ['crit', 'La sesión sigue abierta pero no llegan datos.'];
@@ -232,7 +290,7 @@
   /* ---------- sesión ---------- */
   function resetSession() {
     mode = 'idle'; cal = null; calResult = null; thr = null; det = null; calSource = '';
-    runSamples = 0; acts = []; discarded = 0; envT = []; envV = []; sessionStart = null;
+    runSamples = 0; runFs = 0; acts = []; discarded = 0; envT = []; envV = []; sessionStart = null;
     chart.thr = null;
   }
   function startSession() {
@@ -257,10 +315,10 @@
     $('cal-card').querySelector('h3').textContent = mode === 'running' ? 'Calibración (completada)' : 'Calibración';
   }
   $('btn-cal-start').addEventListener('click', () => {
-    if (conn.status !== 'connected') { toast('Primero conecta el Arduino o activa la simulación.'); return; }
+    if (conn.status !== 'connected' || performance.now() - rx.lastData > 1000) { toast('No llegan datos: conecta el Arduino (WiFi o USB) o activa la simulación.'); return; }
     if (qCount.sat >= 2 || qCount.flat >= 2) { if (!confirm('Hay una alarma de señal activa. ¿Calibrar de todas formas?')) return; }
     rebuildDsp();  // reinicia filtros para empezar limpio
-    cal = new E.Calibrator(S, S.fs); mode = 'calibrating'; applyMode();
+    cal = new E.Calibrator(S, FS()); mode = 'calibrating'; applyMode();
   });
   $('btn-cal-cancel').addEventListener('click', () => { mode = 'idle'; cal = null; applyMode(); });
   $('btn-cal-redo').addEventListener('click', () => { mode = 'idle'; calResult = null; applyMode(); });
@@ -289,7 +347,8 @@
   $('btn-run-start').addEventListener('click', () => {
     if (conn.status !== 'connected') { toast('Conecta el Arduino antes de comenzar.'); return; }
     thr = E.deriveThresholds(calResult, S);
-    det = new E.ActivationDetector({ fs: S.fs, onThr: thr.onThr, offThr: thr.offThr, minDur: S.minDur, maxGap: S.maxGap, trimStart: S.trimStart });
+    runFs = FS();
+    det = new E.ActivationDetector({ fs: runFs, onThr: thr.onThr, offThr: thr.offThr, minDur: S.minDur, maxGap: S.maxGap, trimStart: S.trimStart });
     acts = []; discarded = 0; runSamples = 0; envT = []; envV = []; sessionStart = new Date().toISOString();
     chart.thr = thr.onThr; mode = 'running'; applyMode();
     $('cal-compact').textContent = 'Umbral de activación: ' + thr.onThr.toFixed(3) + ' mV · Referencia activa (RMS): ' + calResult.activeRms.toFixed(3) + ' mV · Duración mínima válida: ' + S.minDur + ' s';
@@ -304,7 +363,7 @@
   /* ---------- UI de sesión (4 Hz; la gráfica va a 60 fps aparte) ---------- */
   const f1 = v => (isFinite(v) ? v.toFixed(1) : '—'), f2 = v => (isFinite(v) ? v.toFixed(2) : '—');
   function renderSession() {
-    const t = runSamples / S.fs;
+    const t = runFs ? runSamples / runFs : 0;
     $('s-time').textContent = $('k-time').textContent = clock(t);
     if (mode === 'calibrating' && cal) {
       const i = cal.info();
@@ -353,7 +412,7 @@
   /* ---------- guardar / finalizar ---------- */
   function buildRecord() {
     const seg = det && det.active ? det.flush() : null; if (seg) onSegment(seg);
-    const t = runSamples / S.fs, tot = acts.reduce((a, s) => a + s.dur, 0), mean = k => acts.length ? acts.reduce((a, s) => a + s[k], 0) / acts.length : null;
+    const t = runFs ? runSamples / runFs : 0, tot = acts.reduce((a, s) => a + s.dur, 0), mean = k => acts.length ? acts.reduce((a, s) => a + s[k], 0) / acts.length : null;
     return {
       patientId: patient.id, fecha: sessionStart || new Date().toISOString(), duracionS: t,
       electrodo: $('m-electrodo').value.trim(), posicion: $('m-posicion').value.trim(), fisio: $('m-fisio').value.trim(), notas: $('m-notas').value.trim(),
@@ -429,11 +488,12 @@
 
   /* ---------- ajustes ---------- */
   const FIELDS = [
-    ['fs', 'Frecuencia de muestreo (Hz) — igual al firmware'], ['adcMax', 'Máximo del ADC (14 bits = 16383)'], ['vref', 'Referencia ADC (mV)'], ['gain', 'Ganancia del amplificador'],
+    ['fs', 'Frecuencia de muestreo USB/simulación (Hz) — igual al firmware'], ['adcMax', 'Máximo del ADC (14 bits = 16383)'], ['vref', 'Referencia ADC (mV)'], ['gain', 'Ganancia del amplificador'],
     ['notchHz', 'Notch (Hz)'], ['hpHz', 'Pasa altas (Hz)'], ['lpHz', 'Envolvente: pasa bajas (Hz)'],
     ['minDur', 'Duración mínima de activación válida (s)'], ['maxGap', 'Fusionar huecos menores a (s)'], ['thrSD', 'Umbral: desviaciones estándar sobre reposo'],
     ['thrPct', 'Umbral mínimo (% de envolvente activa)'], ['trimStart', 'Ignorar primeros (s) de cada activación'],
     ['restS', 'Calibración: reposo (s)'], ['passiveS', 'Calibración: pasiva (s)'], ['reps', 'Calibración activa: repeticiones'], ['holdS', 'Activa: segundos arriba'], ['relaxS', 'Activa: segundos abajo'],
+    ['wifiUrl', 'Puente WiFi (puente_emg.py)', 'text'],
     ['sheetsUrl', 'URL de Google Sheets (Apps Script)', 'text'], ['sheetsName', 'Enviar nombre del paciente a Sheets', 'checkbox'], ['sound', 'Sonido en alarmas críticas', 'checkbox']
   ];
   $('btn-settings').addEventListener('click', () => {
@@ -453,6 +513,7 @@
       else if (type === 'text') next[k] = el.value.trim();
       else { const v = parseFloat(el.value); if (!isFinite(v) || v <= 0) { if (k !== 'trimStart' || v < 0) { toast('Valor no válido en: ' + k); return; } } next[k] = v; }
     }
+    if (!/^wss?:\/\/[^\s]+$/.test(next.wifiUrl || '')) { toast('La dirección del puente debe empezar con ws:// (p. ej. ws://127.0.0.1:8787)'); return; }
     S = next; E.Store.saveSettings(S); rebuildDsp(); chart.setWindow(S.winS);
     $('dlg-settings').close(); toast('Ajustes guardados (se aplican desde la próxima calibración)');
   });
@@ -464,22 +525,118 @@
     e.target.value = '';
   });
 
+
+  /* ---------- registro de la señal filtrada (CSV) ---------- */
+  const REC_MAX = 4000000, REC_CHUNK = 65536;   // ~66 min a 1 kHz; se detiene solo al llegar
+  let rec;
+  function recReset() {
+    rec = { active: false, saved: false, n: 0, chunks: [], cur: null, fs: 0, kind: '', label: '',
+      startISO: null, idx0: null, last: null, lost: 0 };
+  }
+  recReset();
+  function recStart() {
+    if (!source || conn.status !== 'connected' || performance.now() - rx.lastData > 1000) {
+      toast('No llegan datos: conecta el Arduino (WiFi o USB) o la simulación.'); return;
+    }
+    if (rec.n && !rec.saved && !confirm('Hay un registro sin descargar. ¿Empezar uno nuevo y descartarlo?')) return;
+    recReset();
+    Object.assign(rec, { active: true, fs: FS(), kind: source.kind, startISO: new Date().toISOString(),
+      label: (view === 'session' && patient) ? fullName(patient) : '' });
+    renderRec();
+  }
+  function recPush(i, v) {
+    if (!rec.cur || rec.cur.n === REC_CHUNK) { rec.cur = { i: new Float64Array(REC_CHUNK), v: new Float32Array(REC_CHUNK), n: 0 }; rec.chunks.push(rec.cur); }
+    if (rec.idx0 === null) rec.idx0 = i;
+    if (rec.last !== null && i > rec.last + 1) rec.lost += i - rec.last - 1;
+    rec.last = i;
+    rec.cur.i[rec.cur.n] = i; rec.cur.v[rec.cur.n++] = v; rec.n++;
+    if (rec.n >= REC_MAX) { recStop(); toast('Registro detenido: se alcanzó el máximo. Descárgalo.'); }
+  }
+  function recStop() { if (!rec.active) return; rec.active = false; renderRec(); }
+  function recDownload() {
+    if (!rec.n) return;
+    const dt = rec.fs > 1000 ? 4 : 3, dv = rec.kind === 'wifi' ? 1 : 4;   // WiFi: 0.1 mV de resolución
+    const parts = ['indice_muestra,tiempo_s,emg_filtrada_mV\r\n'];
+    for (const c of rec.chunks) {
+      let txt = '';
+      for (let k = 0; k < c.n; k++) txt += c.i[k] + ',' + ((c.i[k] - rec.idx0) / rec.fs).toFixed(dt) + ',' + c.v[k].toFixed(dv) + '\r\n';
+      parts.push(txt);
+    }
+    const d = new Date(rec.startISO), stamp = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '_' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds());
+    const src = rec.kind === 'wifi' ? 'wifi' : (rec.kind === 'arduino' ? 'usb' : 'simulacion');
+    E.downloadParts('emg_' + (rec.label ? E.slug(rec.label) + '_' : '') + src + '_' + stamp + '_' + rec.fs + 'Hz.csv', parts);
+    rec.saved = true; renderRec();
+  }
+  function renderRec() {
+    const dur = rec.n ? (rec.last - rec.idx0 + 1) / rec.fs : 0;
+    const info = rec.n.toLocaleString('es-MX') + ' muestras · ' + rec.fs + ' Hz' + (rec.lost ? ' · ' + rec.lost.toLocaleString('es-MX') + ' perdidas' : '');
+    document.querySelectorAll('[data-rec]').forEach(bar => {
+      bar.classList.toggle('recording', rec.active);
+      bar.querySelector('.rec-start').disabled = rec.active;
+      bar.querySelector('.rec-stop').disabled = !rec.active;
+      bar.querySelector('.rec-dl').disabled = rec.active || !rec.n;
+      bar.querySelector('.rec-status').textContent = rec.active ? '● Grabando ' + clock(dur) + ' · ' + info
+        : rec.n ? 'Registro de ' + clock(dur) + ' (' + info + ')' + (rec.saved ? ' · descargado' : ' · listo para descargar')
+        : 'Registro de la señal filtrada (tiempo en s, amplitud en mV).';
+    });
+  }
+  document.querySelectorAll('[data-rec]').forEach(bar => {
+    bar.querySelector('.rec-start').addEventListener('click', recStart);
+    bar.querySelector('.rec-stop').addEventListener('click', recStop);
+    bar.querySelector('.rec-dl').addEventListener('click', recDownload);
+  });
+
+  /* ---------- monitor (sin paciente) ---------- */
+  function renderMonitor() {
+    const items = [], k = source ? source.kind : null;
+    const add = (label, value, cls) => items.push('<div class="' + (cls || '') + '"><span>' + label + '</span><b>' + value + '</b></div>');
+    const fresh = performance.now() - rx.lastData < 1000;
+    add('Fuente', k === 'wifi' ? 'Arduino WiFi (puente)' : k === 'arduino' ? 'Arduino USB' : k ? 'Simulación' : 'ninguna');
+    add('Datos', conn.status === 'connected' && fresh ? 'llegando' : 'sin datos', conn.status === 'connected' && fresh ? 'ok' : 'bad');
+    add('Frecuencia', source ? Math.round(rx.fs) + ' / ' + FS() + ' Hz' : '—');
+    add('Unidades', source ? (entrada() === 'mV' ? 'mV (filtrada en el Arduino)' : 'mV (filtrada en la página)') : '—');
+    if (k === 'wifi') {
+      const b = source.bridge || {};
+      add('Puente', source.ws && source.ws.readyState === 1 ? 'conectado' : 'sin conexión', source.ws && source.ws.readyState === 1 ? 'ok' : 'bad');
+      add('Arduino', b.arduino ? (b.ip_arduino || 'conectado') : 'no conectado', b.arduino ? 'ok' : 'bad');
+      add('Muestras perdidas', (source.lostSamples || 0).toLocaleString('es-MX'), source.lostSamples ? 'bad' : '');
+      add('Reinicios del Arduino', String(source.resets || 0));
+    } else if (source) {
+      add('Paquetes perdidos', String(source.lost || 0), source.lost ? 'bad' : '');
+    }
+    $('src-info').innerHTML = items.join('');
+    $('src-help').textContent = k === 'wifi'
+      ? 'El eje de tiempo usa el número de cada muestra que manda el Arduino (t = índice / fs), así que es exacto aunque los paquetes lleguen en ráfagas. Las muestras perdidas aparecen como huecos.'
+      : 'Para ver la señal del ASTRA por WiFi: abre puente_emg.py en esta laptop, enciende el Arduino y pulsa «Arduino WiFi». Guía: docs/WIFI.md.';
+  }
+  $('win-sel-mon').addEventListener('change', e => chartMon.setWindow(+e.target.value));
+
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
+  chartMon = new E.LiveChart($('live-mon'), S.fs);
+  chartMon.setWindow(10);
   progChart = new E.ProgressChart($('prog'), $('prog-tip'));
   rebuildDsp();
   $('tech-toggle').checked = S.techView; $('act-table').classList.toggle('show-tech', S.techView);
   $('win-sel').value = String(S.winS);
-  (function frame() { if (view === 'session') chart.draw(); requestAnimationFrame(frame); })();
+  (function frame() {
+    if (view === 'session') chart.draw();
+    if (view === 'monitor') chartMon.draw();
+    requestAnimationFrame(frame);
+  })();
   let tick = 0;
   setInterval(() => {
     const now = performance.now();
     if (now - rx.lastT >= 1000) { rx.fs = (rx.samples - rx.lastCount) * 1000 / (now - rx.lastT); rx.lastCount = rx.samples; rx.lastT = now; }
     renderConn();
     if (view === 'session') renderSession();
+    if (view === 'monitor') renderMonitor();
+    if (rec.active) renderRec();
     if (++tick % 2 === 0) evalAlarms(now);
   }, 250);
   window.addEventListener('resize', () => { if (view === 'history') progChart.draw(); });
-  window.addEventListener('beforeunload', e => { if (mode === 'running') { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', e => {
+    if (mode === 'running' || rec.active || (rec.n && !rec.saved)) { e.preventDefault(); e.returnValue = ''; }
+  });
   show('home');
 })();
