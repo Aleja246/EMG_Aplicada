@@ -1,29 +1,26 @@
-/* Procesamiento digital de la señal sEMG (corre en el navegador).
- * Cadena: raw ADC -> quitar DC -> pasa altas 4º orden (latido/movimiento)
- *         -> notch 60 Hz -> señal filtrada (mV)
- *         -> |x| -> pasa bajas 5 Hz -> envolvente (mV)
- * Métricas por contracción: RMS y MAV.
+/* Procesamiento digital de la señal sEMG que se DIBUJA en la página.
+ * La calibración y la detección las hace el ESP32 del atril (ver atril.js);
+ * aquí solo se filtra la señal cruda del Arduino para verla.
+ * Cadena: cuentas ADC -> quitar DC -> pasa altas 4º orden (latido/movimiento)
+ *         -> notch 60 Hz y armónicos (como el Arduino) -> señal filtrada (mV)
  */
 (function () {
   'use strict';
   const EMG = (window.EMG = window.EMG || {});
 
   EMG.DEFAULTS = {
-    fs: 2000,        // Hz, debe coincidir con el firmware de Arduino
-    adcMax: 16383,   // 14 bits (usa 1023 si tu placa es de 10 bits)
-    vref: 5000,      // mV, igual que 'escala' en DIGITALIZARR.ino
-    gain: 1,         // ganancia del amplificador (para expresar mV en el músculo)
+    cfgVer: 2,       // sube cuando cambian los valores por defecto (descarta ajustes viejos de la v1)
+    ipArduino: '192.168.4.1',   // red WiFi "ASTRA" que crea el Arduino
+    ipAtril: '192.168.4.200',   // IP fija del ESP32 del atril
+    emgUsb: false,   // true: la señal EMG llega por USB (Web Serial) en vez de WiFi
+    fs: 1000,        // Hz, igual que FS en arduino_emg.ino
+    adcMax: 16383,   // 14 bits
+    vref: 5000,      // mV, igual que V_REF en arduino_emg.ino
+    gain: 1,         // 1 = mV a la salida de Nova (igual que el RMS del atril). ~1000 = µV en la piel
     notchHz: 60, notchQ: 20,
-    hpHz: 20,        // pasa altas: elimina latido cardiaco y movimiento
-    lpHz: 5,         // pasa bajas de la envolvente
-    minDur: 1.0,     // s, una activación menor a esto se descarta (transición/artefacto)
-    maxGap: 0.3,     // s, huecos menores se fusionan en una sola activación
-    thrSD: 3,        // umbral = media_reposo + thrSD * SD_reposo
-    thrPct: 25,      // ... o este % de la envolvente activa (el mayor de los dos)
-    trimStart: 0,    // s ignorados al inicio de cada activación para RMS/MAV
-    restS: 10, passiveS: 10, reps: 5, holdS: 4, relaxS: 4,
-    winS: 15,        // ventana visible de la gráfica (s)
-    techView: false, // mostrar RMS/MAV crudos en la tabla
+    nArm: 7,         // notch en 60, 120 ... 420 Hz, como el Arduino
+    hpHz: 20,        // pasa altas: elimina latido cardiaco y movimiento (solo para ver)
+    winS: 15,        // ventana visible de las gráficas (s)
     sound: true,
     sheetsUrl: '', sheetsName: false
   };
@@ -49,10 +46,13 @@
       const w = 2 * Math.PI * fc / fs, c = Math.cos(w), al = Math.sin(w) / (2 * Q);
       return Biquad._n((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
     }
-    static lowpass(fc, Q, fs) {
-      const w = 2 * Math.PI * fc / fs, c = Math.cos(w), al = Math.sin(w) / (2 * Q);
-      return Biquad._n((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al);
-    }
+  }
+
+  // Notch en f0, 2·f0 ... n·f0 (solo los que quedan debajo de fs/2)
+  function notchChain(f0, Q, n, fs) {
+    const out = [];
+    for (let k = 1; k <= n; k++) if (k * f0 < fs / 2) out.push(Biquad.notch(k * f0, Q, fs));
+    return out;
   }
 
   class Processor {
@@ -61,11 +61,10 @@
       const fs = o.fs;
       // Butterworth 4º orden = 2 biquads con Q 0.5412 y 1.3066
       this.hp = [Biquad.highpass(o.hpHz, 0.5412, fs), Biquad.highpass(o.hpHz, 1.3066, fs)];
-      this.notch = Biquad.notch(o.notchHz, o.notchQ, fs);
-      this.lp = Biquad.lowpass(o.lpHz, 0.7071, fs);
+      this.notches = notchChain(o.notchHz, o.notchQ, Math.max(1, o.nArm), fs);
       this.scale = o.vref / o.adcMax / o.gain; // cuentas -> mV
       this.dc = null;
-      this.x = 0; this.env = 0; this.hpOut = 0;
+      this.x = 0; this.hpOut = 0;
     }
     process(raw) {
       if (this.dc === null) this.dc = raw;        // evita transitorio inicial
@@ -74,63 +73,35 @@
       v = this.hp[0].process(v);
       v = this.hp[1].process(v);
       this.hpOut = v;
-      v = this.notch.process(v);
+      for (const n of this.notches) v = n.process(v);
       this.x = v;
-      this.env = this.lp.process(Math.abs(v));
-      if (this.env < 0) this.env = 0;
       return v;
     }
   }
 
-  // Detecta activaciones sobre la envolvente con histéresis.
-  class ActivationDetector {
+  /* El mismo cálculo que hace el Arduino para el opto (arduino_emg.ino):
+   * quitar DC (α = 0.003) -> notch 60..420 Hz -> RMS de 100 muestras, en mV.
+   * Lo usa el simulador para alimentar al atril simulado. */
+  class BlockRms {
     constructor(o) {
-      this.fs = o.fs; this.onThr = o.onThr; this.offThr = o.offThr;
-      this.minDur = o.minDur; this.maxGap = o.maxGap; this.trimStart = o.trimStart || 0;
-      this.reset();
+      o = Object.assign({}, EMG.DEFAULTS, o);
+      this.fs = o.fs; this.n = Math.round(o.fs / 10);
+      this.vPerCount = o.vref / 1000 / o.adcMax;            // V por cuenta
+      this.arm = notchChain(60, 20, 7, o.fs);
+      this.dc = null; this.s = 0; this.k = 0;
     }
-    reset() {
-      this.active = false; this.startT = 0; this.lastAboveT = 0;
-      this.buf = []; this.sumsq = 0; this.sumabs = 0; this.peak = 0;
-    }
-    /** @returns segmento terminado ({valid, dur, rms, mav, ...}) o null */
-    feed(x, env, t) {
-      if (!this.active) {
-        if (env > this.onThr) {
-          this.active = true; this.startT = t; this.lastAboveT = t;
-          this.buf = [x]; this.sumsq = x * x; this.sumabs = Math.abs(x); this.peak = env;
-        }
-        return null;
-      }
-      this.buf.push(x);
-      this.sumsq += x * x; this.sumabs += Math.abs(x);
-      if (env > this.peak) this.peak = env;
-      if (env > this.offThr) this.lastAboveT = t;
-      if (t - this.lastAboveT > this.maxGap) return this.flush();
-      return null;
-    }
-    /** duración en curso y RMS provisional (para mostrar en vivo) */
-    live(t) {
-      if (!this.active) return null;
-      const n = this.buf.length || 1;
-      return { tStart: this.startT, dur: t - this.startT, rms: Math.sqrt(this.sumsq / n), mav: this.sumabs / n };
-    }
-    flush() {
-      if (!this.active) return null;
-      const dur = this.lastAboveT - this.startT;
-      const n = Math.min(this.buf.length, Math.round(dur * this.fs) + 1);
-      const seg = { tStart: this.startT, tEnd: this.lastAboveT, dur, peakEnv: this.peak, valid: dur >= this.minDur };
-      if (seg.valid) {
-        let skip = Math.round(this.trimStart * this.fs);
-        if (n - skip < this.fs * 0.25) skip = 0;
-        const x = Float64Array.from(this.buf.slice(skip, n));
-        let sq = 0, ab = 0;
-        for (let i = 0; i < x.length; i++) { sq += x[i] * x[i]; ab += Math.abs(x[i]); }
-        seg.rms = Math.sqrt(sq / x.length);
-        seg.mav = ab / x.length;
-      }
-      this.reset();
-      return seg;
+    /** @returns RMS en mV cuando se completa un bloque, o null */
+    feed(raw) {
+      const v = raw * this.vPerCount;
+      if (this.dc === null) this.dc = v;
+      this.dc += 0.003 * (v - this.dc);
+      let y = v - this.dc;
+      for (const n of this.arm) y = n.process(y);
+      this.s += y * y;
+      if (++this.k < this.n) return null;
+      const mv = Math.round(Math.sqrt(this.s / this.n) * 1000);
+      this.s = 0; this.k = 0;
+      return mv;
     }
   }
 
@@ -148,7 +119,7 @@
       const mean = this.sum / this.n;
       const sd = Math.sqrt(Math.max(0, this.sumsq / this.n - mean * mean));
       const satFrac = this.sat / this.n;
-      const ratio60 = this.hpE > 0 ? 1 - this.nE / this.hpE : 0; // energía que quitó el notch
+      const ratio60 = this.hpE > 0 ? 1 - this.nE / this.hpE : 0; // energía que quitaron los notch
       const r = {
         sd, satFrac, ratio60,
         saturated: satFrac > 0.2,
@@ -160,5 +131,5 @@
     }
   }
 
-  Object.assign(EMG, { Biquad, Processor, ActivationDetector, SignalQuality });
+  Object.assign(EMG, { Biquad, Processor, BlockRms, SignalQuality });
 })();

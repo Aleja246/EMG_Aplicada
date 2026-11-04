@@ -1,5 +1,7 @@
 # Guía del proyecto
 
+> **Actualización (ASTRA):** la calibración y la detección ahora las hace el atril ESP32, paso a paso desde la página, y la señal EMG llega del Arduino UNO R4 por WiFi. Las secciones 2 a 5 describen la versión anterior (calibración en el navegador con `emg_stream.ino`). Para la versión actual lee [`CONEXION_ASTRA.md`](CONEXION_ASTRA.md).
+
 ## 1. Primeros pasos con GitHub (para quien lo usa por primera vez)
 Conceptos: **repositorio** = carpeta del proyecto en la nube · **commit** = foto guardada de los cambios · **branch (rama)** = línea de trabajo paralela · **pull request (PR)** = petición para integrar una rama en `main`.
 

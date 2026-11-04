@@ -1,7 +1,7 @@
 :root {
   --bg: #f3f6f8; --card: #fff; --text: #1b2733; --muted: #5f6f7f; --line: #dde4ea; --grid: #e6ebf0;
   --primary: #0f766e; --primary-d: #0b5c56; --green: #15803d; --green-bg: rgba(21,128,61,.14);
-  --blue: #1d4ed8; --amber: #b45309; --amber-bg: rgba(180,83,9,.13); --red: #b91c1c; --signal: #8a97a6;
+  --blue: #1d4ed8; --blue-bg: rgba(29,78,216,.12); --amber: #b45309; --amber-bg: rgba(180,83,9,.13); --red: #b91c1c; --signal: #8a97a6;
   --radius: 12px;
 }
 * { box-sizing: border-box; }
@@ -18,6 +18,7 @@ h3 { font-size: 1.05rem; }
 .brand small { color: var(--muted); font-weight: 400; }
 .logo { display: inline-grid; place-items: center; width: 2rem; height: 2rem; border-radius: 8px; background: var(--primary); color: #fff; font-size: 1.3rem; }
 .topbar-right { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.topbar-right select { display: inline-block; width: auto; margin: 0; }
 
 .chip { display: inline-flex; align-items: center; gap: .45rem; padding: .3rem .7rem; border-radius: 99px; background: #eef1f4; font-size: .85rem; }
 .dot { width: .7rem; height: .7rem; border-radius: 50%; background: #9aa6b2; }
@@ -119,7 +120,36 @@ dialog { border: 0; border-radius: 14px; padding: 1.4rem; max-width: 760px; widt
 dialog::backdrop { background: rgba(15,23,42,.5); }
 .toast { position: fixed; bottom: 1.2rem; left: 50%; transform: translateX(-50%); background: #1b2733; color: #fff; padding: .7rem 1.2rem; border-radius: 10px; z-index: 50; }
 
+/* Calibración paso a paso */
+.badge { display: inline-block; padding: .2rem .65rem; border-radius: 99px; background: #eef1f4; font-size: .8rem; font-weight: 700; color: var(--muted); }
+.badge.ok { background: #e4f4ea; color: var(--green); } .badge.warn { background: #fdf0dc; color: var(--amber); } .badge.bad { background: #fde7e7; color: var(--red); }
+.callout { background: #f3f6f8; border-left: 4px solid var(--primary); padding: .6rem .9rem; border-radius: 6px; margin: .4rem 0; }
+.callout.warn { border-color: var(--amber); background: #fdf6ea; } .callout.bad { border-color: var(--red); background: #fdf0f0; }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: .7rem; list-style: none; padding: 0; margin: 0 0 .8rem; }
+.steps li { display: flex; flex-direction: column; gap: .35rem; padding: .7rem .8rem; border-radius: 10px; background: #f3f6f8; border: 2px solid transparent; }
+.steps li .btn { margin-top: auto; }
+.steps li.next { border-color: var(--primary); background: #fff; }
+.steps li.active { border-color: var(--primary); background: #e6f3f1; }
+.steps li.done { background: #eef8f1; }
+.steps li.done .step-head b::after { content: " ✓"; color: var(--green); }
+.steps li.pending { opacity: .6; }
+.step-head { display: flex; justify-content: space-between; gap: .5rem; } .st-time { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.step-desc { margin: 0; font-size: .85rem; color: var(--muted); }
+.step-res { margin: 0; font-size: .88rem; font-weight: 600; color: var(--green); min-height: 1.2em; font-variant-numeric: tabular-nums; }
+.cue.rest { background: #e0ecff; }
+.cue-note { margin: .5rem 0; font-size: .9rem; color: var(--muted); }
+canvas.rms { width: 100%; height: 220px; display: block; }
+.readouts { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; margin-top: .5rem; font-size: .9rem; color: var(--muted); }
+.readouts b { color: var(--text); font-variant-numeric: tabular-nums; }
+.readouts .on { color: var(--green); }
+.sw-cal { background: var(--amber-bg); border: 1px solid var(--amber); } .sw-used { background: var(--blue-bg); border: 1px solid var(--blue); }
+.sw-rest { background: none; border-top: 2px dotted var(--muted); height: 0; }
+#log-card summary { cursor: pointer; }
+.log { max-height: 260px; overflow: auto; background: #0f172a; color: #d6e2f0; padding: .7rem .9rem; border-radius: 8px; font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; margin: .7rem 0 0; }
+
 @media (max-width: 720px) {
+  .steps { grid-template-columns: 1fr; }
+  .topbar { position: static; } .alarms { top: 0; }
   .grid2, .grid3, .search-layout { grid-template-columns: 1fr; }
   .timer { text-align: left; } canvas.live { height: 240px; }
 }

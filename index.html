@@ -13,14 +13,17 @@
     <span class="logo">∿</span><span>sEMG Cervical <small>(nombre por definir)</small></span>
   </button>
   <div class="topbar-right">
-    <div class="chip" id="conn-chip" title="Estado de la conexión con el Arduino">
-      <span class="dot" id="conn-dot"></span><span id="conn-text">Arduino: sin conexión</span>
+    <div class="chip" id="emg-chip" title="Señal EMG cruda que manda el Arduino">
+      <span class="dot" id="emg-dot"></span><span id="emg-text">EMG: sin conexión</span>
     </div>
-    <button class="btn small" id="btn-connect" type="button">Conectar Arduino</button>
+    <div class="chip" id="atril-chip" title="Atril (ESP32): calibra, detecta y mueve los actuadores">
+      <span class="dot" id="atril-dot"></span><span id="atril-text">Atril: sin conexión</span>
+    </div>
+    <button class="btn small" id="btn-connect" type="button">Conectar ASTRA</button>
     <button class="btn small ghost" id="btn-sim" type="button">Simulación</button>
     <select class="btn small ghost" id="sim-fault" hidden title="Probar alarmas">
       <option value="">Simular falla…</option><option value="disconnect">Electrodo desconectado</option><option value="flat">Señal plana</option>
-      <option value="noise60">Ruido 60 Hz</option><option value="nodata">Cable USB sin datos</option>
+      <option value="noise60">Ruido 60 Hz</option><option value="nodata">Arduino sin datos</option>
     </select>
     <button class="btn small ghost" id="btn-settings" type="button">⚙ Ajustes</button>
   </div>
@@ -125,96 +128,144 @@
       <div class="timer"><span class="muted">Tiempo de sesión</span><b id="s-time">00:00</b></div>
     </div>
 
-    <!-- Calibración -->
+    <!-- Calibración: la hace el atril (ESP32), paso a paso desde aquí -->
     <div class="card" id="cal-card">
-      <h3>Calibración</h3>
-      <div id="cal-intro">
+      <div class="row-between">
+        <h3 id="cal-title">Calibración en el atril</h3>
+        <span class="badge" id="atril-badge">—</span>
+      </div>
+      <details class="more" id="meta-box" open>
+        <summary>Datos de la sesión</summary>
         <div class="grid3 session-meta">
           <label>Músculo / lado de los electrodos<input id="m-electrodo" placeholder="p. ej. extensores cervicales, bilateral"></label>
           <label>Posición del niño<input id="m-posicion" placeholder="p. ej. prono sobre cuña"></label>
           <label>Fisioterapeuta<input id="m-fisio"></label>
         </div>
         <label>Notas de la sesión<input id="m-notas"></label>
-        <p class="muted small-text" id="cal-plan"></p>
-        <div class="form-actions left">
-          <button class="btn primary" id="btn-cal-start" type="button">Iniciar calibración</button>
-          <button class="btn ghost" id="btn-cal-reuse" type="button" hidden>Usar calibración de la última sesión</button>
-        </div>
+      </details>
+
+      <p class="callout" id="cal-msg" hidden></p>
+      <div class="form-actions left" id="cal-msg-actions" hidden>
+        <button class="btn" id="btn-resume" type="button">Reanudar el atril</button>
       </div>
 
-      <div id="cal-progress" hidden>
-        <ol class="stepper">
-          <li id="st-rest"><b>1 · Reposo</b><span class="st-time"></span></li>
-          <li id="st-passive"><b>2 · Pasiva</b><span class="st-time"></span></li>
-          <li id="st-active"><b>3 · Activa</b><span class="st-time"></span></li>
+      <div id="cal-intro" hidden>
+        <p class="muted small-text" id="cal-plan">Reposo 10 s · Pasiva 10 s · Activa 5 repeticiones (4 s arriba / 4 s abajo). Cada fase empieza cuando tú lo indicas.</p>
+        <div class="form-actions left"><button class="btn primary" id="btn-cal-start" type="button">Comenzar calibración</button></div>
+      </div>
+
+      <div id="cal-steps" hidden>
+        <ol class="steps">
+          <li id="step-0"><div class="step-head"><b>1 · Reposo</b><span class="st-time"></span></div>
+            <p class="step-desc">Cabeza apoyada y relajada. No mover al niño.</p><p class="step-res"></p>
+            <button class="btn" type="button" data-cmd="1">Comenzar reposo</button></li>
+          <li id="step-1"><div class="step-head"><b>2 · Pasiva</b><span class="st-time"></span></div>
+            <p class="step-desc">El terapeuta mueve la cabeza de abajo hacia arriba y viceversa. El niño NO hace fuerza.</p><p class="step-res"></p>
+            <button class="btn" type="button" data-cmd="2">Comenzar calibración pasiva</button></li>
+          <li id="step-2"><div class="step-head"><b>3 · Activa</b><span class="st-time"></span></div>
+            <p class="step-desc">El niño levanta la cabeza y la sostiene (ARRIBA), luego baja y relaja (ABAJO).</p><p class="step-res"></p>
+            <button class="btn" type="button" data-cmd="3">Comenzar calibración activa</button></li>
         </ol>
-        <div class="cue" id="cue">
+        <div class="cue" id="cue" hidden>
           <div class="cue-title" id="cue-title">—</div>
           <div class="cue-text" id="cue-text"></div>
           <div class="cue-count" id="cue-count"></div>
+          <div class="bar"><div id="cue-bar"></div></div>
+          <p class="cue-note" id="cue-note"></p>
+          <button class="btn ghost small" id="btn-phase-cancel" type="button">Cancelar esta fase</button>
         </div>
-        <div class="bar"><div id="cal-bar"></div></div>
-        <div class="form-actions left"><button class="btn ghost" id="btn-cal-cancel" type="button">Cancelar calibración</button></div>
       </div>
 
       <div id="cal-result" hidden>
-        <p><b>Calibración lista.</b> <span class="muted" id="cal-result-date"></span></p>
+        <p><b id="cal-result-title">Calibración lista.</b> <span class="muted" id="cal-result-sub"></span></p>
         <div class="cal-grid" id="cal-values"></div>
         <ul class="warnings" id="cal-warnings"></ul>
         <div class="form-actions left">
-          <button class="btn primary" id="btn-run-start" type="button">▶ Comenzar monitoreo</button>
-          <button class="btn ghost" id="btn-cal-redo" type="button">Repetir calibración</button>
+          <button class="btn primary" id="btn-run-start" type="button">▶ Iniciar sesión</button>
+          <button class="btn ghost" id="btn-cal-redo" type="button">Repetir toda la calibración</button>
         </div>
       </div>
 
-      <div id="cal-compact" hidden class="muted small-text"></div>
+      <div id="attach" hidden>
+        <p>El atril ya está en sesión con una calibración anterior (<span id="attach-thr"></span>).</p>
+        <div class="form-actions left">
+          <button class="btn primary" id="btn-attach" type="button">Registrar la sesión desde ahora</button>
+          <button class="btn ghost" id="btn-attach-cal" type="button">Comenzar calibración nueva</button>
+        </div>
+      </div>
+
+      <div id="run-ctrl" hidden>
+        <p class="muted small-text" id="cal-compact"></p>
+        <div class="form-actions left">
+          <button class="btn" id="btn-pause" type="button">Pausa</button>
+          <button class="btn ghost" id="btn-thr-down" type="button" title="Bajar el umbral mínimo 5 puntos">Umbral −</button>
+          <button class="btn ghost" id="btn-thr-up" type="button" title="Subir el umbral mínimo 5 puntos">Umbral +</button>
+          <button class="btn ghost" id="btn-recal" type="button">Recalibrar</button>
+        </div>
+      </div>
     </div>
 
-    <!-- Gráfica en vivo -->
+    <!-- Señal EMG del Arduino -->
     <div class="card">
       <div class="row-between">
-        <h3>Señal EMG (tiempo real)</h3>
+        <h3>Señal EMG del Arduino (tiempo real)</h3>
         <div class="legend">
           <span><i class="sw sw-signal"></i>EMG filtrada</span>
-          <span><i class="sw sw-env"></i>Envolvente</span>
-          <span><i class="sw sw-thr"></i>Umbral</span>
-          <span><i class="sw sw-valid"></i>Activación válida</span>
+          <span><i class="sw sw-valid"></i>Activación / ARRIBA</span>
+          <span><i class="sw sw-cal"></i>Fase de calibración</span>
           <label class="inline">Ventana
             <select id="win-sel"><option value="10">10 s</option><option value="15" selected>15 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
           </label>
         </div>
       </div>
       <canvas id="live" class="live"></canvas>
-      <div class="gauge-row"><span class="muted">Activación ahora</span>
+      <p class="muted small-text" id="emg-note">Muestras crudas a 1000 Hz; aquí se filtran (pasa altas 20 Hz y red 60 Hz con armónicos) solo para verlas.</p>
+    </div>
+
+    <!-- RMS que usa el atril -->
+    <div class="card">
+      <div class="row-between">
+        <h3>RMS que recibe el atril (cada 100 ms)</h3>
+        <div class="legend">
+          <span><i class="sw sw-env"></i>RMS</span>
+          <span><i class="sw sw-thr"></i>U_on / U_off</span>
+          <span><i class="sw sw-rest"></i>Reposo</span>
+          <span><i class="sw sw-valid"></i>Activación</span>
+          <span><i class="sw sw-used"></i>Usado en la calibración</span>
+        </div>
+      </div>
+      <canvas id="rms" class="rms"></canvas>
+      <div class="readouts" id="readouts"></div>
+      <div class="gauge-row"><span class="muted">Nivel (% de la referencia)</span>
         <div class="gauge"><div id="gauge-fill"></div><div id="gauge-mark"></div></div>
         <b id="gauge-val">—</b></div>
     </div>
 
     <!-- Métricas -->
     <div class="kpis">
-      <div class="kpi"><span>Activaciones cervicales válidas</span><b id="k-count">0</b><small id="k-disc"></small></div>
-      <div class="kpi"><span>Tiempo activo válido total</span><b id="k-active">0.0 s</b><small id="k-pct"></small></div>
+      <div class="kpi"><span>Activaciones (atril)</span><b id="k-count">0</b><small id="k-disc"></small></div>
+      <div class="kpi"><span>Tiempo activo total</span><b id="k-active">0.0 s</b><small id="k-pct"></small></div>
       <div class="kpi"><span>Contracción más larga</span><b id="k-max">0.0 s</b><small id="k-cur"></small></div>
-      <div class="kpi"><span>RMS normalizado (media)</span><b id="k-rms">—</b><small>% de la contracción de referencia</small></div>
+      <div class="kpi"><span>Esfuerzo medio</span><b id="k-rms">—</b><small>% de la referencia de la calibración</small></div>
       <div class="kpi"><span>Tiempo total de sesión</span><b id="k-time">00:00</b><small id="k-cal"></small></div>
     </div>
 
     <!-- Tabla -->
     <div class="card">
-      <div class="row-between">
-        <h3>Activaciones</h3>
-        <label class="inline"><input type="checkbox" id="tech-toggle"> Mostrar valores técnicos (RMS, MAV)</label>
-      </div>
+      <h3>Activaciones</h3>
       <div class="table-wrap">
         <table id="act-table">
-          <thead><tr>
-            <th>Activación</th><th>Inicio</th><th>Duración (s)</th><th>RMS norm. (%)</th>
-            <th class="tech">RMS (mV)</th><th class="tech">MAV (mV)</th>
-          </tr></thead>
-          <tbody id="act-body"><tr><td colspan="6" class="muted">Sin activaciones todavía.</td></tr></tbody>
+          <thead><tr><th>Activación</th><th>Inicio</th><th>Duración (s)</th><th>RMS medio (mV)</th><th>% de la referencia</th></tr></thead>
+          <tbody id="act-body"><tr><td colspan="5" class="muted">Sin activaciones todavía.</td></tr></tbody>
         </table>
       </div>
     </div>
+
+    <!-- Mensajes del atril -->
+    <details class="card" id="log-card">
+      <summary><b>Mensajes del atril</b> <span class="muted small-text">(los mismos del monitor serie del ESP32)</span></summary>
+      <pre id="log" class="log"></pre>
+    </details>
 
     <div class="form-actions bottom">
       <button class="btn ghost" id="btn-csv" type="button">Guardar datos en CSV</button>
@@ -243,7 +294,7 @@
             <option value="medContrS">Duración media de contracción (s)</option>
             <option value="activaciones">N.º de activaciones válidas</option>
             <option value="tiempoActivoS">Tiempo activo válido total (s)</option>
-            <option value="rmsNormMedio">RMS normalizado medio (%)</option>
+            <option value="rmsNormMedio">Esfuerzo medio (% de la referencia)</option>
           </select>
         </label>
       </div>
@@ -255,7 +306,7 @@
     <div class="card">
       <h3>Sesiones</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Fecha</th><th>Duración</th><th>Activ.</th><th>T. activo (s)</th><th>% activo</th><th>Máx (s)</th><th>RMS norm. (%)</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Duración</th><th>Activ.</th><th>T. activo (s)</th><th>% activo</th><th>Máx (s)</th><th>Esfuerzo (%)</th><th></th></tr></thead>
         <tbody id="h-body"></tbody>
       </table></div>
     </div>
@@ -284,8 +335,8 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="js/dsp.js"></script>
-<script src="js/calibration.js"></script>
 <script src="js/sources.js"></script>
+<script src="js/atril.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/charts.js"></script>
 <script src="js/app.js"></script>

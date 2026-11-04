@@ -1,7 +1,8 @@
 /*
   =====================================================================
-   ASTRA - Arduino UNO R4 (lado del nino): diagnostico_emg_enlace.ino  v2
-   Mide la senal de Nova y la resume en un numero cada 100 ms.
+   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg.ino  v4
+   Mide la senal de Nova, manda el RMS al ESP32 por el opto (cada 100 ms)
+   y la senal CRUDA a la pagina web por WiFi.
   ---------------------------------------------------------------------
    Lee A0 (JP3 puenteado) 1000 veces por segundo y, cada 100 ms, calcula
    tres RMS (en voltios, a la salida EMG_Out):
@@ -10,12 +11,26 @@
      SinArm  : quitando 60, 120, 180, 240, 300, 360 y 420 Hz (red y armonicos)
 
    Salidas:
-     - USB (Serial, 250000 baud): "Bruto:x,Sin60:y,SinArm:z" para el Serial
-       Plotter de la laptop (igual que el diagnostico del biceps).
      - Opto (Serial1, pin D1, 9600 baud): solo SinArm en milivoltios, una
        linea de texto por bloque ("640\n"). Es lo que lee el ESP32.
+       Mismo procesamiento y mismo formato que v2.
+     - WiFi: el Arduino crea la red "ASTRA" (clave RED_CLAVE) y atiende en
+       http://192.168.4.1 :
+         /        -> texto con el estado (sirve para probar desde el navegador)
+         /stream  -> muestras CRUDAS del ADC (1000 por segundo), sin fin,
+                     en paquetes binarios de 20 muestras (20 ms):
+                       0xAA 0x55 | seq | n | n x uint16 little-endian | checksum
+                     checksum = XOR de seq, n y los bytes de las muestras;
+                     seq = numero de paquete (0..255): la pagina ve los huecos.
+       La pagina filtra (pasa altas, 60 Hz y armonicos) y dibuja la senal.
+       El ESP32 del atril se une a esta misma red.
+     - USB (Serial, 250000 baud), segun USB_PARA_PAGINA:
+         false -> "Bruto:x,Sin60:y,SinArm:z" para el Serial Plotter (como v2).
+         true  -> los mismos paquetes crudos de /stream (pagina por Web Serial).
+       Solo se escribe si hay una computadora abierta en el puerto, y nunca
+       se espera: si no cabe, se descarta.
 
-   Como leerlo (en reposo):
+   Como leer el Serial Plotter (en reposo):
      Bruto mucho mayor que Sin60   -> hay mucho 60 Hz
      Sin60 mucho mayor que SinArm  -> los armonicos de la red dominan
      SinArm sigue alto (> ~0.05 V) -> ruido de banda ancha: electrodos, cables o la placa
@@ -23,25 +38,35 @@
 
    Regla de diseno: el Arduino solo mide y envia; nunca controla un actuador.
 
-   Cambios v2 (mismo procesamiento que v1):
-     - El envio ya no puede retrasar el muestreo: al opto sale 1 caracter
-       cada 2 ms (a 9600 baud uno tarda 1.04 ms, asi nunca hay que esperar
-       a que salga el anterior) y al USB solo lo que cabe antes de la
-       siguiente muestra. Resuelve el pendiente "Envio en el Arduino".
-     - El centro (DC) arranca en la primera lectura real, no en 2.5 V fijo.
-     - Los primeros 0.5 s no se mandan al ESP32 (filtros asentandose).
-     - TS_US sale de FS, y solo se crean los notch por debajo de FS/2.
-     - PIN_MUESTREO opcional para ver el muestreo con el osciloscopio.
+   Cambios v4 respecto a v2 (mismo procesamiento y mismo envio al ESP32):
+     - El muestreo de 1 kHz corre en una interrupcion de temporizador
+       (FspTimer). El WiFi del R4 hace esperas de varios ms en cada envio;
+       asi nunca retrasa una muestra.
+     - Los RMS de cada bloque pasan por una cola de 6.4 s y el loop los
+       manda al opto como linea completa. Si el WiFi tarda, la linea sale
+       un poco despues pero completa, y ningun bloque se pierde (el ESP32
+       calibra con el "reloj de las muestras": cuenta bloques, no tiempo).
+     - WiFi: punto de acceso "ASTRA" + /stream con la senal cruda.
+     - El USB nunca bloquea (solo escribe lo que cabe).
 
-   Placa: "Arduino UNO R4 WiFi" (o Minima). Sin bibliotecas extra.
+   SEGURIDAD: con WiFi no hace falta ningun cable entre el nino y la
+   laptop; el opto sigue aislando las tierras del nino y del atril. Si
+   usas USB_PARA_PAGINA, la laptop NO debe estar cargando mientras el USB
+   del Arduino toca a un nino con electrodos.
+
+   Placa: "Arduino UNO R4 WiFi". Bibliotecas: WiFiS3 (viene con el paquete
+   de placas UNO R4). Si el WiFi no arranca, actualiza el firmware del
+   modulo (Herramientas > Firmware Updater en el IDE 2).
   =====================================================================
 */
 #include <Arduino.h>
 #include <math.h>
+#include <WiFiS3.h>
+#include "FspTimer.h"
 
 // ------------------------- Parametros ajustables -----------------------
 const int   PIN_EMG  = A0;
-const float FS       = 1000.0f;   // Hz. Si cambia, los notch se recalculan solos
+const float FS       = 1000.0f;   // Hz. Si cambia, los notch se recalculan solos (y cambia "Frecuencia" en la pagina)
 const int   N_BLOQUE = 100;       // muestras por RMS (100 = 100 ms = cada cuanto llega un dato al ESP32)
 const float ALPHA_DC = 0.003f;    // que tan lento sigue el centro de la senal (~0.5 Hz)
 const int   N_ARM    = 7;         // notch en 60, 120, ... 420 Hz
@@ -51,12 +76,17 @@ const float V_REF = 5.0f, ADC_MAX = 16383.0f;     // 14 bits, referencia de 5 V
 
 const unsigned long BAUD_USB  = 250000;
 const unsigned long BAUD_OPTO = 9600;
-const int TICKS_POR_CARACTER  = 2;     // opto: 1 caracter cada 2 muestras (2 ms)
 const int BLOQUES_ASENTAR     = 5;     // primeros 5 bloques (0.5 s) no van al ESP32
-const uint32_t MARGEN_US      = 150;   // tiempo que se deja libre antes de la siguiente muestra
 const int PIN_MUESTREO        = -1;    // pon p. ej. 7 para ver cada muestra en el osciloscopio
 
-const uint32_t TS_US = (uint32_t)(1000000.0f / FS + 0.5f);   // 1/FS en microsegundos
+// ------------------------- WiFi y pagina -------------------------------
+// RED_SSID / RED_CLAVE deben ser iguales en esp32_calibracion.ino.
+const bool USAR_WIFI       = true;
+const char RED_SSID[]      = "ASTRA";
+const char RED_CLAVE[]     = "astra2026";      // minimo 8 caracteres
+const IPAddress IP_ARDUINO(192, 168, 4, 1);    // "IP del Arduino" en los Ajustes de la pagina
+const bool USB_PARA_PAGINA = false;            // true: paquetes crudos por USB en vez del Serial Plotter
+const char VERSION_EMG[]   = "4";
 
 // ------------------------- Notch biquad (forma directa II transpuesta) --
 struct Notch {
@@ -68,21 +98,97 @@ struct Notch {
   float run(float x) { float y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return y; }
 };
 
+// ---- Todo esto lo usa SOLO la interrupcion de muestreo ----
 Notch n60, arm[N_ARM];
 int nArm = 0;                       // cuantos armonicos caben debajo de FS/2
-
 float dc = 2.5f;
-
-// RMS en bloques de N_BLOQUE muestras
-double s_bruto = 0, s_60 = 0, s_arm = 0;
+double s_bruto = 0, s_60 = 0, s_arm = 0;   // RMS en bloques de N_BLOQUE muestras
 int cuenta = 0;
 int bloquesHechos = 0;
 
-// ------------------------- Salida sin esperas --------------------------
-char usbLinea[64];  int usbLen = 0,  usbPos = 0;
-char optoLinea[12]; int optoLen = 0, optoPos = 0;
-int ticksOpto = 0;
+// ---- Muestras crudas: la interrupcion escribe, el loop lee ----
+const uint32_t N_CRUDO = 2048;      // 2 s de reserva (potencia de 2)
+volatile uint16_t crudo[N_CRUDO];
+volatile uint32_t nCrudo = 0;       // muestras escritas desde el arranque
 
+// ---- Cola de bloques RMS (6.4 s): la interrupcion escribe, el loop lee ----
+const uint32_t N_COLA = 64;
+volatile float colaBruto[N_COLA], cola60[N_COLA], colaArm[N_COLA];
+volatile bool colaOpto[N_COLA];
+volatile uint32_t colaEsc = 0, colaLei = 0;
+volatile uint32_t bloquesPerdidos = 0;
+
+// ---- Paquetes para la pagina ----
+const int N_PAQ = 20;                         // muestras por paquete (20 ms)
+const int LARGO_PAQ = 4 + 2 * N_PAQ + 1;      // 45 bytes
+const int MAX_PAQ_WIFI = 10;                  // hasta 200 ms por envio
+uint8_t bufWifi[LARGO_PAQ * MAX_PAQ_WIFI];
+uint8_t bufUsb[LARGO_PAQ];
+
+FspTimer temporizador;
+bool wifiListo = false;
+WiFiServer servidor(80);
+WiFiClient flujo;
+bool transmitiendo = false;
+uint32_t sigWifi = 0, sigUsb = 0;             // siguiente muestra a mandar
+uint32_t tRevisar = 0, tEnvio = 0, tVivo = 0;
+
+// ======================================================================
+//  Muestreo (interrupcion a FS). Mismo procesamiento que v2.
+// ======================================================================
+void alMuestrear(timer_callback_args_t *) {
+  if (PIN_MUESTREO >= 0) digitalWrite(PIN_MUESTREO, HIGH);
+
+  int cuentaAdc = analogRead(PIN_EMG);
+  crudo[nCrudo & (N_CRUDO - 1)] = (uint16_t)cuentaAdc;
+  nCrudo = nCrudo + 1;
+
+  float v = cuentaAdc * V_REF / ADC_MAX;
+  dc += ALPHA_DC * (v - dc);
+  float x = v - dc;
+
+  float y60 = n60.run(x);
+  float ya = x;
+  for (int k = 0; k < nArm; k++) ya = arm[k].run(ya);
+
+  s_bruto += (double)x * x;
+  s_60    += (double)y60 * y60;
+  s_arm   += (double)ya * ya;
+
+  if (++cuenta >= N_BLOQUE) {
+    if (bloquesHechos <= BLOQUES_ASENTAR) bloquesHechos++;
+    if (colaEsc - colaLei < N_COLA) {
+      uint32_t i = colaEsc % N_COLA;
+      colaBruto[i] = sqrt(s_bruto / N_BLOQUE);
+      cola60[i]    = sqrt(s_60 / N_BLOQUE);
+      colaArm[i]   = sqrt(s_arm / N_BLOQUE);
+      colaOpto[i]  = bloquesHechos > BLOQUES_ASENTAR;
+      colaEsc = colaEsc + 1;
+    } else {
+      bloquesPerdidos = bloquesPerdidos + 1;   // el loop lleva > 6.4 s sin vaciar la cola
+    }
+    s_bruto = s_60 = s_arm = 0;
+    cuenta = 0;
+  }
+
+  if (PIN_MUESTREO >= 0) digitalWrite(PIN_MUESTREO, LOW);
+}
+
+bool iniciarTemporizador() {
+  uint8_t tipo = GPT_TIMER;
+  int8_t canal = FspTimer::get_available_timer(tipo);
+  if (canal < 0) canal = FspTimer::get_available_timer(tipo, true);   // uno reservado para PWM (no usamos PWM)
+  if (canal < 0) { tipo = AGT_TIMER; canal = FspTimer::get_available_timer(tipo); }
+  if (canal < 0) return false;
+  if (!temporizador.begin(TIMER_MODE_PERIODIC, tipo, canal, FS, 0.0f, alMuestrear)) return false;
+  if (!temporizador.setup_overflow_irq()) return false;
+  if (!temporizador.open()) return false;
+  return temporizador.start();
+}
+
+// ======================================================================
+//  Opto (ESP32) y Serial Plotter: una linea por bloque
+// ======================================================================
 // Escribe "1.234" (voltios con 3 decimales) usando enteros
 int ponerVoltios(char *dst, int cap, const char *etiqueta, float v) {
   long mv = lroundf(v * 1000.0f);
@@ -90,37 +196,187 @@ int ponerVoltios(char *dst, int cap, const char *etiqueta, float v) {
   return snprintf(dst, cap, "%s:%ld.%03ld", etiqueta, mv / 1000, mv % 1000);
 }
 
-void prepararLineas(float rmsBruto, float rms60, float rmsArm) {
-  // USB: igual que antes -> Bruto:0.123,Sin60:0.045,SinArm:0.012
-  int n = 0;
-  n += ponerVoltios(usbLinea + n, sizeof(usbLinea) - n, "Bruto", rmsBruto);
-  usbLinea[n++] = ',';
-  n += ponerVoltios(usbLinea + n, sizeof(usbLinea) - n, "Sin60", rms60);
-  usbLinea[n++] = ',';
-  n += ponerVoltios(usbLinea + n, sizeof(usbLinea) - n, "SinArm", rmsArm);
-  usbLinea[n++] = '\r';
-  usbLinea[n++] = '\n';
-  usbLen = n;
-  usbPos = 0;                       // si quedaba algo sin mandar, lo nuevo lo reemplaza
+void vaciarCola() {
+  while (colaLei != colaEsc) {
+    uint32_t i = colaLei % N_COLA;
+    float rmsBruto = colaBruto[i], rms60 = cola60[i], rmsArm = colaArm[i];
+    bool alOpto = colaOpto[i];
+    colaLei = colaLei + 1;
 
-  // Opto: solo SinArm en mV, de 1 a 6 cifras y fin de linea -> "640\n"
-  if (bloquesHechos > BLOQUES_ASENTAR) {
-    long mv = lroundf(rmsArm * 1000.0f);
-    mv = constrain(mv, 0L, 999999L);
-    optoLen = snprintf(optoLinea, sizeof(optoLinea), "%ld\n", mv);
-    optoPos = 0;
-    ticksOpto = TICKS_POR_CARACTER;  // el primer caracter sale ya
+    // Opto: solo SinArm en mV, de 1 a 6 cifras y fin de linea -> "640\n"
+    // La linea sale completa (unos 5 ms a 9600 baud): el ESP32 descarta
+    // las lineas con huecos de mas de 50 ms.
+    if (alOpto) {
+      long mv = lroundf(rmsArm * 1000.0f);
+      mv = constrain(mv, 0L, 999999L);
+      char l[12];
+      int n = snprintf(l, sizeof l, "%ld\n", mv);
+      Serial1.write((const uint8_t *)l, n);
+    }
+
+    // USB: igual que v2 -> Bruto:0.123,Sin60:0.045,SinArm:0.012
+    if (!USB_PARA_PAGINA && Serial) {
+      char u[64];
+      int n = 0;
+      n += ponerVoltios(u + n, sizeof(u) - n, "Bruto", rmsBruto);
+      u[n++] = ',';
+      n += ponerVoltios(u + n, sizeof(u) - n, "Sin60", rms60);
+      u[n++] = ',';
+      n += ponerVoltios(u + n, sizeof(u) - n, "SinArm", rmsArm);
+      u[n++] = '\r';
+      u[n++] = '\n';
+      if (Serial.availableForWrite() >= n) Serial.write((const uint8_t *)u, n);
+    }
   }
 }
 
-// Se llama una vez por muestra. Nunca espera a que un caracter termine de salir.
-void enviarPendiente(uint32_t tSiguiente) {
-  if (optoPos < optoLen && ++ticksOpto >= TICKS_POR_CARACTER) {
-    ticksOpto = 0;
-    Serial1.write((uint8_t)optoLinea[optoPos++]);
+// ======================================================================
+//  Paquetes de muestras crudas (WiFi y USB)
+// ======================================================================
+// Arma hasta maxPaq paquetes desde 'sig' (siempre multiplo de N_PAQ).
+// Si la pagina se atraso mas de lo que se guarda, salta adelante: el
+// numero seq deja ver el hueco.
+int armarPaquetes(uint32_t &sig, uint8_t *buf, int maxPaq) {
+  uint32_t hay = nCrudo;
+  if (hay - sig > N_CRUDO - 4 * N_PAQ) sig = hay - (hay % N_PAQ) - 2 * N_PAQ;
+  int len = 0;
+  for (int paq = 0; paq < maxPaq && hay - sig >= (uint32_t)N_PAQ; paq++) {
+    uint8_t *p = buf + len;
+    p[0] = 0xAA;
+    p[1] = 0x55;
+    p[2] = (uint8_t)(sig / N_PAQ);
+    p[3] = N_PAQ;
+    uint8_t chk = p[2] ^ p[3];
+    for (int i = 0; i < N_PAQ; i++) {
+      uint16_t v = crudo[(sig + i) & (N_CRUDO - 1)];
+      p[4 + 2 * i] = v & 0xFF;
+      p[5 + 2 * i] = v >> 8;
+      chk ^= p[4 + 2 * i] ^ p[5 + 2 * i];
+    }
+    p[LARGO_PAQ - 1] = chk;
+    sig += N_PAQ;
+    len += LARGO_PAQ;
   }
-  while (usbPos < usbLen && (int32_t)(tSiguiente - micros()) > (int32_t)MARGEN_US) {
-    Serial.write((uint8_t)usbLinea[usbPos++]);
+  return len;
+}
+
+// Empieza a mandar desde "ahora" (sin la reserva vieja)
+uint32_t inicioAlineado() {
+  uint32_t hay = nCrudo;
+  return hay - (hay % N_PAQ);
+}
+
+void mandarCrudoUsb() {
+  if (!Serial) { sigUsb = inicioAlineado(); return; }
+  while (Serial.availableForWrite() >= LARGO_PAQ) {
+    int len = armarPaquetes(sigUsb, bufUsb, 1);
+    if (!len) break;
+    Serial.write(bufUsb, len);
+  }
+}
+
+// ======================================================================
+//  WiFi: punto de acceso + servidor web
+// ======================================================================
+void iniciarWifi() {
+  if (WiFi.status() == WL_NO_MODULE) {
+    if (!USB_PARA_PAGINA) Serial.println("!! No responde el modulo WiFi del R4.");
+    return;
+  }
+  WiFi.config(IP_ARDUINO);
+  if (WiFi.beginAP(RED_SSID, RED_CLAVE) != WL_AP_LISTENING) {
+    if (!USB_PARA_PAGINA) Serial.println("!! No se pudo crear la red WiFi.");
+    return;
+  }
+  servidor.begin();
+  wifiListo = true;
+  if (!USB_PARA_PAGINA) {
+    Serial.print(">> Red WiFi ");
+    Serial.print(RED_SSID);
+    Serial.print(" lista. Senal en http://");
+    Serial.print(IP_ARDUINO);
+    Serial.println("/stream");
+  }
+}
+
+void cerrarFlujo() {
+  flujo.stop();
+  transmitiendo = false;
+}
+
+const char CORS[] =
+  "Access-Control-Allow-Origin: *\r\n"
+  "Access-Control-Allow-Private-Network: true\r\n"
+  "Cache-Control: no-store\r\n"
+  "Connection: close\r\n";
+
+void responderTexto(WiFiClient &c, const char *estado, const char *texto) {
+  char h[384];
+  int n = snprintf(h, sizeof h, "HTTP/1.1 %s\r\nContent-Type: text/plain; charset=utf-8\r\n%sContent-Length: %d\r\n\r\n",
+                   estado, CORS, (int)strlen(texto));
+  c.write((const uint8_t *)h, n);
+  if (*texto) c.write((const uint8_t *)texto, strlen(texto));
+  c.stop();
+}
+
+// Lee la primera linea de la peticion ("GET /stream HTTP/1.1") y responde
+void atenderPeticion(WiFiClient &c) {
+  char l[96];
+  int n = 0;
+  uint32_t t0 = millis();
+  while (millis() - t0 < 400 && n < (int)sizeof(l) - 1) {
+    if (!c.available()) { if (!c.connected()) break; continue; }
+    int ch = c.read();
+    if (ch < 0) continue;
+    if (ch == '\n') break;
+    if (ch != '\r') l[n++] = (char)ch;
+  }
+  l[n] = 0;
+  uint8_t resto[64];                            // el resto de la peticion (cabeceras) no se usa
+  for (uint32_t t1 = millis(); c.available() && millis() - t1 < 100; ) c.read(resto, sizeof resto);
+
+  if (!strncmp(l, "OPTIONS ", 8)) {             // permiso previo del navegador
+    char h[320];
+    int k = snprintf(h, sizeof h, "HTTP/1.1 204 No Content\r\n%sAccess-Control-Allow-Methods: GET\r\n"
+                     "Access-Control-Allow-Headers: *\r\nContent-Length: 0\r\n\r\n", CORS);
+    c.write((const uint8_t *)h, k);
+    c.stop();
+  } else if (!strncmp(l, "GET /stream", 11)) {
+    if (transmitiendo) cerrarFlujo();           // solo una pagina a la vez: la nueva reemplaza
+    char h[320];
+    int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                     "X-Content-Type-Options: nosniff\r\n%s\r\n", CORS);
+    c.write((const uint8_t *)h, k);
+    flujo = c;
+    transmitiendo = true;
+    sigWifi = inicioAlineado();
+    tVivo = millis();
+  } else if (!strncmp(l, "GET ", 4)) {
+    char t[256];
+    snprintf(t, sizeof t, "ASTRA - Arduino EMG v%s\nMuestreo: %d Hz\nMuestras: %lu\nBloques perdidos: %lu\n"
+             "Pagina conectada: %s\nLa senal cruda sale en /stream\n",
+             VERSION_EMG, (int)FS, (unsigned long)nCrudo, (unsigned long)bloquesPerdidos, transmitiendo ? "si" : "no");
+    responderTexto(c, "200 OK", t);
+  } else {
+    responderTexto(c, "400 Bad Request", "");
+  }
+}
+
+void atenderWifi() {
+  uint32_t ahora = millis();
+  if (ahora - tRevisar >= 100) {                // nuevas peticiones, 10 veces por segundo
+    tRevisar = ahora;
+    WiFiClient nuevo = servidor.available();
+    if (nuevo && !(transmitiendo && nuevo == flujo)) atenderPeticion(nuevo);
+  }
+  if (transmitiendo && ahora - tEnvio >= 40) {  // la senal sale en tandas de ~40 ms
+    tEnvio = ahora;
+    int len = armarPaquetes(sigWifi, bufWifi, MAX_PAQ_WIFI);
+    if (len && flujo.write(bufWifi, len) != (size_t)len) cerrarFlujo();   // la pagina se fue
+  }
+  if (transmitiendo && ahora - tVivo >= 1000) {
+    tVivo = ahora;
+    if (!flujo.connected()) cerrarFlujo();
   }
 }
 
@@ -141,37 +397,23 @@ void setup() {
   float s = 0;
   for (int i = 0; i < 16; i++) s += analogRead(PIN_EMG) * V_REF / ADC_MAX;
   dc = s / 16.0f;
+
+  if (!iniciarTemporizador()) {
+    // Sin temporizador no hay muestreo fiable: lo avisa y parpadea el LED
+    pinMode(LED_BUILTIN, OUTPUT);
+    for (;;) {
+      Serial.println("!! No hay temporizador libre para el muestreo.");
+      digitalWrite(LED_BUILTIN, HIGH); delay(200);
+      digitalWrite(LED_BUILTIN, LOW);  delay(800);
+    }
+  }
+
+  // El muestreo ya corre; crear la red tarda unos segundos (la cola guarda los bloques)
+  if (USAR_WIFI) iniciarWifi();
 }
 
 void loop() {
-  static uint32_t tSiguiente = micros();
-  while ((int32_t)(micros() - tSiguiente) < 0) {}   // espera exacta, sin delay()
-  tSiguiente += TS_US;
-  if (PIN_MUESTREO >= 0) digitalWrite(PIN_MUESTREO, HIGH);
-
-  float v = analogRead(PIN_EMG) * V_REF / ADC_MAX;
-  dc += ALPHA_DC * (v - dc);
-  float x = v - dc;
-
-  float y60 = n60.run(x);
-  float ya = x;
-  for (int k = 0; k < nArm; k++) ya = arm[k].run(ya);
-
-  s_bruto += (double)x * x;
-  s_60    += (double)y60 * y60;
-  s_arm   += (double)ya * ya;
-
-  if (PIN_MUESTREO >= 0) digitalWrite(PIN_MUESTREO, LOW);
-
-  if (++cuenta >= N_BLOQUE) {
-    float rmsBruto = sqrt(s_bruto / N_BLOQUE);
-    float rms60    = sqrt(s_60 / N_BLOQUE);
-    float rmsArm   = sqrt(s_arm / N_BLOQUE);
-    if (bloquesHechos <= BLOQUES_ASENTAR) bloquesHechos++;
-    prepararLineas(rmsBruto, rms60, rmsArm);
-    s_bruto = s_60 = s_arm = 0;
-    cuenta = 0;
-  }
-
-  enviarPendiente(tSiguiente);
+  vaciarCola();
+  if (USB_PARA_PAGINA) mandarCrudoUsb();
+  if (wifiListo) atenderWifi();
 }

@@ -1,16 +1,21 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v2.3
+//  ASTRA - Firmware del atril (ESP32) v3.0
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
-//  Entrada: el Arduino UNO R4 (diagnostico_emg_enlace.ino) manda por el
-//  opto, cada 100 ms, una linea con el RMS en milivoltios ("640\n").
+//  Entrada: el Arduino UNO R4 WiFi (arduino_emg.ino) manda por el opto,
+//  cada 100 ms, una linea con el RMS en milivoltios ("640\n").
 //
 //  Que hace:
 //   1. ARRANQUE: sube las estrellas hasta el microswitch (posicion 0).
 //      El lazy susan empieza a girar desde el encendido.
-//   2. CALIBRANDO (segun "Calibracion en la pagina sEMG cervical", 60 s):
-//      REPOSO 10 s -> PASIVA 10 s -> [ARRIBA 4 s + ABAJO 4 s] x 5
+//   2. CALIBRANDO (segun "Calibracion en la pagina sEMG cervical", 60 s),
+//      PASO A PASO desde la pagina web (o con el boton BOOT):
+//        "Comenzar calibracion" -> espera
+//        "Comenzar reposo"  -> REPOSO 10 s               -> espera
+//        "Comenzar pasiva"  -> PASIVA 10 s               -> espera
+//        "Comenzar activa"  -> [ARRIBA 4 s + ABAJO 4 s] x 5 -> resultados
+//        "Iniciar sesion"   -> SESION
 //      U_on = mayor de (media_reposo + 3 SD_reposo, 25 % envolvente_activa)
 //      U_off = 0.6 x U_on
 //      Las estrellas ya van y vienen, lento.
@@ -25,58 +30,49 @@
 //      - Sonido: 0001.mp3 tras 1 s relajado; 0002.mp3 al llegar arriba relajado.
 //   4. Seguridad: sin datos validos por 500 ms las estrellas pasan a lento y
 //      la luz a ambar. PARO (IO34, con USAR_PARO) y la pausa p detienen todo.
+//   5. WiFi: se une a la red "ASTRA" que crea el Arduino y atiende a la
+//      pagina web en http://192.168.4.200 (/estado y /cmd?c=...). La red
+//      corre en el nucleo 0; motores, luz y deteccion siguen en el nucleo 1,
+//      asi que la pagina nunca frena a los motores. Sin pagina, el atril
+//      funciona igual con el boton BOOT y el monitor serie.
 //
-//  Comandos (monitor serie a 115200, "Sin ajuste de linea"):
-//   c = recalibrar   p = pausa / seguir   r = reanudar tras el paro
+//  Comandos (monitor serie a 115200, "Sin ajuste de linea", o la pagina):
+//   c = comenzar (o repetir) la calibracion: queda esperando el primer paso
+//   1 = comenzar REPOSO   2 = comenzar PASIVA   3 = comenzar ACTIVA
+//   x = cancelar la fase que se esta midiendo
+//   s = iniciar la sesion (con la calibracion LISTA)
+//   n = siguiente paso (lo mismo que el boton BOOT)
+//   p = pausa / seguir   r = reanudar tras el paro
 //   h = volver a buscar el tope   + / - = umbral   i = info de calibracion
-//  Boton BOOT de la placa: recalibrar (o reanudar tras el paro).
+//  Boton BOOT de la placa: siguiente paso de la calibracion; en sesion,
+//  recalibrar; tras el paro, reanudar.
 //
-//  Placa: "ESP32 Dev Module". Biblioteca: AccelStepper (el DFPlayer se maneja
-//  con comandos directos, no necesita su biblioteca).
+//  Placa: "ESP32 Dev Module". Bibliotecas: AccelStepper. WiFi y WebServer
+//  vienen con el paquete de placas ESP32 (el DFPlayer se maneja con
+//  comandos directos, no necesita su biblioteca).
 //
-//  Cambios v2 respecto a v1 (mismas reglas del documento):
-//   - Buscar el tope siempre va a 400 pasos/s (en v1, despues de una bajada,
-//     AccelStepper lo recortaba a 300).
-//   - La espera de 1.5 s cuenta desde que se CONFIRMA la relajacion
-//     (confirmacion 0.3 s + espera 1.5 s, como el documento; en v1 la espera
-//     real era 1.2 s). La duracion se sigue midiendo hasta que la senal bajo
-//     del umbral, y el RMS medio usa justo esas muestras (en v1 empezaba
-//     despues de la confirmacion).
-//   - Confirmacion de 300 ms = 4 bloques seguidos, aunque un bloque llegue
-//     unos ms antes (en v1 a veces hacian falta 5 bloques).
-//   - Watchdog: al cortarse los datos se cierra la activacion en curso (no
-//     suma tiempo sin senal) y se avisa una sola vez en el monitor. Al volver,
-//     las estrellas esperan 1.5 s antes de bajar (dan tiempo a reconfirmar).
-//   - El frenado por pausa / calibracion / sin datos ya no puede quedar
-//     "olvidado" de una sesion anterior.
-//   - Microswitch: tambien detiene si lo tocan por inercia al frenar, y fija
-//     el tope sin romper la secuencia de las bobinas (sin tiron hacia arriba).
-//   - Sonido: si una pista no puede sonar por la pausa de 3 s, suena en
-//     cuanto se pueda si su motivo sigue vigente (antes la pista 2 se perdia).
-//     Los comandos se mandan aunque el DFPlayer no conteste al arrancar
-//     (p. ej. si se enciende con el paro presionado), y el volumen se
-//     reenvia cada vez que se busca el tope (tambien con h).
-//   - Lectura: la primera linea (puede llegar a medias) y una linea cortada
-//     a la mitad se descartan. EMG_INVERTIDO por si el opto invierte.
-//   - Las bobinas quedan apagadas desde el primer instante del arranque.
-//  v2.1 (diagnostico en el atril):
-//   - La linea [SESION] muestra el umbral y dice si las estrellas estan
-//     DESACTIVADAS (no se encontro el tope).
-//   - Si al bajar del tope el microswitch sigue presionado (cableado en NC o
-//     atorado), las estrellas se desactivan y lo avisa, en vez de seguir
-//     desenrollando el hilo.
-//   - Los planetas arrancan con rampa suave (permite subir V_PLANETAS).
-//  v2.2: PREMIO_AL_RELAJAR. Sin contraccion las estrellas suben rapido
-//   (700 pasos/s) y la luz lila crece; al contraer esperan 1.5 s y bajan
-//   rapido (500 pasos/s). PREMIO_AL_RELAJAR = false vuelve a la logica original.
-//  v2.3: el lazy susan gira siempre (salvo PARO o pausa). Las estrellas suben
-//   y bajan sin parar entre fondo y tope: rapido (700) con el musculo relajado,
-//   lento (250) activo. Orden de bobinas configurable, USAR_TOPE, y el arranque
-//   ya no espera al DFPlayer.
+//  Cambios v3.0 respecto a v2.3 (mismas reglas de calibracion y deteccion):
+//   - Calibracion paso a paso: tras "c" el atril ESPERA; cada fase (reposo,
+//     pasiva, activa) empieza solo cuando se pide (pagina, BOOT o 1/2/3) y
+//     al terminar vuelve a esperar. Cada fase se puede repetir o cancelar.
+//     Los umbrales de la sesion solo cambian cuando las tres fases estan
+//     hechas y la calibracion es valida. CALIBRACION_AUTOMATICA = true
+//     vuelve a la calibracion seguida de v2.3.
+//   - Al terminar, la calibracion queda LISTA y la sesion empieza con s,
+//     BOOT o el boton "Iniciar sesion" de la pagina.
+//   - WiFi + servidor web para la pagina (estado en vivo, RMS de cada
+//     bloque, activaciones y mensajes; comandos).
+//   - Cada sesion nueva (tras calibrar) reinicia el conteo de activaciones
+//     y el tiempo de sesion (sin contar las pausas).
+//   - La luz queda blanca tenue mientras la calibracion espera el siguiente
+//     paso.
 //  Para probar motores, luz, microswitch y opto por separado: prueba_atril.ino
 // =====================================================================
 
 #include <AccelStepper.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <stdarg.h>
 
 // ------------------------- Pines (esquematico) -------------------------
 // Motor de giro (J4):      IN1..IN4 = IO23, IO22, IO21, IO19
@@ -138,6 +134,9 @@ const float UMBRAL_K_SD        = 3.0;   // umbral estadistico: media + 3 SD del 
 const float UMBRAL_OFF_FACTOR  = 0.6;   // umbral_OFF = 0.6 x umbral_ON
 const float SNR_MINIMA         = 3.0;   // aviso si la contraccion apenas se distingue
 const float ARTEFACTO_MAX_PCT  = 80.0;  // aviso si el movimiento pasivo parece contraccion
+// true: las 3 fases corren seguidas y la sesion empieza sola (como v2.3).
+// false: cada fase espera a que la pidas (pagina, BOOT o teclas 1 / 2 / 3).
+const bool CALIBRACION_AUTOMATICA = false;
 
 // ------------------------- Luz y sonido -------------------------------
 const int BRILLO_MAX = 128;        // tope del 50 %
@@ -158,6 +157,18 @@ const bool USAR_TOPE = true;       // false si no hay microswitch: enciende con 
 const bool USAR_PARO = false;      // pon true cuando el divisor del paro (R6, R7) este conectado
 const bool EMG_INVERTIDO = false;  // pon true si el opto invierte (aviso "!! Llegan bytes ...")
 const unsigned long CORTE_LINEA_MS = 50;  // una linea con un hueco mayor a esto se descarta
+
+// ------------------------- WiFi (pagina web) --------------------------
+// El Arduino UNO R4 WiFi crea la red; el atril se une con una IP fija.
+// Deben coincidir con RED_SSID / RED_CLAVE de arduino_emg.ino y con
+// "IP del atril" en los Ajustes de la pagina.
+const bool USAR_WIFI = true;
+const char *RED_SSID  = "ASTRA";
+const char *RED_CLAVE = "astra2026";
+const IPAddress IP_ATRIL(192, 168, 4, 200);
+const IPAddress IP_PUERTA(192, 168, 4, 1);    // el Arduino
+const IPAddress MASCARA(255, 255, 255, 0);
+const char *VERSION_ATRIL = "3.0";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -190,8 +201,12 @@ bool hayDatos = false;
 bool datosAntes = false;
 
 // --- Calibracion ---
-enum FaseCal { CAL_REPOSO, CAL_PASIVA, CAL_ARRIBA, CAL_ABAJO, CAL_FALLIDA };
-FaseCal faseCal = CAL_REPOSO;
+// ESPERA: espera el siguiente paso. LISTA: las 3 fases hechas y validas.
+enum FaseCal { CAL_ESPERA, CAL_REPOSO, CAL_PASIVA, CAL_ARRIBA, CAL_ABAJO, CAL_LISTA, CAL_FALLIDA };
+const char *NOMBRE_FASE[] = {"ESPERA", "REPOSO", "PASIVA", "ARRIBA", "ABAJO", "LISTA", "FALLIDA"};
+const char *NOMBRE_PASO[] = {"REPOSO", "PASIVA", "ACTIVA"};
+FaseCal faseCal = CAL_ESPERA;
+bool hecho[3] = {false, false, false};   // reposo, pasiva y activa terminadas
 bool faseContrae = false;           // true durante ARRIBA (la luz se pone verde)
 int bloquesFase = 0;                // bloques recibidos en la fase actual (reloj de las muestras)
 int repCal = 0;                     // repeticion activa en curso (1..5)
@@ -204,6 +219,11 @@ double sumaA = 0, suma2A = 0;       // repeticion actual: envolvente y cuadrado 
 int nA = 0;
 double sumaRepRms = 0, sumaRepEnv = 0;
 int nRepsOK = 0;
+// Resultados de cada fase de la calibracion en curso (se ven en la pagina)
+float cReposo = 0, cSd = 0, cRestRms = 0, cPasMedia = 0, cPasPico = 0;
+float cActRms = 0, cActEnv = 0, cSnr = 0, cArt = 0;
+float cRepRms[CAL_REPS];
+// Calibracion aplicada (la que usa la sesion)
 float restRms = 0, pasivaMedia = 0, pasivaPico = 0;
 float activeRms = 0, activeEnv = 0, snr = 0, artefactoPct = 0;
 bool calibrado = false;
@@ -223,6 +243,9 @@ int nRmsAct = 0;
 float sumaCola = 0;                 // RMS bajo U_off aun sin confirmar (si se relajo, no cuenta)
 int nCola = 0;
 unsigned long tiempoActivoTotal = 0;
+int sesionId = 0;                   // sube con cada sesion nueva (tras calibrar)
+unsigned long msSesion = 0;         // tiempo en SESION (sin pausas)
+unsigned long msSesionIni = 0;      // msSesion al empezar la activacion en curso
 
 // --- Motores ---
 bool subiendo = false, bajando = false, frenando = false;
@@ -243,9 +266,41 @@ unsigned long bootCambio = 0;
 float luzR = 0, luzG = 0, luzB = 0;
 unsigned long ultimaLuz = 0, ultimoEstado = 0;
 
+// --- Pagina web ---
+// Lo escribe el nucleo 1 (loop) y lo lee el nucleo 0 (red): se copia con candado.
+portMUX_TYPE candado = portMUX_INITIALIZER_UNLOCKED;
+const int N_LOG = 24, LARGO_LOG = 160;
+char logTxt[N_LOG][LARGO_LOG];      // ultimos mensajes (los mismos del monitor serie)
+uint32_t nLog = 0;
+const int N_BLQ = 64;               // ultimos 6.4 s de RMS recibidos
+int32_t blqVal[N_BLQ];
+uint8_t blqFlag[N_BLQ];             // 1 = activacion, 2 = bloque usado en la calibracion
+uint32_t nBlq = 0;
+struct Activacion { int sid, id; float ini, dur; int rms, pct; };
+const int N_ACT = 32;
+Activacion actLista[N_ACT];
+uint32_t nActLista = 0;
+QueueHandle_t colaCmd = NULL;       // comandos de la pagina -> loop
+volatile int8_t avisoWifi = 0;      // 1 = conectado, -1 = se perdio (lo imprime el loop)
+uint32_t idArranque = 0;            // cambia en cada encendido (la pagina lo detecta)
+
 // ======================================================================
 //  Utilidades
 // ======================================================================
+// Imprime en el monitor serie y guarda el mensaje para la pagina.
+void msg(const char *fmt, ...) {
+  char t[LARGO_LOG];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(t, sizeof t, fmt, ap);
+  va_end(ap);
+  Serial.println(t);
+  portENTER_CRITICAL(&candado);
+  memcpy(logTxt[nLog % N_LOG], t, LARGO_LOG);
+  nLog++;
+  portEXIT_CRITICAL(&candado);
+}
+
 bool topePresionado() {
   if (digitalRead(PIN_TOPE) == HIGH) return false;
   delayMicroseconds(300);
@@ -259,6 +314,10 @@ bool datosOK() {
 // Estado que se premia: relajado (PREMIO_AL_RELAJAR) o contrayendo (original)
 bool premiado() { return PREMIO_AL_RELAJAR ? !activo : activo; }
 
+// La calibracion esta midiendo una fase (no esperando)
+bool midiendo() {
+  return faseCal == CAL_REPOSO || faseCal == CAL_PASIVA || faseCal == CAL_ARRIBA || faseCal == CAL_ABAJO;
+}
 
 float altura() {  // 0 = fondo, 1 = tope
   float a = 1.0f - (float)labs(estrellas.currentPosition()) / RECORRIDO;
@@ -326,22 +385,21 @@ void calcularUmbrales() {
 }
 
 void imprimirCalibracion() {
-  Serial.println();
-  Serial.println("---- Calibracion ----");
-  Serial.printf("Reposo (envolvente): %.1f mV\n", reposo);
-  Serial.printf("Ruido en reposo (SD): %.1f mV\n", sdReposo);
-  Serial.printf("Pasiva: media %.1f mV, pico %.1f mV\n", pasivaMedia, pasivaPico);
-  Serial.printf("Activa: RMS de referencia %.1f mV (envolvente %.1f mV, %d repeticiones)\n",
-                activeRms, activeEnv, nRepsOK);
-  Serial.printf("Relacion senal/reposo (SNR): %.1f\n", snr);
-  Serial.printf("Artefacto pasivo / activa: %.0f %%\n", artefactoPct);
-  Serial.printf("Umbral ON: %.1f mV (mayor de media + %.0f SD = %.1f, y %.0f %% activa = %.1f)\n",
-                umbralOn, UMBRAL_K_SD, reposo + UMBRAL_K_SD * sdReposo,
-                umbralPct * 100, umbralPct * activeEnv);
-  Serial.printf("Umbral OFF: %.1f mV (%.1f x umbral ON)\n", umbralOff, UMBRAL_OFF_FACTOR);
-  Serial.printf("Activaciones: %d | tiempo activo total: %.1f s | lineas danadas: %lu\n",
-                nActivaciones, tiempoActivoTotal / 1000.0f, lineasMalas);
-  Serial.println("---------------------");
+  msg("---- Calibracion ----");
+  msg("Reposo (envolvente): %.1f mV", reposo);
+  msg("Ruido en reposo (SD): %.1f mV", sdReposo);
+  msg("Pasiva: media %.1f mV, pico %.1f mV", pasivaMedia, pasivaPico);
+  msg("Activa: RMS de referencia %.1f mV (envolvente %.1f mV, %d repeticiones)",
+      activeRms, activeEnv, nRepsOK);
+  msg("Relacion senal/reposo (SNR): %.1f", snr);
+  msg("Artefacto pasivo / activa: %.0f %%", artefactoPct);
+  msg("Umbral ON: %.1f mV (mayor de media + %.0f SD = %.1f, y %.0f %% activa = %.1f)",
+      umbralOn, UMBRAL_K_SD, reposo + UMBRAL_K_SD * sdReposo,
+      umbralPct * 100, umbralPct * activeEnv);
+  msg("Umbral OFF: %.1f mV (%.1f x umbral ON)", umbralOff, UMBRAL_OFF_FACTOR);
+  msg("Activaciones: %d | tiempo activo total: %.1f s | lineas danadas: %lu",
+      nActivaciones, tiempoActivoTotal / 1000.0f, lineasMalas);
+  msg("---------------------");
 }
 
 // Termina la activacion en curso. 'fin' es cuando el musculo realmente se
@@ -356,8 +414,13 @@ void terminarActivacion(unsigned long fin) {
     tiempoActivoTotal += dur;
     float rmsMedio = nRmsAct ? sumaRmsAct / nRmsAct : 0;
     int pct = (int)lroundf(100.0f * (rmsMedio - reposo) / max(maximo - reposo, 1.0f));
-    Serial.printf("   Activacion #%d: %.1f s, RMS medio %.0f mV (%d %% de la referencia)\n",
-                  nActivaciones, dur / 1000.0f, rmsMedio, pct);
+    msg("   Activacion #%d: %.1f s, RMS medio %.0f mV (%d %% de la referencia)",
+        nActivaciones, dur / 1000.0f, rmsMedio, pct);
+    Activacion a = {sesionId, nActivaciones, msSesionIni / 1000.0f, dur / 1000.0f, (int)lroundf(rmsMedio), pct};
+    portENTER_CRITICAL(&candado);
+    actLista[nActLista % N_ACT] = a;
+    nActLista++;
+    portEXIT_CRITICAL(&candado);
   }
   tSobre = tBajo = 0;
 }
@@ -369,6 +432,8 @@ void cerrarActivacion() { cerrarActivacion(millis()); }
 // ======================================================================
 //  Cambios de modo
 // ======================================================================
+void empezarFase(int f);            // mas abajo
+
 void iniciarArranque() {
   cerrarActivacion();
   modo = ARRANQUE;
@@ -382,27 +447,42 @@ void iniciarArranque() {
   estrellas.setMaxSpeed(V_HOMING > V_VAIVEN_RAPIDO ? V_HOMING : V_VAIVEN_RAPIDO);  // si no, setSpeed lo recorta
   estrellas.setSpeed(DIR_SUBIR * V_HOMING);
   dfVolumenEn = millis() + 2000;     // el DFPlayer pudo reiniciarse (paro): reenvia el volumen
-  Serial.println();
-  Serial.println(">> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).");
+  msg(">> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).");
 }
 
+void reiniciarFase(int f) {
+  if (f == 0) { sumaR = suma2R = 0; nR = 0; }
+  else if (f == 1) { sumaP = 0; nP = 0; picoP = 0; }
+  else {
+    sumaA = suma2A = 0; nA = 0;
+    sumaRepRms = sumaRepEnv = 0; nRepsOK = 0;
+    for (int i = 0; i < CAL_REPS; i++) cRepRms[i] = 0;
+  }
+  hecho[f] = false;
+}
+
+// Deja la calibracion lista para empezar: espera el primer paso.
 void iniciarCalibracion() {
   cerrarActivacion();
   modo = CALIBRANDO;
-  faseCal = CAL_REPOSO;
+  faseCal = CAL_ESPERA;
   faseContrae = false;
   bloquesFase = 0; repCal = 0;
-  sumaR = suma2R = 0; nR = 0;
-  sumaP = 0; nP = 0; picoP = 0;
-  sumaA = suma2A = 0; nA = 0;
-  sumaRepRms = sumaRepEnv = 0; nRepsOK = 0;
+  for (int f = 0; f < 3; f++) reiniciarFase(f);
+  cReposo = cSd = cRestRms = cPasMedia = cPasPico = cActRms = cActEnv = cSnr = cArt = 0;
   pistaPendiente = 0;
-  Serial.println();
-  Serial.println(">> CALIBRACION (60 s): REPOSO 10 s -> PASIVA 10 s -> 5 x (ARRIBA 4 s + ABAJO 4 s)");
-  Serial.println(">> FASE 1 - REPOSO (10 s): cabeza apoyada y relajada. No mover al nino.");
+  msg(">> CALIBRACION (60 s): REPOSO 10 s -> PASIVA 10 s -> 5 x (ARRIBA 4 s + ABAJO 4 s)");
+  if (CALIBRACION_AUTOMATICA) empezarFase(0);
+  else msg(">> Esperando: comienza el REPOSO desde la pagina, con BOOT o con la tecla 1.");
 }
 
-void iniciarSesion() {
+void iniciarSesion(bool nueva) {
+  if (nueva) {                     // tras calibrar: sesion nueva desde cero
+    sesionId++;
+    nActivaciones = 0;
+    tiempoActivoTotal = 0;
+    msSesion = 0;
+  }
   modo = SESION;
   bajando = false;                 // el vaiven sigue donde iba
   activo = false;
@@ -410,45 +490,59 @@ void iniciarSesion() {
   tInicioPremio = tFinPremio = millis();   // tras una pausa esperan 1.5 s antes de bajar
   premio1 = false;
   rmsSuave = reposo;               // no arrastra la contraccion de la calibracion
-  Serial.println();
-  Serial.println(PREMIO_AL_RELAJAR ? ">> SESION: relaja para subir las estrellas."
-                                   : ">> SESION: contrae para subir las estrellas.");
+  msg(PREMIO_AL_RELAJAR ? ">> SESION: relaja para subir las estrellas."
+                        : ">> SESION: contrae para subir las estrellas.");
 }
 
+// Calcula los resultados con las 3 fases hechas y, si es valida, la aplica.
 void terminarCalibracion() {
-  // Fase 1: reposo
-  reposo   = nR ? sumaR / nR : 0;
-  float var = nR ? suma2R / nR - (double)reposo * reposo : 0;
-  sdReposo = sqrtf(max(var, 0.0f));
-  restRms  = nR ? sqrt(suma2R / nR) : 0;
-  // Fase 2: pasiva
-  pasivaMedia = nP ? sumaP / nP : 0;
-  pasivaPico  = picoP;
-  // Fase 3: promedio de las repeticiones
-  activeRms = nRepsOK ? sumaRepRms / nRepsOK : 0;
-  activeEnv = nRepsOK ? sumaRepEnv / nRepsOK : 0;
-  snr = restRms > 0 ? activeRms / restRms : 0;
-  artefactoPct = activeEnv > 0 ? 100.0f * pasivaPico / activeEnv : 0;
-  maximo = activeEnv;                 // el 100 % del esfuerzo de ese nino hoy
+  faseContrae = false;
+  bloquesFase = 0;
+  cSnr = cRestRms > 0 ? cActRms / cRestRms : 0;
+  cArt = cActEnv > 0 ? 100.0f * cPasPico / cActEnv : 0;
 
+  // Advertencias automaticas
+  if (cActRms <= 0) {
+    msg("!! No se detecto contraccion activa. Revisa electrodos y repite la fase ACTIVA (3) o toda la calibracion (c).");
+    msg("!! La terapia no puede comenzar sin una calibracion valida.");
+    faseCal = CAL_FALLIDA;
+    return;                           // no se aplica
+  }
+
+  // Aplica la calibracion nueva
+  reposo = cReposo;
+  sdReposo = cSd;
+  restRms = cRestRms;
+  pasivaMedia = cPasMedia;
+  pasivaPico = cPasPico;
+  activeRms = cActRms;
+  activeEnv = cActEnv;
+  snr = cSnr;
+  artefactoPct = cArt;
+  maximo = activeEnv;                 // el 100 % del esfuerzo de ese nino hoy
   calcularUmbrales();
   imprimirCalibracion();
 
-  // Advertencias automaticas
-  if (activeRms <= 0) {
-    Serial.println("!! No se detecto contraccion activa. Revisa electrodos y repite (c o BOOT).");
-    Serial.println("!! La terapia no puede comenzar sin una calibracion valida.");
-    faseCal = CAL_FALLIDA;
-    faseContrae = false;
-    return;                           // no se inicia la sesion
-  }
   if (snr < SNR_MINIMA)
-    Serial.println("!! SNR < 3: la contraccion apenas se distingue del reposo (mal contacto o electrodo mal ubicado).");
+    msg("!! SNR < 3: la contraccion apenas se distingue del reposo (mal contacto o electrodo mal ubicado).");
   if (artefactoPct > ARTEFACTO_MAX_PCT)
-    Serial.println("!! Artefacto > 80 %: las transiciones podrian contarse como activaciones (sube el umbral con + o mejora la fijacion de cables).");
+    msg("!! Artefacto > 80 %%: las transiciones podrian contarse como activaciones (sube el umbral con + o mejora la fijacion de cables).");
 
   calibrado = true;
-  iniciarSesion();
+  faseCal = CAL_LISTA;
+  if (CALIBRACION_AUTOMATICA) iniciarSesion(true);
+  else msg(">> Calibracion LISTA. Inicia la sesion desde la pagina, con BOOT o con la tecla s.");
+}
+
+// Una fase termino: si ya estan las 3, resultados; si no, espera el siguiente paso.
+void finFase() {
+  if (hecho[0] && hecho[1] && hecho[2]) { terminarCalibracion(); return; }
+  faseCal = CAL_ESPERA;
+  faseContrae = false;
+  bloquesFase = 0;
+  int sig = !hecho[0] ? 0 : !hecho[1] ? 1 : 2;
+  if (CALIBRACION_AUTOMATICA) empezarFase(sig);
+  else msg(">> Esperando: comienza la fase %s desde la pagina, con BOOT o con la tecla %d.", NOMBRE_PASO[sig], sig + 1);
 }
 
 // Avanza la calibracion con cada bloque que llega (reloj de las muestras)
@@ -456,32 +550,76 @@ void cambiarFaseCal(FaseCal f) {
   faseCal = f;
   bloquesFase = 0;
   faseContrae = (f == CAL_ARRIBA);
-  if (f == CAL_PASIVA)
-    Serial.println(">> FASE 2 - PASIVA (10 s): el terapeuta mueve la cabeza de abajo hacia arriba y viceversa. El nino NO hace fuerza.");
+  if (f == CAL_REPOSO)
+    msg(">> FASE 1 - REPOSO (%.0f s): cabeza apoyada y relajada. No mover al nino.", CAL_REPOSO_S);
+  else if (f == CAL_PASIVA)
+    msg(">> FASE 2 - PASIVA (%.0f s): el terapeuta mueve la cabeza de abajo hacia arriba y viceversa. El nino NO hace fuerza.", CAL_PASIVA_S);
   else if (f == CAL_ARRIBA)
-    Serial.printf(">> FASE 3 - ACTIVA, repeticion %d/%d: ARRIBA! El nino levanta la cabeza y la sostiene (%.0f s).\n",
-                  repCal, CAL_REPS, CAL_ARRIBA_S);
+    msg(">> FASE 3 - ACTIVA, repeticion %d/%d: ARRIBA! El nino levanta la cabeza y la sostiene (%.0f s).",
+        repCal, CAL_REPS, CAL_ARRIBA_S);
   else if (f == CAL_ABAJO)
-    Serial.printf("   ABAJO: baja la cabeza y relaja (%.0f s).\n", CAL_ABAJO_S);
+    msg("   ABAJO: baja la cabeza y relaja (%.0f s).", CAL_ABAJO_S);
 }
 
-void calibrarBloque(int mv) {
+// Empieza a medir una fase (0 reposo, 1 pasiva, 2 activa). Se puede repetir
+// una fase ya hecha; para avanzar hay que seguir el orden.
+void empezarFase(int f) {
+  if (modo != CALIBRANDO) { msg("!! Primero comienza la calibracion (c)."); return; }
+  if (midiendo()) { msg("!! Ya se esta midiendo la fase %s. Espera a que termine o cancelala (x).", NOMBRE_FASE[faseCal]); return; }
+  if (f == 1 && !hecho[0]) { msg("!! Primero haz la fase de REPOSO (1)."); return; }
+  if (f == 2 && !hecho[1]) { msg("!! Primero haz la fase PASIVA (2)."); return; }
+  reiniciarFase(f);
+  if (f == 0) cambiarFaseCal(CAL_REPOSO);
+  else if (f == 1) cambiarFaseCal(CAL_PASIVA);
+  else { repCal = 1; cambiarFaseCal(CAL_ARRIBA); }
+}
+
+void cancelarFase() {
+  if (modo != CALIBRANDO || !midiendo()) return;
+  int f = faseCal == CAL_REPOSO ? 0 : faseCal == CAL_PASIVA ? 1 : 2;
+  reiniciarFase(f);
+  faseCal = CAL_ESPERA;
+  faseContrae = false;
+  bloquesFase = 0;
+  msg(">> Fase %s cancelada. Puedes volver a empezarla.", NOMBRE_PASO[f]);
+}
+
+// Devuelve true si el bloque se uso para la calibracion (no descartado)
+bool calibrarBloque(int mv) {
   float env = mv;                     // envolvente = RMS del bloque de 100 ms
+  bool usado = false;
+  if (!midiendo()) return false;
   bloquesFase++;
   switch (faseCal) {
     case CAL_REPOSO:
       if (bloquesFase > (int)lroundf(CAL_DESC_REPOSO_S * BLOQUES_POR_S)) {
         sumaR += env; suma2R += (double)env * env; nR++;
+        usado = true;
       }
-      if (bloquesFase >= (int)lroundf(CAL_REPOSO_S * BLOQUES_POR_S)) cambiarFaseCal(CAL_PASIVA);
+      if (bloquesFase >= (int)lroundf(CAL_REPOSO_S * BLOQUES_POR_S)) {
+        cReposo  = nR ? sumaR / nR : 0;
+        float var = nR ? suma2R / nR - (double)cReposo * cReposo : 0;
+        cSd      = sqrtf(max(var, 0.0f));
+        cRestRms = nR ? sqrt(suma2R / nR) : 0;
+        hecho[0] = true;
+        msg("   Reposo listo: media %.1f mV, SD %.1f mV.", cReposo, cSd);
+        finFase();
+      }
       break;
 
     case CAL_PASIVA:
       if (bloquesFase > (int)lroundf(CAL_DESC_PASIVA_S * BLOQUES_POR_S)) {
         sumaP += env; nP++;
         if (env > picoP) picoP = env;
+        usado = true;
       }
-      if (bloquesFase >= (int)lroundf(CAL_PASIVA_S * BLOQUES_POR_S)) { repCal = 1; cambiarFaseCal(CAL_ARRIBA); }
+      if (bloquesFase >= (int)lroundf(CAL_PASIVA_S * BLOQUES_POR_S)) {
+        cPasMedia = nP ? sumaP / nP : 0;
+        cPasPico  = picoP;
+        hecho[1] = true;
+        msg("   Pasiva lista: media %.1f mV, pico %.1f mV.", cPasMedia, cPasPico);
+        finFase();
+      }
       break;
 
     case CAL_ARRIBA: {
@@ -490,12 +628,14 @@ void calibrarBloque(int mv) {
       int fin = (int)lroundf(CAL_DESC_FIN_S * BLOQUES_POR_S);
       if (bloquesFase > ini && bloquesFase <= total - fin) {     // solo la ventana estable
         sumaA += env; suma2A += (double)env * env; nA++;
+        usado = true;
       }
       if (bloquesFase >= total) {
         if (nA > 0) {
           float rms = sqrt(suma2A / nA), media = sumaA / nA;
           sumaRepRms += rms; sumaRepEnv += media; nRepsOK++;
-          Serial.printf("   Repeticion %d: RMS %.1f mV, envolvente %.1f mV\n", repCal, rms, media);
+          cRepRms[repCal - 1] = rms;
+          msg("   Repeticion %d: RMS %.1f mV, envolvente %.1f mV", repCal, rms, media);
         }
         sumaA = suma2A = 0; nA = 0;
         cambiarFaseCal(CAL_ABAJO);
@@ -506,13 +646,20 @@ void calibrarBloque(int mv) {
     case CAL_ABAJO:
       if (bloquesFase >= (int)lroundf(CAL_ABAJO_S * BLOQUES_POR_S)) {
         if (repCal < CAL_REPS) { repCal++; cambiarFaseCal(CAL_ARRIBA); }
-        else terminarCalibracion();
+        else {
+          cActRms = nRepsOK ? sumaRepRms / nRepsOK : 0;
+          cActEnv = nRepsOK ? sumaRepEnv / nRepsOK : 0;
+          hecho[2] = true;
+          msg("   Activa lista: RMS de referencia %.1f mV, envolvente %.1f mV (%d repeticiones).", cActRms, cActEnv, nRepsOK);
+          finFase();
+        }
       }
       break;
 
-    case CAL_FALLIDA:
+    default:
       break;
   }
+  return usado;
 }
 
 void entrarParo() {
@@ -521,18 +668,65 @@ void entrarParo() {
   detenerEstrellasYa();
   bobinasP(false);
   pistaPendiente = 0;
-  Serial.println();
-  Serial.println("!! PARO DE EMERGENCIA. Al soltarlo, presiona BOOT o escribe r para reanudar.");
+  msg("!! PARO DE EMERGENCIA. Al soltarlo, presiona BOOT o escribe r para reanudar.");
 }
 
 void reanudarTrasParo() {
-  if (paroActivo) { Serial.println("El paro sigue presionado: giralo para soltarlo."); return; }
+  if (paroActivo) { msg("El paro sigue presionado: giralo para soltarlo."); return; }
   iniciarArranque();                 // vuelve a buscar el tope antes de moverse (y reenvia el volumen)
+}
+
+// Boton BOOT o tecla n: el siguiente paso que toca
+void siguientePaso() {
+  if (modo == PARO) { reanudarTrasParo(); return; }
+  if (modo == SESION || modo == PAUSA) { iniciarCalibracion(); return; }
+  if (modo != CALIBRANDO || midiendo()) return;
+  if (faseCal == CAL_LISTA) { iniciarSesion(true); return; }
+  if (faseCal == CAL_FALLIDA) { empezarFase(2); return; }
+  empezarFase(!hecho[0] ? 0 : !hecho[1] ? 1 : 2);
+}
+
+// Comandos del monitor serie y de la pagina (todos pasan por aqui, en el loop)
+void ejecutarComando(char c) {
+  switch (c) {
+    case 'c':
+      if (modo == ARRANQUE) msg("!! Espera a que las estrellas encuentren el tope.");
+      else if (modo == PARO) msg("!! Primero suelta el paro y reanuda (r).");
+      else iniciarCalibracion();
+      break;
+    case '1': empezarFase(0); break;
+    case '2': empezarFase(1); break;
+    case '3': empezarFase(2); break;
+    case 'x': cancelarFase(); break;
+    case 's':
+      if (modo == CALIBRANDO && faseCal == CAL_LISTA) iniciarSesion(true);
+      else msg("!! La sesion empieza cuando la calibracion este LISTA (reposo, pasiva y activa).");
+      break;
+    case 'n': siguientePaso(); break;
+    case 'p':
+      if (modo == SESION) { cerrarActivacion(); modo = PAUSA; msg(">> PAUSA (p para seguir)"); }
+      else if (modo == PAUSA) iniciarSesion(false);
+      break;
+    case 'r': if (modo == PARO) reanudarTrasParo(); break;
+    case 'h': if (modo != PARO) iniciarArranque(); break;
+    case '+': umbralPct = min(umbralPct + 0.05f, 0.80f); calcularUmbrales(); imprimirCalibracion(); break;
+    case '-': umbralPct = max(umbralPct - 0.05f, 0.05f); calcularUmbrales(); imprimirCalibracion(); break;
+    case 'i': imprimirCalibracion(); break;
+    default: break;
+  }
 }
 
 // ======================================================================
 //  Entradas
 // ======================================================================
+void guardarBloque(int mv, uint8_t flag) {
+  portENTER_CRITICAL(&candado);
+  blqVal[nBlq % N_BLQ] = mv;
+  blqFlag[nBlq % N_BLQ] = flag;
+  nBlq++;
+  portEXIT_CRITICAL(&candado);
+}
+
 void procesarRms(int mv) {
   unsigned long ahora = millis();
   rmsUltimo = mv;
@@ -541,17 +735,17 @@ void procesarRms(int mv) {
   tUltimoDato = ahora;
 
   if (modo == CALIBRANDO) {
-    calibrarBloque(mv);
+    guardarBloque(mv, calibrarBloque(mv) ? 2 : 0);
     return;
   }
-  if (modo != SESION) return;
+  if (modo != SESION) { guardarBloque(mv, 0); return; }
 
   nivel = constrain((rmsSuave - reposo) / max(maximo - reposo, 1.0f), 0.0f, 1.0f);
 
   // Histeresis + confirmacion en el tiempo
   if (!activo) {
     if (rmsSuave >= umbralOn) {
-      if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; }
+      if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; msSesionIni = msSesion; }
       sumaRmsAct += mv; nRmsAct++;
       if (ahora - tSobre + HOLGURA_MS >= T_CONFIRMAR) {
         activo = true;
@@ -573,6 +767,7 @@ void procesarRms(int mv) {
     }
   }
 
+  guardarBloque(mv, activo ? 1 : 0);
 }
 
 void leerArduino() {
@@ -602,28 +797,15 @@ void leerArduino() {
   // ~4 s de bytes sin ninguna linea valida: casi siempre es polaridad o baudios
   if (!avisoBytes && bytesSinLinea > 200) {
     avisoBytes = true;
-    Serial.println("!! Llegan bytes del Arduino pero ninguna linea valida.");
-    Serial.println("!! Revisa que ambos esten a 9600 baud, o cambia EMG_INVERTIDO y vuelve a cargar.");
+    msg("!! Llegan bytes del Arduino pero ninguna linea valida.");
+    msg("!! Revisa que ambos esten a 9600 baud, o cambia EMG_INVERTIDO y vuelve a cargar.");
   }
 }
 
 void leerComandos() {
-  while (Serial.available()) {
-    char c = Serial.read();
-    switch (c) {
-      case 'c': if (modo == SESION || modo == PAUSA || (modo == CALIBRANDO && faseCal == CAL_FALLIDA)) iniciarCalibracion(); break;
-      case 'p':
-        if (modo == SESION) { cerrarActivacion(); modo = PAUSA; Serial.println(">> PAUSA (p para seguir)"); }
-        else if (modo == PAUSA) iniciarSesion();
-        break;
-      case 'r': if (modo == PARO) reanudarTrasParo(); break;
-      case 'h': if (modo != PARO) iniciarArranque(); break;
-      case '+': umbralPct = min(umbralPct + 0.05f, 0.80f); calcularUmbrales(); imprimirCalibracion(); break;
-      case '-': umbralPct = max(umbralPct - 0.05f, 0.05f); calcularUmbrales(); imprimirCalibracion(); break;
-      case 'i': imprimirCalibracion(); break;
-      default: break;
-    }
-  }
+  while (Serial.available()) ejecutarComando(Serial.read());
+  char c;
+  while (colaCmd && xQueueReceive(colaCmd, &c, 0) == pdTRUE) ejecutarComando(c);
 }
 
 void revisarBoot() {
@@ -631,10 +813,7 @@ void revisarBoot() {
   if (v != bootAnterior && millis() - bootCambio > 50) {
     bootCambio = millis();
     bootAnterior = v;
-    if (v == LOW) {  // al presionar
-      if (modo == PARO) reanudarTrasParo();
-      else if (modo == SESION || modo == PAUSA || (modo == CALIBRANDO && faseCal == CAL_FALLIDA)) iniciarCalibracion();
-    }
+    if (v == LOW) siguientePaso();  // al presionar
   }
 }
 
@@ -647,7 +826,7 @@ void revisarParo() {
   if (presionado && !paroActivo) { paroActivo = true; entrarParo(); }
   else if (!presionado && paroActivo) {
     paroActivo = false;
-    Serial.println(">> Paro liberado. Presiona BOOT o escribe r para reanudar.");
+    msg(">> Paro liberado. Presiona BOOT o escribe r para reanudar.");
   }
 }
 
@@ -657,16 +836,29 @@ void revisarParo() {
 void actualizarModo() {
   unsigned long ahora = millis();
 
+  // Tiempo de sesion (sin pausas)
+  static unsigned long tPrevio = 0;
+  if (modo == SESION && tPrevio) msSesion += ahora - tPrevio;
+  tPrevio = ahora;
+
+  // Avisos de la red (los pone la tarea de WiFi; se imprimen aqui)
+  int8_t aw = avisoWifi;
+  if (aw) {
+    avisoWifi = 0;
+    if (aw > 0) msg(">> WiFi conectado a la red %s. Pagina: http://%s", RED_SSID, WiFi.localIP().toString().c_str());
+    else msg("!! Se perdio la red WiFi %s (el atril sigue funcionando; reintentando).", RED_SSID);
+  }
+
   // Watchdog: avisa una vez al perder / recuperar los datos
   bool ok = datosOK();
   if (ok != datosAntes) {
     datosAntes = ok;
     if (!ok) {
       cerrarActivacion(tUltimoDato);                 // no cuenta el tiempo sin senal
-      Serial.println("!! Sin datos del Arduino: estrellas y planetas quietos hasta que vuelvan.");
+      msg("!! Sin datos del Arduino: estrellas lentas y luz ambar hasta que vuelvan.");
     } else {
       if (!activo) { tInicioPremio = tFinPremio = ahora; premio1 = false; }  // 1.5 s para reconfirmar
-      Serial.println(">> Llegan datos del Arduino.");
+      msg(">> Llegan datos del Arduino.");
     }
   }
 
@@ -717,21 +909,21 @@ void moverEstrellas() {
       if (modo == PARO) return;
       if (!USAR_TOPE) {
         estrellas.setCurrentPosition(POS_FONDO);
-        Serial.println(">> USAR_TOPE = false: cuento desde el FONDO (las estrellas deben arrancar abajo).");
+        msg(">> USAR_TOPE = false: cuento desde el FONDO (las estrellas deben arrancar abajo).");
         empezarVaiven();
-        if (calibrado) iniciarSesion(); else iniciarCalibracion();
+        if (calibrado) iniciarSesion(false); else iniciarCalibracion();
       } else if (topePresionado()) {
         fijarTope();
-        Serial.println(">> Tope encontrado. Las estrellas empiezan a subir y bajar.");
+        msg(">> Tope encontrado. Las estrellas empiezan a subir y bajar.");
         empezarVaiven();
-        if (calibrado) iniciarSesion(); else iniciarCalibracion();
+        if (calibrado) iniciarSesion(false); else iniciarCalibracion();
       } else if (estrellas.runSpeed()) {
         if (++pasosHoming > RECORRIDO * 13 / 10) {
           bobinasE(false);
           modoE = E_SIN_TOPE;
-          Serial.println("!! No encontre el tope. Las estrellas quedan desactivadas (revisa microswitch y DIR_SUBIR,");
-          Serial.println("!! o pon USAR_TOPE = false y enciende con las estrellas abajo).");
-          if (calibrado) iniciarSesion(); else iniciarCalibracion();
+          msg("!! No encontre el tope. Las estrellas quedan desactivadas (revisa microswitch y DIR_SUBIR,");
+          msg("!! o pon USAR_TOPE = false y enciende con las estrellas abajo).");
+          if (calibrado) iniciarSesion(false); else iniciarCalibracion();
         }
       }
       return;
@@ -762,8 +954,8 @@ void moverEstrellas() {
     else if (!subiendo && labs(estrellas.currentPosition() - POS_TOPE) > TOPE_SUELTA && topePresionado()) {
       detenerEstrellasYa();
       modoE = E_SIN_TOPE;
-      Serial.println("!! El microswitch sigue presionado lejos del tope. Revisa que este en NO (no en NC).");
-      Serial.println("!! Las estrellas quedan desactivadas; usa h al arreglarlo.");
+      msg("!! El microswitch sigue presionado lejos del tope. Revisa que este en NO (no en NC).");
+      msg("!! Las estrellas quedan desactivadas; usa h al arreglarlo.");
       return;
     }
   }
@@ -776,7 +968,7 @@ void moverEstrellas() {
   if (!premioCima && premiado() && a >= 0.99f && modo == SESION && datosOK()) {
     premioCima = true;
     sonar(2);
-    Serial.println("   *** Estrellas arriba ***");
+    msg("   *** Estrellas arriba ***");
   } else if (premioCima && a < 0.80f) {
     premioCima = false;
   }
@@ -807,7 +999,10 @@ void actualizarLuz() {
   float r = 0, g = 0, b = 0;
   switch (modo) {
     case ARRANQUE:   r = 15; g = 15; b = 15; break;                 // blanco tenue
-    case CALIBRANDO: if (faseContrae) g = 90; else b = 70; break;   // verde / azul
+    case CALIBRANDO:
+      if (!midiendo()) { r = 15; g = 15; b = 15; }                  // blanco tenue: espera el siguiente paso
+      else if (faseContrae) g = 90; else b = 70;                    // verde / azul
+      break;
     case PAUSA:      r = 15; g = 15; b = 15; break;
     case PARO:       break;                                         // apagada
     case SESION:
@@ -845,15 +1040,167 @@ void imprimirEstado() {
                   rmsUltimo, umbralOn, (int)(nivel * 100), activo ? "ACTIVO" : "reposo",
                   est, nActivaciones, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else if (modo == CALIBRANDO) {
-    const char *nf[] = {"REPOSO", "PASIVA", "ARRIBA", "ABAJO", "FALLIDA: c o BOOT para repetir"};
     if (faseCal == CAL_ARRIBA || faseCal == CAL_ABAJO)
-      Serial.printf("[CALIBRANDO %s %d/%d] RMS %4d mV%s\n", nf[faseCal], repCal, CAL_REPS,
+      Serial.printf("[CALIBRANDO %s %d/%d] RMS %4d mV%s\n", NOMBRE_FASE[faseCal], repCal, CAL_REPS,
                     rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
     else
-      Serial.printf("[CALIBRANDO %s] RMS %4d mV%s\n", nf[faseCal],
+      Serial.printf("[CALIBRANDO %s] RMS %4d mV%s\n", NOMBRE_FASE[faseCal],
                     rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else {
     Serial.printf("[%s]%s\n", NOMBRE_MODO[modo], datosOK() ? "" : " sin datos del Arduino");
+  }
+}
+
+// ======================================================================
+//  Pagina web (nucleo 0). Solo lee el estado y encola comandos: todo lo
+//  que cambia el atril lo hace el loop con ejecutarComando().
+// ======================================================================
+WebServer web(80);
+static char js[8192];               // respuesta de /estado
+static int jl = 0;
+
+void ja(const char *fmt, ...) {
+  if (jl >= (int)sizeof(js) - 1) return;
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(js + jl, sizeof(js) - jl, fmt, ap);
+  va_end(ap);
+  if (n > 0) jl = min(jl + n, (int)sizeof(js) - 1);
+}
+
+// Texto entre comillas, escapando lo necesario para JSON
+void jaTexto(const char *t) {
+  ja("\"");
+  for (; *t && jl < (int)sizeof(js) - 8; t++) {
+    unsigned char c = *t;
+    if (c == '"' || c == '\\') ja("\\%c", c);
+    else if (c < 0x20) ja(" ");
+    else { js[jl++] = c; js[jl] = 0; }
+  }
+  ja("\"");
+}
+
+void cabeceras() {
+  web.sendHeader("Access-Control-Allow-Origin", "*");
+  web.sendHeader("Access-Control-Allow-Private-Network", "true");
+  web.sendHeader("Cache-Control", "no-store");
+}
+
+// Primer indice a mandar: lo que pide la pagina, dentro de lo que se guarda
+uint32_t desde(const char *arg, uint32_t total, uint32_t guardados) {
+  long q = web.hasArg(arg) ? web.arg(arg).toInt() : 0;
+  uint32_t ini = total > guardados ? total - guardados : 0;
+  if (q < (long)ini) q = ini;
+  if (q > (long)total) q = total;
+  return (uint32_t)q;
+}
+
+void manejarEstado() {
+  static int32_t bv[N_BLQ];
+  static uint8_t bf[N_BLQ];
+  static Activacion av[N_ACT];
+  static char lt[N_LOG][LARGO_LOG];
+
+  // Copia de lo que cambia en el otro nucleo
+  uint32_t nb, na, nl, b0, a0, l0;
+  portENTER_CRITICAL(&candado);
+  nb = nBlq; na = nActLista; nl = nLog;
+  portEXIT_CRITICAL(&candado);
+  b0 = desde("b", nb, N_BLQ);
+  a0 = desde("a", na, N_ACT);
+  l0 = desde("l", nl, N_LOG);
+  portENTER_CRITICAL(&candado);
+  for (uint32_t i = b0; i < nb; i++) { bv[i - b0] = blqVal[i % N_BLQ]; bf[i - b0] = blqFlag[i % N_BLQ]; }
+  for (uint32_t i = a0; i < na; i++) av[i - a0] = actLista[i % N_ACT];
+  for (uint32_t i = l0; i < nl; i++) memcpy(lt[i - l0], logTxt[i % N_LOG], LARGO_LOG);
+  portEXIT_CRITICAL(&candado);
+
+  int total = faseCal == CAL_REPOSO ? (int)lroundf(CAL_REPOSO_S * BLOQUES_POR_S)
+            : faseCal == CAL_PASIVA ? (int)lroundf(CAL_PASIVA_S * BLOQUES_POR_S)
+            : faseCal == CAL_ARRIBA ? (int)lroundf(CAL_ARRIBA_S * BLOQUES_POR_S)
+            : faseCal == CAL_ABAJO  ? (int)lroundf(CAL_ABAJO_S * BLOQUES_POR_S) : 0;
+  unsigned long ahora = millis();
+  bool act = activo;
+
+  jl = 0; js[0] = 0;
+  ja("{\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"fase\":\"%s\"", VERSION_ATRIL, (unsigned long)idArranque, NOMBRE_MODO[modo], NOMBRE_FASE[faseCal]);
+  ja(",\"hechos\":[%d,%d,%d],\"rep\":%d,\"reps\":%d,\"bloq\":%d,\"total\":%d,\"auto\":%d",
+     hecho[0], hecho[1], hecho[2], repCal, CAL_REPS, bloquesFase, total, CALIBRACION_AUTOMATICA ? 1 : 0);
+  ja(",\"datos\":%d,\"rms\":%d,\"suave\":%.1f,\"calibrado\":%d,\"uon\":%.1f,\"uoff\":%.1f,\"pct\":%.0f",
+     datosOK() ? 1 : 0, rmsUltimo, rmsSuave, calibrado ? 1 : 0, umbralOn, umbralOff, umbralPct * 100);
+  ja(",\"activo\":%d,\"nivel\":%d,\"durAct\":%.1f,\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f",
+     act ? 1 : 0, (int)(nivel * 100), act ? (ahora - tInicioActivo) / 1000.0f : 0.0f, sesionId,
+     nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f);
+  ja(",\"alt\":%d,\"estOK\":%d,\"malas\":%lu,\"rssi\":%d",
+     (int)(altura() * 100), modoE != E_SIN_TOPE ? 1 : 0, lineasMalas, (int)WiFi.RSSI());
+  ja(",\"cfg\":{\"reposo\":%.1f,\"pasiva\":%.1f,\"reps\":%d,\"arriba\":%.1f,\"abajo\":%.1f,\"descR\":%.1f,\"descP\":%.1f,\"descIni\":%.1f,\"descFin\":%.1f,\"bps\":%d}",
+     CAL_REPOSO_S, CAL_PASIVA_S, CAL_REPS, CAL_ARRIBA_S, CAL_ABAJO_S,
+     CAL_DESC_REPOSO_S, CAL_DESC_PASIVA_S, CAL_DESC_INI_S, CAL_DESC_FIN_S, BLOQUES_POR_S);
+  ja(",\"cal\":{\"reposo\":%.1f,\"sd\":%.1f,\"restRms\":%.1f,\"pasMedia\":%.1f,\"pasPico\":%.1f,\"actRms\":%.1f,\"actEnv\":%.1f,\"snr\":%.2f,\"art\":%.1f,\"repRms\":[",
+     cReposo, cSd, cRestRms, cPasMedia, cPasPico, cActRms, cActEnv, cSnr, cArt);
+  for (int i = 0; i < CAL_REPS; i++) ja(i ? ",%.1f" : "%.1f", cRepRms[i]);
+  ja("]},\"apl\":{\"reposo\":%.1f,\"sd\":%.1f,\"restRms\":%.1f,\"pasMedia\":%.1f,\"pasPico\":%.1f,\"actRms\":%.1f,\"actEnv\":%.1f,\"snr\":%.2f,\"art\":%.1f,\"maximo\":%.1f}",
+     reposo, sdReposo, restRms, pasivaMedia, pasivaPico, activeRms, activeEnv, snr, artefactoPct, maximo);
+  ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
+  for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%d]" : "[%ld,%d]", (long)bv[i], bf[i]);
+  ja("],\"an\":%lu,\"acts\":[", (unsigned long)na);
+  for (uint32_t i = 0; i < na - a0; i++)
+    ja(i ? ",[%d,%d,%.1f,%.1f,%d,%d]" : "[%d,%d,%.1f,%.1f,%d,%d]", av[i].sid, av[i].id, av[i].ini, av[i].dur, av[i].rms, av[i].pct);
+  ja("],\"ln\":%lu,\"logs\":[", (unsigned long)nl);
+  for (uint32_t i = 0; i < nl - l0; i++) { if (i) ja(","); jaTexto(lt[i]); }
+  ja("]}");
+
+  cabeceras();
+  web.send(200, "application/json", String(js));
+}
+
+void manejarCmd() {
+  cabeceras();
+  String c = web.arg("c");
+  const char *validos = "c123xsnprh+-i";
+  if (c.length() != 1 || !strchr(validos, c[0])) {
+    web.send(400, "application/json", "{\"ok\":false}");
+    return;
+  }
+  char ch = c[0];
+  bool ok = colaCmd && xQueueSend(colaCmd, &ch, 0) == pdTRUE;
+  web.send(ok ? 200 : 503, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+void manejarOtro() {
+  cabeceras();
+  if (web.method() == HTTP_OPTIONS) {             // permiso previo del navegador
+    web.sendHeader("Access-Control-Allow-Methods", "GET");
+    web.sendHeader("Access-Control-Allow-Headers", "*");
+    web.send(204);
+    return;
+  }
+  web.send(200, "text/plain", String("ASTRA - atril ESP32 v") + VERSION_ATRIL + "\nModo: " + NOMBRE_MODO[modo] +
+                              "\nLa pagina usa /estado y /cmd?c=...\n");
+}
+
+void tareaRed(void *) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);              // respuesta rapida a la pagina
+  WiFi.config(IP_ATRIL, IP_PUERTA, MASCARA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(RED_SSID, RED_CLAVE);
+  web.on("/estado", HTTP_GET, manejarEstado);
+  web.on("/cmd", HTTP_GET, manejarCmd);
+  web.onNotFound(manejarOtro);
+  web.begin();
+  bool conectado = false;
+  unsigned long tIntento = millis();
+  for (;;) {
+    bool c = WiFi.status() == WL_CONNECTED;
+    if (c != conectado) { conectado = c; avisoWifi = c ? 1 : -1; tIntento = millis(); }
+    if (!c && millis() - tIntento > 15000) {     // sin red por 15 s: vuelve a intentar
+      tIntento = millis();
+      WiFi.disconnect();
+      WiFi.begin(RED_SSID, RED_CLAVE);
+    }
+    web.handleClient();
+    vTaskDelay(2);
   }
 }
 
@@ -867,7 +1214,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v2.3 ===");
+  Serial.printf("=== ASTRA - atril v%s ===\n", VERSION_ATRIL);
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
@@ -884,6 +1231,10 @@ void setup() {
 
   Serial1.begin(9600, SERIAL_8N1, DF_RX, DF_TX);     // DFPlayer
   // El volumen se manda 2 s despues (iniciarArranque), sin detener el arranque
+
+  idArranque = (uint32_t)random(1, 2000000000);
+  colaCmd = xQueueCreate(16, sizeof(char));
+  if (USAR_WIFI) xTaskCreatePinnedToCore(tareaRed, "red", 8192, NULL, 1, NULL, 0);  // nucleo 0
 
   if (USAR_PARO && digitalRead(PIN_PARO) == LOW) {
     paroActivo = true;
@@ -905,4 +1256,3 @@ void loop() {
   actualizarLuz();
   imprimirEstado();
 }
-

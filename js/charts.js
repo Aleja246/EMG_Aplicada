@@ -15,16 +15,16 @@
     return { ctx, w, h };
   }
 
-  /* Señal EMG + envolvente en tiempo real (buffer circular, mín/máx por columna de píxeles). */
+  /* Señal EMG cruda del Arduino (filtrada) en tiempo real: buffer circular, mín/máx por columna de píxeles.
+   * flag por muestra: 2 = activación (o ARRIBA en calibración), 1 = fase de calibración midiendo. */
   class LiveChart {
-    constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.thr = null; this.setWindow(15); }
+    constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.setWindow(15); }
     setWindow(s) {
       this.win = s; this.N = Math.round(s * this.fs);
-      this.sig = new Float32Array(this.N); this.env = new Float32Array(this.N);
-      this.flag = new Uint8Array(this.N); this.w = 0;
+      this.sig = new Float32Array(this.N); this.flag = new Uint8Array(this.N); this.w = 0;
     }
-    push(x, env, flag) {
-      this.sig[this.w] = x; this.env[this.w] = env; this.flag[this.w] = flag;
+    push(x, flag) {
+      this.sig[this.w] = x; this.flag[this.w] = flag;
       if (++this.w >= this.N) this.w = 0;
     }
     draw() {
@@ -33,62 +33,88 @@
       const L = 52, R = 10, T = 8, B = 24, W = w - L - R, H = h - T - B;
       ctx.clearRect(0, 0, w, h);
       const cols = Math.max(1, Math.floor(W)), N = this.N;
-      const mn = new Float32Array(cols), mx = new Float32Array(cols), ev = new Float32Array(cols), fl = new Uint8Array(cols);
+      const mn = new Float32Array(cols), mx = new Float32Array(cols), fl = new Uint8Array(cols);
       let target = 0.02;
       for (let c = 0; c < cols; c++) {
         const i0 = Math.floor(c * N / cols), i1 = Math.max(i0 + 1, Math.floor((c + 1) * N / cols));
-        let lo = 0, hi = 0, f = 0, e = 0;
+        let lo = 0, hi = 0, f = 0;
         for (let i = i0; i < i1; i++) {
           const j = (this.w + i) % N, v = this.sig[j];
           if (v < lo) lo = v; if (v > hi) hi = v;
           if (this.flag[j] > f) f = this.flag[j];
-          e = this.env[j];
         }
-        mn[c] = lo; mx[c] = hi; ev[c] = e; fl[c] = f;
-        target = Math.max(target, -lo, hi, e);
+        mn[c] = lo; mx[c] = hi; fl[c] = f;
+        target = Math.max(target, -lo, hi);
       }
       target *= 1.15;
       this.ymax = target > this.ymax ? target : this.ymax - (this.ymax - target) * 0.03;
       const Y = v => T + H / 2 - (v / this.ymax) * (H / 2);
 
-      // franjas de activación (verde = válida, ámbar = candidata)
       for (let c = 0; c < cols; c++) {
         if (!fl[c]) continue;
         ctx.fillStyle = fl[c] === 2 ? css('--green-bg') : css('--amber-bg');
         ctx.fillRect(L + c, T, 1, H);
       }
-      // rejilla y ejes
-      ctx.strokeStyle = css('--grid'); ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui';
-      ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
-      for (const f of [-1, -0.5, 0, 0.5, 1]) {
-        const y = Y(f * this.ymax); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + W, y); ctx.stroke();
-        ctx.fillText((f * this.ymax).toFixed(this.ymax < 1 ? 2 : 1), L - 6, y);
-      }
-      ctx.save(); ctx.translate(12, T + H / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
-      ctx.fillText('mV', 0, 0); ctx.restore();
-      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      for (let s = 0; s <= this.win; s += this.win > 20 ? 10 : 5) {
-        const x = L + W - (s / this.win) * W;
-        ctx.fillText(s === 0 ? '0 s' : '-' + s + ' s', x, T + H + 6);
-      }
-      // señal filtrada
+      axes(ctx, L, T, W, H, this.win, [-1, -0.5, 0, 0.5, 1].map(f => [Y(f * this.ymax), (f * this.ymax).toFixed(this.ymax < 10 ? 2 : 0)]), 'mV');
       ctx.strokeStyle = css('--signal'); ctx.beginPath();
       for (let c = 0; c < cols; c++) { ctx.moveTo(L + c + 0.5, Y(mn[c])); ctx.lineTo(L + c + 0.5, Y(mx[c]) - 0.5); }
       ctx.stroke();
-      // umbral
-      if (this.thr) {
-        ctx.setLineDash([6, 4]); ctx.strokeStyle = css('--amber'); ctx.beginPath();
-        for (const s of [1, -1]) { const y = Y(s * this.thr); ctx.moveTo(L, y); ctx.lineTo(L + W, y); }
-        ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+
+  function axes(ctx, L, T, W, H, win, ticks, unit) {
+    ctx.strokeStyle = css('--grid'); ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui';
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
+    for (const [y, label] of ticks) { ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + W, y); ctx.stroke(); ctx.fillText(label, L - 6, y); }
+    ctx.save(); ctx.translate(12, T + H / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
+    ctx.fillText(unit, 0, 0); ctx.restore();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let s = 0; s <= win; s += win > 20 ? 10 : 5) {
+      const x = L + W - (s / win) * W;
+      ctx.fillText(s === 0 ? '0 s' : '-' + s + ' s', x, T + H + 6);
+    }
+  }
+
+  /* RMS que recibe el atril (un valor cada 100 ms) con sus umbrales.
+   * flag por bloque: 1 = activación (sesión), 2 = bloque usado por la calibración. */
+  class RmsChart {
+    constructor(canvas) { this.c = canvas; this.ymax = 50; this.lines = {}; this.setWindow(15); }
+    setWindow(s) { this.win = s; this.N = Math.round(s * 10); this.v = new Float32Array(this.N).fill(NaN); this.f = new Uint8Array(this.N); this.w = 0; }
+    push(v, flag) { this.v[this.w] = v; this.f[this.w] = flag; if (++this.w >= this.N) this.w = 0; }
+    draw() {
+      const { ctx, w, h } = fit(this.c);
+      if (!w || !h) return;
+      const L = 52, R = 10, T = 8, B = 24, W = w - L - R, H = h - T - B, N = this.N;
+      ctx.clearRect(0, 0, w, h);
+      let target = 20;
+      for (let i = 0; i < N; i++) if (this.v[i] > target) target = this.v[i];
+      for (const k in this.lines) if (this.lines[k] > target) target = this.lines[k];
+      target *= 1.15;
+      this.ymax = target > this.ymax ? target : this.ymax - (this.ymax - target) * 0.05;
+      const X = i => L + (i + 0.5) * W / N, Y = v => T + H - (v / this.ymax) * H, bw = Math.max(1, W / N);
+      for (let i = 0; i < N; i++) {
+        const f = this.f[(this.w + i) % N];
+        if (!f) continue;
+        ctx.fillStyle = f === 1 ? css('--green-bg') : css('--blue-bg');
+        ctx.fillRect(L + i * W / N, T, bw + 0.5, H);
       }
-      // envolvente (espejada)
-      ctx.strokeStyle = css('--primary'); ctx.lineWidth = 2.5;
-      for (const s of [1, -1]) {
-        ctx.beginPath();
-        for (let c = 0; c < cols; c++) { const y = Y(s * ev[c]); c ? ctx.lineTo(L + c, y) : ctx.moveTo(L + c, y); }
-        ctx.stroke();
+      axes(ctx, L, T, W, H, this.win, [0, 0.25, 0.5, 0.75, 1].map(f => [Y(f * this.ymax), Math.round(f * this.ymax)]), 'mV');
+      const dash = (v, color, d) => {
+        if (!(v > 0)) return;
+        ctx.setLineDash(d); ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(L + W, Y(v)); ctx.stroke(); ctx.setLineDash([]);
+      };
+      dash(this.lines.reposo, css('--muted'), [2, 3]);
+      dash(this.lines.uoff, css('--amber'), [3, 3]);
+      dash(this.lines.uon, css('--amber'), [8, 4]);
+      ctx.strokeStyle = css('--primary'); ctx.lineWidth = 2.2; ctx.beginPath();
+      let pen = false;
+      for (let i = 0; i < N; i++) {
+        const v = this.v[(this.w + i) % N];
+        if (!isFinite(v)) { pen = false; continue; }
+        pen ? ctx.lineTo(X(i), Y(v)) : ctx.moveTo(X(i), Y(v)); pen = true;
       }
-      ctx.lineWidth = 1;
+      ctx.stroke(); ctx.lineWidth = 1;
     }
   }
 
@@ -140,5 +166,5 @@
     }
   }
 
-  EMG.LiveChart = LiveChart; EMG.ProgressChart = ProgressChart;
+  EMG.LiveChart = LiveChart; EMG.RmsChart = RmsChart; EMG.ProgressChart = ProgressChart;
 })();

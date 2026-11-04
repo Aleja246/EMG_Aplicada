@@ -12,7 +12,14 @@
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
   const Store = {
-    settings() { return Object.assign({}, EMG.DEFAULTS, load('emg.settings', {})); },
+    settings() {
+      const saved = load('emg.settings', {});
+      if (saved.cfgVer === EMG.DEFAULTS.cfgVer) return Object.assign({}, EMG.DEFAULTS, saved);
+      // Ajustes de una versión anterior (p. ej. 2000 Hz): solo se conservan los que no dependen del hardware
+      const keep = {};
+      ['sheetsUrl', 'sheetsName', 'sound', 'winS'].forEach(k => { if (k in saved) keep[k] = saved[k]; });
+      return Object.assign({}, EMG.DEFAULTS, keep);
+    },
     saveSettings(s) { return save('emg.settings', s); },
     patients() { return load('emg.patients', []); },
     sessions() { return load('emg.sessions', []); },
