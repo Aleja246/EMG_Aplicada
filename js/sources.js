@@ -139,15 +139,14 @@
     }
   }
 
-  /* Simulador: EMG sintético (cuentas del ADC de 14 bits) + 60 Hz + latido + artefactos.
-   * getCtx() dice qué está haciendo el atril simulado para que la señal "obedezca":
-   *   { phase: 'rest' | 'passive' | 'active' | 'running', cueUp } */
+  /* Simulador de la señal cruda (cuentas del ADC de 14 bits) + 60 Hz + latido.
+   * getCtx() devuelve {rmsMv}: el nivel de RMS que el atril simulado considera ahora (así la señal que se
+   * dibuja y el RMS que "recibe" el atril cuentan la misma historia). */
   class SimSource {
     constructor(onSamples, onStatus, getCtx, fs) {
       this.onSamples = onSamples; this.onStatus = onStatus; this.getCtx = getCtx; this.fs = fs || 1000;
       this.kind = 'sim'; this.fault = null; this.timer = null; this.lost = 0;
-      this.n = 0; this.last = 0; this.amp = 0; this.burst = 0; this.prevUp = false;
-      this.autoUp = false; this.autoLeft = 3;
+      this.n = 0; this.last = 0; this.lvl = 30;
     }
     start() {
       this.last = performance.now();
@@ -164,32 +163,15 @@
       if (k < 1) return;
       if (k > this.fs) { this.last = now - 1000; k = this.fs; }   // pestaña en segundo plano: no generar de golpe
       this.last += k * 1000 / this.fs;
-      const out = new Uint16Array(k), dt = 1 / this.fs;
+      const out = new Uint16Array(k);
+      const ctx = this.getCtx() || {}, target = ctx.rmsMv != null ? ctx.rmsMv : 30;
       for (let i = 0; i < k; i++) {
-        const ctx = this.getCtx() || {};
         const t = this.n++ / this.fs;
-        // ¿hay contracción objetivo ahora?
-        let up = false, extraBurst = false;
-        if (ctx.phase === 'active') up = !!ctx.cueUp;
-        else if (ctx.phase === 'passive') { const c = t % 2.5; extraBurst = c < 0.5; }
-        else if (ctx.phase === 'running') {
-          this.autoLeft -= dt;
-          if (this.autoLeft <= 0) {
-            this.autoUp = !this.autoUp;
-            this.autoLeft = this.autoUp ? 1.5 + Math.random() * 6 : 2 + Math.random() * 3;
-            if (!this.autoUp && Math.random() < 0.4) { this.autoUp = true; this.autoLeft = 0.35; } // micro-activación
-          }
-          up = this.autoUp;
-        }
-        if (up !== this.prevUp) { this.burst = 0.35; this.prevUp = up; } // artefacto de transición
-        this.burst = Math.max(0, this.burst - dt);
-        const target = (up ? 1 : 0) + (this.burst > 0 ? 0.45 : 0) + (extraBurst ? 0.3 : 0);
-        this.amp += (target - this.amp) * 0.02;
+        this.lvl += (target - this.lvl) * 0.02;
         let v = 8192 + 30 * Math.sin(2 * Math.PI * 0.2 * t);              // deriva lenta
-        v += 45 * this._randn();                                          // ruido de reposo (~14 mV)
         v += 40 * Math.sin(2 * Math.PI * 60 * t) + 12 * Math.sin(2 * Math.PI * 180 * t); // red
         const ph = (t * 1.3) % 1; if (ph < 0.04) v += 25 * Math.sin(Math.PI * ph / 0.04); // latido
-        v += this.amp * 1100 * this._randn();                             // EMG (~340 mV RMS arriba)
+        v += this.lvl * (16383 / 5000) * this._randn();                   // EMG: RMS en mV a la salida de Nova → cuentas
         if (this.fault === 'disconnect') v = 16383 - Math.random() * 20;
         else if (this.fault === 'flat') v = 8192;
         else if (this.fault === 'noise60') v += 2500 * Math.sin(2 * Math.PI * 60 * t);

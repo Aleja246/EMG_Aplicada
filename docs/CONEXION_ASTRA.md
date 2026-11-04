@@ -43,42 +43,18 @@ Electrodos → Nova → Arduino R4 ──opto (RMS cada 100 ms, sin cambios)─�
    **EMG (WiFi): 1000 Hz** y **Atril: CALIBRANDO · ESPERA** (o el modo en que esté).
 5. Busca o registra al paciente y pulsa **Iniciar terapia**.
 
-## 3. Calibración paso a paso (desde la página)
+## 3. Calibración y sesión (versión 4: calibración basal + verificación)
 
-El atril ya no calibra solo al encender: **espera** a que le indiques cada paso.
+La calibración de reposo + pasiva + 5 repeticiones activas **ya no existe**. Ahora es una calibración **basal** (solo ~10 s de RMS en reposo) seguida de una sesión **supervisada** con confirmaciones de la fisioterapeuta. Todo está explicado, paso a paso, en [`CALIBRACION_BASAL.md`](CALIBRACION_BASAL.md).
 
-| Botón en la página | Qué hace el atril | Duración |
-|---|---|---|
-| **Comenzar calibración** | Borra la calibración anterior y espera (luz blanca tenue) | — |
-| **Comenzar reposo** | Mide el reposo (descarta el primer 1 s). Luz azul. Al terminar muestra media y SD y espera | 10 s |
-| **Comenzar calibración pasiva** | Mide el artefacto del movimiento pasivo (descarta 0.5 s). Luz azul. Al terminar muestra media y pico y espera | 10 s |
-| **Comenzar calibración activa** | 5 × (¡ARRIBA! 4 s luz verde + ABAJO 4 s). Solo mide la parte estable de cada ARRIBA (sin 0.7 s iniciales ni 0.3 s finales) | 40 s |
-| (automático) | Con las 3 fases hechas calcula los resultados: reposo, SD, pico pasivo, RMS de referencia, SNR, artefacto, **U_on** y **U_off**, con las mismas advertencias de siempre | — |
-| **▶ Iniciar sesión** | Aplica los umbrales y empieza la sesión (estrellas, luz y sonido). La página empieza a registrar | — |
-
-Mientras se mide una fase, la página muestra la indicación grande (REPOSO / PASIVA / ¡ARRIBA! (2/5) / ABAJO),
-la cuenta regresiva, si ese momento **se mide o se descarta**, y el RMS que llega al atril.
-
-- Cada fase hecha se puede **Repetir**. Una fase en curso se puede **Cancelar**.
-- El orden se respeta: la pasiva necesita el reposo y la activa necesita la pasiva.
-- Los umbrales de la sesión **solo cambian** cuando las tres fases están hechas y la calibración es válida.
-- **Sin la página:** el botón **BOOT** del ESP32 hace «siguiente paso» (reposo → pasiva → activa → iniciar sesión).
-  En el monitor serie: `c` comenzar, `1` `2` `3` fases, `x` cancelar, `s` sesión, `n` siguiente.
-- Si prefieres la calibración de antes (todo seguido y la sesión empieza sola), pon
-  `CALIBRACION_AUTOMATICA = true` en `esp32_calibracion.ino`.
+Resumen de los botones: **Comenzar calibración** → **Registrar RMS basal (10 s)** → revisar calidad y umbral preliminar → **Iniciar sesión**. Durante la sesión la página muestra avisos discretos de verificación, y desde ahí puedes hacer confirmaciones manuales, aprobar/rechazar ajustes del umbral y restaurar el anterior.
 
 ## 4. Durante la sesión
 
-- **Señal EMG del Arduino:** la señal cruda filtrada en la página (pasa altas 20 Hz y 60 Hz con armónicos,
-  igual que el Arduino), en mV a la salida de Nova. Verde = activación detectada por el atril
-  (o ARRIBA en la calibración); ámbar = fase de calibración.
-- **RMS que recibe el atril:** exactamente los números que llegan por el opto, con U_on y U_off.
-  Verde = activación; azul = bloque que la calibración usó.
-- **Controles:** Pausa / Seguir, Umbral − / +, Recalibrar (la terapia continúa después).
-- **Activaciones:** las mide el atril (inicio, duración, RMS medio y % de la referencia), igual que
-  las líneas «Activacion #n» del monitor serie.
+- **Señal EMG del Arduino** y **RMS que recibe el atril** (con U_ON, U_OFF y la media basal), igual que antes.
+- **Verificación del umbral**, **¿El umbral está funcionando?** y el aviso flotante de confirmación: ver `CALIBRACION_BASAL.md`.
 - **Mensajes del atril:** los mismos textos del monitor serie del ESP32.
-- **Finalizar terapia** guarda la sesión en el historial y deja el atril en pausa.
+- **Finalizar terapia** guarda la sesión (con calibración, confirmaciones, ajustes y parámetros) y deja el atril en pausa.
 
 ## 5. Si algo no conecta
 
@@ -94,7 +70,9 @@ Las IP se cambian en **Ajustes** (IP del Arduino, IP del atril). Si un día pref
 pon `USB_PARA_PAGINA = true` en el Arduino y marca «Señal EMG por USB» en Ajustes. En ese caso la laptop
 **no debe estar cargando** mientras el USB toca a un niño con electrodos.
 
-## 6. Qué cambió en los programas
+## 6. Qué cambió en los programas (v3.0, calibración por pasos)
+
+> La versión 4.0 del ESP32 reemplaza esa calibración por la basal; el Arduino no cambió. Ver `CALIBRACION_BASAL.md`.
 
 - **Arduino v4:** el muestreo de 1 kHz pasó a una interrupción de temporizador, porque el WiFi del R4
   hace esperas de varios milisegundos. Las líneas del opto salen de una cola de 6.4 s, siempre completas.

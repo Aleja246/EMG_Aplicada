@@ -1,49 +1,72 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v3.0
-//  La senal sEMG controla los actuadores.
+//  ASTRA - Firmware del atril (ESP32) v4.0
+//  Calibracion BASAL individualizada + verificacion supervisada.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 WiFi (arduino_emg.ino) manda por el opto,
-//  cada 100 ms, una linea con el RMS en milivoltios ("640\n").
+//  cada 100 ms, una linea con el RMS en milivoltios ("640\n"). El Arduino
+//  sigue siendo quien procesa la senal y calcula el RMS; el opto sigue
+//  siendo el unico enlace entre los dos lados.
 //
 //  Que hace:
-//   1. ARRANQUE: sube las estrellas hasta el microswitch (posicion 0).
+//   1. ARRANQUE (igual que antes): sube las estrellas hasta el microswitch.
 //      El lazy susan empieza a girar desde el encendido.
-//   2. CALIBRANDO (segun "Calibracion en la pagina sEMG cervical", 60 s),
-//      PASO A PASO desde la pagina web (o con el boton BOOT):
+//   2. CALIBRANDO - calibracion BASAL: solo RMS en reposo. NO se piden
+//      movimientos pasivos, contracciones voluntarias ni MVC.
 //        "Comenzar calibracion" -> espera
-//        "Comenzar reposo"  -> REPOSO 10 s               -> espera
-//        "Comenzar pasiva"  -> PASIVA 10 s               -> espera
-//        "Comenzar activa"  -> [ARRIBA 4 s + ABAJO 4 s] x 5 -> resultados
-//        "Iniciar sesion"   -> SESION
-//      U_on = mayor de (media_reposo + 3 SD_reposo, 25 % envolvente_activa)
-//      U_off = 0.6 x U_on
-//      Las estrellas ya van y vienen, lento.
-//   3. SESION:
-//      - Activacion: RMS suave sobre U_on por 300 ms. Termina: bajo U_off
-//        por 300 ms.
-//      - Estrellas: suben y bajan sin parar entre fondo y tope. Musculo
-//        RELAJADO: rapido (700 pasos/s). Musculo ACTIVO: lento (250 pasos/s).
-//      - Planetas (lazy susan): giran siempre, sin importar el esfuerzo.
-//      - Luz: relajado = lila que crece; activo = azul tenue; arriba y
-//        relajado = verde azulado. Cambios lentos (>= 1 s, sin parpadeo).
-//      - Sonido: 0001.mp3 tras 1 s relajado; 0002.mp3 al llegar arriba relajado.
+//        "Registrar basal"      -> ~10 s de RMS con el nino comodo y la cabeza
+//                                  apoyada (se descarta el 1.er segundo)
+//      Se calcula la media y la SD del RMS basal y se evalua la calidad
+//      (una senal inestable se RECHAZA). Si es aceptable:
+//        U_ON  = media + K x SD                   (K = 3)
+//        U_OFF = media + F x (U_ON - media)       (F = 0.6)
+//      Ese umbral es PRELIMINAR: se comprueba durante la terapia con las
+//      confirmaciones de la fisioterapeuta.
+//   3. SESION (supervisada):
+//      - Estado sostenido: el RMS suavizado cruza U_ON (ALTO) o U_OFF (BAJO)
+//        y se mantiene T_SOST (3 s) con histeresis. Eso solo lo hace
+//        "candidato a confirmacion"; no genera un aviso cada 3 s.
+//      - Verificacion: la pagina pregunta a la fisioterapeuta si la cabeza y el
+//        cuello estan erguidos. Maximo 4 preguntas automaticas en los primeros
+//        5 min y 3 en cada ciclo de 10 min, con intervalo minimo entre ellas
+//        (45 s / 120 s). El ESP32 lleva los contadores y los temporizadores
+//        (sin bloquear nada) con el tiempo EFECTIVO de terapia (la pausa no cuenta).
+//      - Cada pregunta guarda la ventana de RMS del EVENTO (media, SD, min, max),
+//        no la del momento en que se responde.
+//      - Ajuste del umbral: lo propone la pagina; solo se aplica aqui si la
+//        fisioterapeuta lo aprueba (/umbral). Se puede restaurar el anterior.
+//      - MODO SUPERVISADO: mientras no haya evidencia suficiente, el umbral NO
+//        controla los actuadores (estrellas lentas, luz azul tenue, sin sonido).
+//        La pagina puede habilitar el control automatico (tecla a) cuando el
+//        analisis lo respalda. CONTROL_AUTOMATICO_INICIAL = true lo habilita desde
+//        el arranque.
+//      - Estrellas, planetas, luz y sonido: mismas reglas de siempre.
 //   4. Seguridad: sin datos validos por 500 ms las estrellas pasan a lento y
 //      la luz a ambar. PARO (IO34, con USAR_PARO) y la pausa p detienen todo.
 //   5. WiFi: se une a la red "ASTRA" que crea el Arduino y atiende a la
-//      pagina web en http://192.168.4.200 (/estado y /cmd?c=...). La red
-//      corre en el nucleo 0; motores, luz y deteccion siguen en el nucleo 1,
-//      asi que la pagina nunca frena a los motores. Sin pagina, el atril
-//      funciona igual con el boton BOOT y el monitor serie.
+//      pagina en http://192.168.4.200:
+//        /estado?b=&a=&l=&r=   estado, RMS, eventos de verificacion, contadores
+//        /cmd?c=<letra>        comandos simples
+//        /conf?id=&p=E|C|D     postura confirmada para un evento
+//        /manual?p=E|C|D&n=    confirmacion manual
+//        /umbral?on=&off=&n=   umbral aprobado por la fisioterapeuta
+//        /restaurar?n=         vuelve al umbral anterior
+//        /cfg?k=&v=            parametros (factores, tiempos, limites)
+//      Los comandos con identificador (id / n) son idempotentes: si la pagina
+//      reintenta, no se duplica nada. La red corre en el nucleo 0; motores, luz y
+//      deteccion siguen en el nucleo 1. La configuracion vigente (umbrales,
+//      parametros, eventos, contadores) vive en el ESP32: si la pagina se
+//      desconecta, el atril sigue igual y al volver se resincroniza.
 //
 //  Comandos (monitor serie a 115200, "Sin ajuste de linea", o la pagina):
-//   c = comenzar (o repetir) la calibracion: queda esperando el primer paso
-//   1 = comenzar REPOSO   2 = comenzar PASIVA   3 = comenzar ACTIVA
-//   x = cancelar la fase que se esta midiendo
+//   c = comenzar (o repetir) la calibracion: queda esperando el registro
+//   1 = registrar el RMS basal (10 s)       x = cancelar el registro
+//   f = aceptar una calibracion RECHAZADA de todas formas (decision clinica)
 //   s = iniciar la sesion (con la calibracion LISTA)
 //   n = siguiente paso (lo mismo que el boton BOOT)
 //   p = pausa / seguir   r = reanudar tras el paro
-//   h = volver a buscar el tope   + / - = umbral   i = info de calibracion
+//   a = habilitar / deshabilitar el control automatico de los actuadores
+//   h = volver a buscar el tope   i = info de calibracion
 //  Boton BOOT de la placa: siguiente paso de la calibracion; en sesion,
 //  recalibrar; tras el paro, reanudar.
 //
@@ -51,21 +74,14 @@
 //  vienen con el paquete de placas ESP32 (el DFPlayer se maneja con
 //  comandos directos, no necesita su biblioteca).
 //
-//  Cambios v3.0 respecto a v2.3 (mismas reglas de calibracion y deteccion):
-//   - Calibracion paso a paso: tras "c" el atril ESPERA; cada fase (reposo,
-//     pasiva, activa) empieza solo cuando se pide (pagina, BOOT o 1/2/3) y
-//     al terminar vuelve a esperar. Cada fase se puede repetir o cancelar.
-//     Los umbrales de la sesion solo cambian cuando las tres fases estan
-//     hechas y la calibracion es valida. CALIBRACION_AUTOMATICA = true
-//     vuelve a la calibracion seguida de v2.3.
-//   - Al terminar, la calibracion queda LISTA y la sesion empieza con s,
-//     BOOT o el boton "Iniciar sesion" de la pagina.
-//   - WiFi + servidor web para la pagina (estado en vivo, RMS de cada
-//     bloque, activaciones y mensajes; comandos).
-//   - Cada sesion nueva (tras calibrar) reinicia el conteo de activaciones
-//     y el tiempo de sesion (sin contar las pausas).
-//   - La luz queda blanca tenue mientras la calibracion espera el siguiente
-//     paso.
+//  Cambios v4.0 respecto a v3.0 (motores, luz, DFPlayer, tope y paro NO cambian):
+//   - Calibracion basal (10 s de RMS en reposo) en lugar de reposo + pasiva +
+//     5 repeticiones activas. Calidad de la senal antes de aceptarla.
+//   - Estados sostenidos, verificaciones con ventana de RMS por evento,
+//     periodos de 5 y 10 min, contadores y temporizadores no bloqueantes.
+//   - Umbral ajustable solo con aprobacion; historial y restauracion.
+//   - Modo supervisado para los actuadores.
+//   - Parametros nuevos configurables desde la pagina (/cfg).
 //  Para probar motores, luz, microswitch y opto por separado: prueba_atril.ino
 // =====================================================================
 
@@ -109,34 +125,46 @@ const int  ACEL_PLANETAS = 200;    // pasos/s^2: arranque suave del lazy susan
 const long TOPE_SUELTA   = 1000;   // pasos: al bajar del tope, el microswitch debe soltarse antes de esto (~2 cm)
 
 // ------------------------- Ajustes de deteccion -----------------------
-const float UMBRAL_PCT_INICIAL = 0.25;  // umbral minimo = 25 % de la envolvente activa (+ / - lo cambian)
+// (La deteccion de "activacion" de 300 ms se conserva: alimenta el conteo de
+//  activaciones y, con control automatico, los actuadores.)
 const unsigned long T_CONFIRMAR = 300;  // ms sobre/bajo el umbral para cambiar de estado
 const unsigned long HOLGURA_MS  = 50;   // tolera que un bloque llegue unos ms antes (300 ms = 4 bloques seguidos)
 const unsigned long T_PREMIO    = 1000; // ms sostenidos para el sonido de activacion
 const unsigned long WATCHDOG_MS = 500;  // sin datos por mas de esto -> todo se detiene
 const float SUAVIZADO           = 0.5;  // 0..1 (mas alto = responde mas rapido)
-// ------------------------- Calibracion (documento) ---------------------
-// REPOSO 10 s -> PASIVA 10 s -> [ARRIBA 4 s + ABAJO 4 s] x 5 repeticiones = 60 s.
-// El tiempo se mide con el "reloj de las muestras": cada bloque que llega del
-// Arduino son 100 ms (si se cortan los datos, la calibracion espera).
-// La "envolvente" es el RMS de cada bloque de 100 ms que manda el Arduino.
+
+// ------------------------- Calibracion basal ---------------------------
+// Solo RMS en reposo. Los valores de esta seccion y de las dos siguientes son
+// los INICIALES: la pagina puede cambiarlos con /cfg y el ESP32 los conserva
+// (en RAM) aunque la pagina se desconecte.
 const int   BLOQUES_POR_S      = 10;    // el Arduino manda un bloque cada 100 ms
-const float CAL_REPOSO_S       = 10;    // fase 1
-const float CAL_PASIVA_S       = 10;    // fase 2
-const int   CAL_REPS           = 5;     // fase 3: repeticiones
-const float CAL_ARRIBA_S       = 4;     //   segundos arriba
-const float CAL_ABAJO_S        = 4;     //   segundos abajo
-const float CAL_DESC_REPOSO_S  = 1.0;   // se descarta el primer segundo del reposo
-const float CAL_DESC_PASIVA_S  = 0.5;   // se descarta el primer 0.5 s de la pasiva
-const float CAL_DESC_INI_S     = 0.7;   // ARRIBA: se omiten los 0.7 s iniciales
-const float CAL_DESC_FIN_S     = 0.3;   //         y los 0.3 s finales
-const float UMBRAL_K_SD        = 3.0;   // umbral estadistico: media + 3 SD del reposo
-const float UMBRAL_OFF_FACTOR  = 0.6;   // umbral_OFF = 0.6 x umbral_ON
-const float SNR_MINIMA         = 3.0;   // aviso si la contraccion apenas se distingue
-const float ARTEFACTO_MAX_PCT  = 80.0;  // aviso si el movimiento pasivo parece contraccion
-// true: las 3 fases corren seguidas y la sesion empieza sola (como v2.3).
-// false: cada fase espera a que la pidas (pagina, BOOT o teclas 1 / 2 / 3).
-const bool CALIBRACION_AUTOMATICA = false;
+const float CAL_BASAL_S        = 10;    // duracion del registro basal
+const float CAL_DESC_BASAL_S   = 1.0;   // se descartan los primeros segundos (filtros)
+const float UMBRAL_K_SD        = 3.0;   // U_ON  = media + K x SD
+const float UMBRAL_OFF_FACTOR  = 0.6;   // U_OFF = media + F x (U_ON - media)
+// Calidad de la calibracion basal (advertencia / rechazo). Valores en mV de RMS.
+const float Q_MEDIA_MIN     = 2.0;      // por debajo: senal casi nula (sensor o electrodos)
+const float Q_MEDIA_MAX     = 1500.0;   // por encima: ruido o mal contacto
+const float Q_SATURADO      = 2400.0;   // un bloque asi de alto: senal saturada
+const float Q_CV_AVISO      = 0.30;     // SD / media: advertencia
+const float Q_CV_RECHAZO    = 0.60;     //             rechazo
+const float Q_DERIVA_AVISO  = 0.25;     // |media 2.a mitad - 1.a mitad| / media: advertencia
+const float Q_DERIVA_RECHAZO = 0.50;    //                                         rechazo
+const float Q_PICO_SD       = 6.0;      // bloque > media + 6 SD: pico aislado (advertencia)
+
+// ------------------------- Estados sostenidos y verificacion -----------
+const float T_SOSTENIDO_S      = 3.0;   // estado estable = candidato a confirmacion (y ventana de RMS)
+const float VENT_DERIVA_MAX    = 0.35;  // las dos mitades de la ventana no pueden diferir mas de 35 %: si cruza un cambio de postura, no se pregunta
+const float VER_INI_S          = 300;   // primer periodo de verificacion: 5 min
+const int   VER_INI_MAX        = 4;     //   maximo de preguntas automaticas
+const float VER_INI_MIN_ENTRE_S = 45;   //   intervalo minimo entre preguntas
+const float VER_CICLO_S        = 600;   // ciclos siguientes: 10 min (se repiten hasta el final)
+const int   VER_CICLO_MAX      = 3;
+const float VER_CICLO_MIN_ENTRE_S = 120;
+const float T_REVERIFICAR_S    = 120;   // un estado que dura mucho se vuelve a comprobar tras esto
+const float T_RESPUESTA_S      = 120;   // tiempo efectivo para responder una pregunta
+const bool  HIPOTESIS_ALTO_ES_ERGUIDO = true;  // interpretacion a comprobar: RMS alto = cabeza erguida
+const bool  CONTROL_AUTOMATICO_INICIAL = false; // false = SUPERVISADO (actuadores no usan el umbral)
 
 // ------------------------- Luz y sonido -------------------------------
 const int BRILLO_MAX = 128;        // tope del 50 %
@@ -168,7 +196,7 @@ const char *RED_CLAVE = "astra2026";
 const IPAddress IP_ATRIL(192, 168, 4, 200);
 const IPAddress IP_PUERTA(192, 168, 4, 1);    // el Arduino
 const IPAddress MASCARA(255, 255, 255, 0);
-const char *VERSION_ATRIL = "3.0";
+const char *VERSION_ATRIL = "4.0";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -200,36 +228,44 @@ float rmsSuave = 0;
 bool hayDatos = false;
 bool datosAntes = false;
 
-// --- Calibracion ---
-// ESPERA: espera el siguiente paso. LISTA: las 3 fases hechas y validas.
-enum FaseCal { CAL_ESPERA, CAL_REPOSO, CAL_PASIVA, CAL_ARRIBA, CAL_ABAJO, CAL_LISTA, CAL_FALLIDA };
-const char *NOMBRE_FASE[] = {"ESPERA", "REPOSO", "PASIVA", "ARRIBA", "ABAJO", "LISTA", "FALLIDA"};
-const char *NOMBRE_PASO[] = {"REPOSO", "PASIVA", "ACTIVA"};
+// --- Parametros (iniciales = constantes de arriba; /cfg los cambia) ---
+struct Cfg {
+  float basalS, descBasalS, k, f, tSost;
+  float verIniS, verIniMin; int verIniMax;
+  float verCicloS, verCicloMin; int verCicloMax;
+  float tRever, tResp;
+  int hip;                          // 1 = RMS alto <-> cabeza erguida; 0 = RMS alto <-> cabeza caida
+} cfg = {CAL_BASAL_S, CAL_DESC_BASAL_S, UMBRAL_K_SD, UMBRAL_OFF_FACTOR, T_SOSTENIDO_S,
+         VER_INI_S, VER_INI_MIN_ENTRE_S, VER_INI_MAX, VER_CICLO_S, VER_CICLO_MIN_ENTRE_S, VER_CICLO_MAX,
+         T_REVERIFICAR_S, T_RESPUESTA_S, HIPOTESIS_ALTO_ES_ERGUIDO ? 1 : 0};
+
+// --- Calibracion basal ---
+enum FaseCal { CAL_ESPERA, CAL_BASAL, CAL_LISTA, CAL_RECHAZADA };
+const char *NOMBRE_FASE[] = {"ESPERA", "BASAL", "LISTA", "RECHAZADA"};
 FaseCal faseCal = CAL_ESPERA;
-bool hecho[3] = {false, false, false};   // reposo, pasiva y activa terminadas
-bool faseContrae = false;           // true durante ARRIBA (la luz se pone verde)
-int bloquesFase = 0;                // bloques recibidos en la fase actual (reloj de las muestras)
-int repCal = 0;                     // repeticion activa en curso (1..5)
-double sumaR = 0, suma2R = 0;       // reposo: envolvente y su cuadrado
-int nR = 0;
-double sumaP = 0;                   // pasiva: envolvente
-int nP = 0;
-float picoP = 0;
-double sumaA = 0, suma2A = 0;       // repeticion actual: envolvente y cuadrado (para el RMS)
-int nA = 0;
-double sumaRepRms = 0, sumaRepEnv = 0;
-int nRepsOK = 0;
-// Resultados de cada fase de la calibracion en curso (se ven en la pagina)
-float cReposo = 0, cSd = 0, cRestRms = 0, cPasMedia = 0, cPasPico = 0;
-float cActRms = 0, cActEnv = 0, cSnr = 0, cArt = 0;
-float cRepRms[CAL_REPS];
+int bloquesFase = 0;                // bloques recibidos en el registro (reloj de las muestras)
+double bSum = 0, bSum2 = 0, bSumA = 0, bSumB = 0;
+int bN = 0, bNa = 0, bNb = 0;
+float bMin = 1e9, bMax = 0;
+bool bCorte = false;                // se cortaron los datos durante el registro
+// Banderas de calidad
+const uint16_t F_CORTE = 1 << 0, F_NULA = 1 << 1, F_RUIDO = 1 << 2, F_SATURA = 1 << 3, F_PLANA = 1 << 4,
+               F_CV_EXC = 1 << 5, F_CV = 1 << 6, F_DER_EXC = 1 << 7, F_DER = 1 << 8, F_PICOS = 1 << 9, F_POCOS = 1 << 10;
+const uint16_t F_RECHAZO = F_CORTE | F_NULA | F_RUIDO | F_SATURA | F_PLANA | F_CV_EXC | F_DER_EXC | F_POCOS;
+const char *TXT_FLAG[] = {"datos interrumpidos durante el registro", "senal casi nula (sensor o electrodos)",
+                          "RMS basal muy alto (ruido o mal contacto)", "senal saturada", "senal plana",
+                          "variabilidad excesiva", "variabilidad alta", "deriva excesiva", "deriva notable",
+                          "picos aislados (movimiento?)", "muy pocos bloques"};
+// nivel: 0 aceptada, 1 con advertencias, 2 rechazada, 3 aceptada a la fuerza (decision de la fisioterapeuta)
+struct CalBasal { float media, sd, cv, deriva, minimo, maximo; int n; uint16_t flags; uint8_t nivel; } cb = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 // Calibracion aplicada (la que usa la sesion)
-float restRms = 0, pasivaMedia = 0, pasivaPico = 0;
-float activeRms = 0, activeEnv = 0, snr = 0, artefactoPct = 0;
 bool calibrado = false;
-float reposo = 100, sdReposo = 10, maximo = 1000;
-float umbralPct = UMBRAL_PCT_INICIAL;
+float reposo = 100, sdReposo = 10;
 float umbralOn = 300, umbralOff = 200;
+uint8_t umbralOrigen = 0;           // 0 basal, 1 ajustado (aprobado en la pagina), 2 restaurado
+struct UmbralHist { float on, off; uint8_t origen; float tSes; };
+UmbralHist hist[6]; int histN = 0;
+bool controlAuto = CONTROL_AUTOMATICO_INICIAL;   // false = modo supervisado
 
 // --- Deteccion ---
 bool activo = false;
@@ -246,6 +282,35 @@ unsigned long tiempoActivoTotal = 0;
 int sesionId = 0;                   // sube con cada sesion nueva (tras calibrar)
 unsigned long msSesion = 0;         // tiempo en SESION (sin pausas)
 unsigned long msSesionIni = 0;      // msSesion al empezar la activacion en curso
+
+// --- Estados sostenidos y verificacion ---
+enum EstadoRms { RMS_NINGUNO = 0, RMS_ALTO = 1, RMS_BAJO = 2 };
+uint8_t estadoRms = RMS_NINGUNO;    // estado con histeresis (ALTO entra en U_ON; BAJO entra en U_OFF)
+uint32_t episodio = 0;              // sube cada vez que cambia el estado
+int bloquesEnEstado = 0;
+bool sostenidoMarcado = false;      // este episodio ya se conto como "sostenido detectado"
+uint32_t nDetectados = 0;
+const int N_VENT = 64;              // ventana de RMS: ultimos 6.4 s (se limpia con cada pausa o corte de datos)
+float vRms[N_VENT]; int vN = 0, vW = 0;
+// Eventos de verificacion
+enum StatusEv { EV_PENDIENTE = 1, EV_CONFIRMADO = 2, EV_DESCARTADO = 3, EV_EXPIRADO = 4 };
+enum Postura { POST_NINGUNA = 0, POST_ERGUIDA = 1, POST_CAIDA = 2, POST_INDETERMINADA = 3 };
+struct Evento {
+  uint32_t id, rev, ep, tok;
+  uint8_t origen, estado, status, postura, calidad, periodo, nSol;
+  int sid;
+  float tIni, dur, media, sd, minimo, maximo, uon, uoff, tSolic;
+};
+const int N_EV = 48;
+Evento evs[N_EV];
+uint32_t nEv = 0, revGlobal = 0;
+int perActual = -1, solPer = 0;     // periodo de verificacion en curso y preguntas automaticas hechas en el
+float tSolUlt = -1e9, finVentUlt = -1e9, tEpUlt = -1e9;
+uint32_t epUltSol = 0, pendId = 0;
+uint32_t nResp[3] = {0, 0, 0};      // confirmaciones E/C por estado RMS (1 = ALTO, 2 = BAJO)
+uint32_t nErr[3] = {0, 0, 0};       // las que no coincidieron con la hipotesis
+uint32_t tokManual = 0, tokUmbral = 0, tokRestaurar = 0;
+volatile uint32_t tUltimaConsulta = 0;   // ultima vez que la pagina pidio /estado
 
 // --- Motores ---
 bool subiendo = false, bajando = false, frenando = false;
@@ -312,12 +377,11 @@ bool datosOK() {
 }
 
 // Estado que se premia: relajado (PREMIO_AL_RELAJAR) o contrayendo (original)
-bool premiado() { return PREMIO_AL_RELAJAR ? !activo : activo; }
+// En modo SUPERVISADO el umbral aun no controla los actuadores: nunca hay "premio".
+bool premiado() { return controlAuto && (PREMIO_AL_RELAJAR ? !activo : activo); }
 
-// La calibracion esta midiendo una fase (no esperando)
-bool midiendo() {
-  return faseCal == CAL_REPOSO || faseCal == CAL_PASIVA || faseCal == CAL_ARRIBA || faseCal == CAL_ABAJO;
-}
+// El registro basal esta en curso
+bool midiendo() { return faseCal == CAL_BASAL; }
 
 float altura() {  // 0 = fondo, 1 = tope
   float a = 1.0f - (float)labs(estrellas.currentPosition()) / RECORRIDO;
@@ -378,25 +442,31 @@ void frenarEstrellas() {
   else estrellas.stop();
 }
 
-// Umbral del documento (6.1): el mayor entre el estadistico y el 25 % de la activa
-void calcularUmbrales() {
-  umbralOn  = max(reposo + UMBRAL_K_SD * sdReposo, umbralPct * activeEnv);
-  umbralOff = UMBRAL_OFF_FACTOR * umbralOn;
+float tEfS() { return msSesion / 1000.0f; }   // tiempo EFECTIVO de terapia (la pausa no cuenta)
+
+const char *txtOrigen() { return umbralOrigen == 0 ? "basal (preliminar)" : umbralOrigen == 1 ? "ajustado y aprobado" : "restaurado"; }
+
+// Umbrales de la calibracion basal: U_ON = media + K SD; U_OFF = media + F (U_ON - media)
+void umbralesBasal(float &on, float &off) {
+  on  = reposo + cfg.k * sdReposo;
+  off = reposo + cfg.f * (on - reposo);
+}
+
+// Cambia el umbral vigente y lo guarda en el historial (para poder restaurarlo)
+void fijarUmbral(float on, float off, uint8_t origen) {
+  umbralOn = on; umbralOff = off; umbralOrigen = origen;
+  if (histN == 6) { for (int i = 1; i < 6; i++) hist[i - 1] = hist[i]; histN = 5; }
+  hist[histN++] = {on, off, origen, tEfS()};
 }
 
 void imprimirCalibracion() {
-  msg("---- Calibracion ----");
-  msg("Reposo (envolvente): %.1f mV", reposo);
-  msg("Ruido en reposo (SD): %.1f mV", sdReposo);
-  msg("Pasiva: media %.1f mV, pico %.1f mV", pasivaMedia, pasivaPico);
-  msg("Activa: RMS de referencia %.1f mV (envolvente %.1f mV, %d repeticiones)",
-      activeRms, activeEnv, nRepsOK);
-  msg("Relacion senal/reposo (SNR): %.1f", snr);
-  msg("Artefacto pasivo / activa: %.0f %%", artefactoPct);
-  msg("Umbral ON: %.1f mV (mayor de media + %.0f SD = %.1f, y %.0f %% activa = %.1f)",
-      umbralOn, UMBRAL_K_SD, reposo + UMBRAL_K_SD * sdReposo,
-      umbralPct * 100, umbralPct * activeEnv);
-  msg("Umbral OFF: %.1f mV (%.1f x umbral ON)", umbralOff, UMBRAL_OFF_FACTOR);
+  msg("---- Calibracion basal ----");
+  msg("RMS basal: media %.1f mV, SD %.1f mV (CV %.2f, deriva %+.0f %%, %d bloques)", cb.media, cb.sd, cb.cv, cb.deriva * 100, cb.n);
+  const char *niv[] = {"ACEPTADA", "ACEPTADA CON ADVERTENCIAS", "RECHAZADA", "ACEPTADA A LA FUERZA"};
+  msg("Calidad: %s", niv[cb.nivel]);
+  for (int i = 0; i < 11; i++) if (cb.flags & (1 << i)) msg("   - %s", TXT_FLAG[i]);
+  msg("U_ON %.1f mV (media + %.1f SD) | U_OFF %.1f mV (media + %.2f x (U_ON - media))", umbralOn, cfg.k, umbralOff, cfg.f);
+  msg("Umbral %s. Modo %s.", txtOrigen(), controlAuto ? "CONTROL AUTOMATICO" : "SUPERVISADO");
   msg("Activaciones: %d | tiempo activo total: %.1f s | lineas danadas: %lu",
       nActivaciones, tiempoActivoTotal / 1000.0f, lineasMalas);
   msg("---------------------");
@@ -413,7 +483,7 @@ void terminarActivacion(unsigned long fin) {
     unsigned long dur = fin - tInicioActivo;
     tiempoActivoTotal += dur;
     float rmsMedio = nRmsAct ? sumaRmsAct / nRmsAct : 0;
-    int pct = (int)lroundf(100.0f * (rmsMedio - reposo) / max(maximo - reposo, 1.0f));
+    int pct = (int)lroundf(100.0f * (rmsMedio - reposo) / max(umbralOn - reposo, 1.0f));   // % del umbral sobre el reposo
     msg("   Activacion #%d: %.1f s, RMS medio %.0f mV (%d %% de la referencia)",
         nActivaciones, dur / 1000.0f, rmsMedio, pct);
     Activacion a = {sesionId, nActivaciones, msSesionIni / 1000.0f, dur / 1000.0f, (int)lroundf(rmsMedio), pct};
@@ -432,8 +502,6 @@ void cerrarActivacion() { cerrarActivacion(millis()); }
 // ======================================================================
 //  Cambios de modo
 // ======================================================================
-void empezarFase(int f);            // mas abajo
-
 void iniciarArranque() {
   cerrarActivacion();
   modo = ARRANQUE;
@@ -450,30 +518,238 @@ void iniciarArranque() {
   msg(">> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).");
 }
 
-void reiniciarFase(int f) {
-  if (f == 0) { sumaR = suma2R = 0; nR = 0; }
-  else if (f == 1) { sumaP = 0; nP = 0; picoP = 0; }
-  else {
-    sumaA = suma2A = 0; nA = 0;
-    sumaRepRms = sumaRepEnv = 0; nRepsOK = 0;
-    for (int i = 0; i < CAL_REPS; i++) cRepRms[i] = 0;
-  }
-  hecho[f] = false;
+// ---------------------------------------------------------------------
+//  Eventos de verificacion (ring de N_EV). Solo el loop escribe; la red lee con candado.
+// ---------------------------------------------------------------------
+Evento *buscarEv(uint32_t id) {
+  if (id == 0 || id > nEv || id + N_EV <= nEv) return NULL;
+  return &evs[(id - 1) % N_EV];
+}
+// Guarda (o actualiza) un evento y le pone una revision nueva: la pagina pide lo que cambio
+void guardarEv(Evento &e) {
+  portENTER_CRITICAL(&candado);
+  e.rev = ++revGlobal;
+  evs[(e.id - 1) % N_EV] = e;
+  if (e.id > nEv) nEv = e.id;
+  portEXIT_CRITICAL(&candado);
 }
 
-// Deja la calibracion lista para empezar: espera el primer paso.
+// Ventana de RMS: los ultimos n bloques (todos de este mismo tramo de sesion)
+void ventanaAgregar(float mv) { vRms[vW] = mv; vW = (vW + 1) % N_VENT; if (vN < N_VENT) vN++; }
+void ventanaLimpiar() { vN = 0; vW = 0; }
+int nVentana() { int n = (int)lroundf(cfg.tSost * BLOQUES_POR_S); return constrain(n, 10, N_VENT); }
+struct Ventana { float media, sd, minimo, maximo, deriva; uint8_t calidad; };
+bool statsVentana(int n, Ventana &v) {
+  if (vN < n) return false;
+  double s = 0, s2 = 0, sNuevo = 0, sViejo = 0; float mn = 1e9, mx = 0; uint8_t cal = 0;
+  int mitad = n / 2;
+  for (int i = 0; i < n; i++) {
+    float x = vRms[(vW - 1 - i + N_VENT) % N_VENT];
+    s += x; s2 += (double)x * x;
+    if (i < mitad) sNuevo += x; else if (i >= n - mitad) sViejo += x;
+    if (x < mn) mn = x;
+    if (x > mx) mx = x;
+    if (x >= Q_SATURADO) cal = 1;                  // 1 = ventana dudosa (saturacion)
+  }
+  double m = s / n, var = n > 1 ? (s2 - n * m * m) / (n - 1) : 0;
+  float der = (mitad > 0 && m > 0) ? fabsf((float)((sNuevo - sViejo) / mitad)) / (float)m : 0;   // |mitad nueva - mitad vieja| / media
+  v = {(float)m, sqrtf(max((float)var, 0.0f)), mn, mx, der, cal};
+  return true;
+}
+
+struct Periodo { int idx; float ini, dur, minEntre; int max; };
+Periodo periodoDe(float t) {
+  if (t < cfg.verIniS) return {0, 0, cfg.verIniS, cfg.verIniMin, cfg.verIniMax};
+  int n = (int)((t - cfg.verIniS) / cfg.verCicloS);
+  return {1 + n, cfg.verIniS + n * cfg.verCicloS, cfg.verCicloS, cfg.verCicloMin, cfg.verCicloMax};
+}
+
+void expirarPendiente() {
+  if (!pendId) return;
+  Evento *p = buscarEv(pendId);
+  if (p && p->status == EV_PENDIENTE) { Evento e = *p; e.status = EV_EXPIRADO; guardarEv(e); }
+  pendId = 0;
+}
+
+void reiniciarVerificacion() {
+  expirarPendiente();
+  perActual = -1; solPer = 0;
+  tSolUlt = finVentUlt = tEpUlt = -1e9;
+  epUltSol = 0;
+  for (int i = 0; i < 3; i++) nResp[i] = nErr[i] = 0;
+  nDetectados = 0;
+}
+
+void reiniciarEstadoRms() {
+  estadoRms = RMS_NINGUNO; bloquesEnEstado = 0; sostenidoMarcado = false; ventanaLimpiar();
+}
+
+// Hay un estado sostenido ahora mismo? (histeresis + ventana coherente con el estado)
+bool sostenidoVigente(Ventana &v) {
+  int nv = nVentana();
+  if (estadoRms == RMS_NINGUNO || bloquesEnEstado < nv || !statsVentana(nv, v)) return false;
+  if (v.deriva > VENT_DERIVA_MAX) return false;        // ventana que cruza una transicion: todavia no es estable
+  return estadoRms == RMS_ALTO ? v.media >= umbralOn : v.media < umbralOff;
+}
+
+// Sigue el estado del RMS suavizado con histeresis y cuenta los estados sostenidos.
+// NO genera avisos: solo marca que existe un estado estable candidato a confirmacion.
+void actualizarEstadoRms() {
+  uint8_t nuevo = estadoRms;
+  if (estadoRms == RMS_NINGUNO) nuevo = rmsSuave >= umbralOn ? RMS_ALTO : RMS_BAJO;
+  else if (estadoRms == RMS_BAJO && rmsSuave >= umbralOn) nuevo = RMS_ALTO;
+  else if (estadoRms == RMS_ALTO && rmsSuave < umbralOff) nuevo = RMS_BAJO;
+  if (nuevo != estadoRms) { estadoRms = nuevo; episodio++; bloquesEnEstado = 0; sostenidoMarcado = false; }
+  bloquesEnEstado++;
+  Ventana v;
+  if (!sostenidoMarcado && sostenidoVigente(v)) {
+    sostenidoMarcado = true; nDetectados++;
+    msg("   Estado sostenido %s (RMS medio %.0f mV en %.0f s). Candidato a confirmacion.",
+        estadoRms == RMS_ALTO ? "ALTO" : "BAJO", v.media, cfg.tSost);
+  }
+}
+
+bool paginaViva() { return tUltimaConsulta && (millis() - tUltimaConsulta) < 3000; }
+
+// Arma el evento con la ventana de RMS de AHORA (la del estado que se esta viendo)
+Evento armarEvento(const Ventana &v, uint8_t origen, const Periodo &p) {
+  Evento e;
+  memset(&e, 0, sizeof e);
+  e.id = nEv + 1; e.ep = episodio; e.origen = origen; e.estado = estadoRms;
+  e.calidad = v.calidad; e.periodo = p.idx; e.sid = sesionId;
+  e.tIni = tEfS() - nVentana() / (float)BLOQUES_POR_S; e.dur = nVentana() / (float)BLOQUES_POR_S;
+  e.media = v.media; e.sd = v.sd; e.minimo = v.minimo; e.maximo = v.maximo;
+  e.uon = umbralOn; e.uoff = umbralOff; e.tSolic = tEfS();
+  return e;
+}
+
+// Cuenta la respuesta y marca si coincide con la hipotesis (RMS alto <-> erguida, segun cfg.hip)
+void contarRespuesta(const Evento &e) {
+  if (e.postura != POST_ERGUIDA && e.postura != POST_CAIDA) return;
+  nResp[e.estado]++;
+  bool altoEsErguido = cfg.hip == 1;
+  bool esperadaErguida = (e.estado == RMS_ALTO) == altoEsErguido;
+  if (esperadaErguida != (e.postura == POST_ERGUIDA)) nErr[e.estado]++;
+}
+
+// Planificador de verificaciones: sin bloqueos, con el tiempo efectivo de terapia.
+void planificarVerificacion() {
+  if (modo != SESION) return;
+  float t = tEfS();
+  Periodo p = periodoDe(t);
+  if (p.idx != perActual) {                         // periodo nuevo: solo se reinicia el contador automatico
+    perActual = p.idx; solPer = 0;
+    if (p.idx == 0) msg(">> Verificacion: primeros %.0f min, maximo %d confirmaciones automaticas.", p.dur / 60, p.max);
+    else msg(">> Verificacion: ciclo %d (min %.0f-%.0f), maximo %d confirmaciones automaticas.", p.idx, p.ini / 60, (p.ini + p.dur) / 60, p.max);
+  }
+  if (pendId) {                                     // la pregunta caduca si no se responde a tiempo
+    Evento *pe = buscarEv(pendId);
+    if (!pe || pe->status != EV_PENDIENTE) pendId = 0;
+    else if (t - pe->tSolic > cfg.tResp) {
+      Evento e = *pe; e.status = EV_EXPIRADO; guardarEv(e); pendId = 0;
+      msg("   Pregunta #%lu sin respuesta: expirada.", (unsigned long)e.id);
+    }
+  }
+  if (pendId || !datosOK() || !paginaViva()) return;   // sin pagina no se pregunta (no se gasta el cupo)
+  if (solPer >= p.max) return;
+  if (t < tSolUlt + p.minEntre) return;                // intervalo minimo entre preguntas
+  if (t < p.ini + solPer * p.dur / (p.max + 1)) return; // reparto en el periodo: no todo al inicio
+  Ventana v;
+  if (!sostenidoVigente(v)) return;                    // hace falta un estado sostenido ahora
+  if (tEfS() - nVentana() / (float)BLOQUES_POR_S < finVentUlt) return;   // nunca dos preguntas sobre la misma ventana
+  // Prioridad: estado nuevo > observaciones poco representadas > estados que ya fallaron
+  int pts;
+  if (episodio != epUltSol) pts = 3;                   // episodio nuevo
+  else {                                               // el mismo estado sigue: comprobacion periodica, sin saturar
+    float desde = t - tEpUlt;
+    if (desde < cfg.tRever) return;
+    pts = (int)(desde / cfg.tRever);                   // 1 tras T_REVER, 2 tras el doble...
+  }
+  uint8_t otro = estadoRms == RMS_ALTO ? RMS_BAJO : RMS_ALTO;
+  if (nResp[estadoRms] < nResp[otro]) pts += 2;        // poco representado
+  if (nErr[estadoRms] > 0) pts += 2;                   // ya genero errores
+  if (pts < 2) return;
+  Evento e = armarEvento(v, 0, p);
+  e.status = EV_PENDIENTE; e.nSol = solPer + 1;
+  guardarEv(e);
+  pendId = e.id; solPer++; tSolUlt = t; finVentUlt = t; epUltSol = episodio; tEpUlt = t;
+  msg(">> Verificacion %d/%d (periodo %d): pregunta #%lu, ventana de %.0f s.", solPer, p.max, p.idx, (unsigned long)e.id, cfg.tSost);
+}
+
+// Respuesta de la fisioterapeuta a una pregunta pendiente. Idempotente.
+void responderEvento(uint32_t id, uint8_t postura) {
+  Evento *pe = buscarEv(id);
+  if (!pe || pe->status != EV_PENDIENTE || postura < 1 || postura > 3) return;   // duplicado o desconocido: se ignora
+  Evento e = *pe;
+  e.postura = postura;
+  e.status = postura == POST_INDETERMINADA ? EV_DESCARTADO : EV_CONFIRMADO;
+  guardarEv(e);
+  if (pendId == id) pendId = 0;
+  contarRespuesta(e);
+  msg("   Pregunta #%lu respondida: %s.", (unsigned long)id,
+      postura == POST_ERGUIDA ? "erguida" : postura == POST_CAIDA ? "caida" : "no se puede determinar");
+}
+
+// Confirmacion manual: usa la ventana de RMS de este momento. No gasta el cupo automatico.
+void confirmarManual(uint8_t postura, uint32_t token) {
+  if (token && token == tokManual) return;             // reintento de la pagina
+  if (modo != SESION || postura < 1 || postura > 3) { msg("!! La confirmacion manual necesita la sesion en marcha."); return; }
+  Ventana v;
+  int nv = min(nVentana(), vN);
+  if (estadoRms == RMS_NINGUNO || nv < 10 || !statsVentana(nv, v)) { msg("!! Aun no hay RMS suficiente para una confirmacion manual."); return; }
+  tokManual = token;
+  Periodo p = periodoDe(tEfS());
+  Evento e = armarEvento(v, 1, p);
+  e.dur = nv / (float)BLOQUES_POR_S; e.tIni = tEfS() - e.dur; e.tok = token;
+  e.postura = postura; e.status = postura == POST_INDETERMINADA ? EV_DESCARTADO : EV_CONFIRMADO;
+  guardarEv(e);
+  contarRespuesta(e);
+  finVentUlt = max(finVentUlt, tEfS());
+  msg("   Confirmacion manual #%lu: %s (RMS %.0f mV, estado %s).", (unsigned long)e.id,
+      postura == POST_ERGUIDA ? "erguida" : postura == POST_CAIDA ? "caida" : "no se puede determinar", v.media,
+      estadoRms == RMS_ALTO ? "ALTO" : "BAJO");
+}
+
+// ---------------------------------------------------------------------
+//  Parametros
+// ---------------------------------------------------------------------
+bool ajustarCfg(const char *k, float v, bool aplicar) {
+#define CF(nombre, campo, lo, hi) if (!strcmp(k, nombre)) { if (!(v >= (lo) && v <= (hi))) return false; if (aplicar) campo = (decltype(campo))v; return true; }
+  CF("basal", cfg.basalS, 5, 60)
+  CF("desc", cfg.descBasalS, 0, 5)
+  CF("k", cfg.k, 0.5, 10)
+  CF("f", cfg.f, 0.1, 0.95)
+  CF("tSost", cfg.tSost, 1, 6)
+  CF("v1s", cfg.verIniS, 30, 3600)
+  CF("v1max", cfg.verIniMax, 0, 20)
+  CF("v1min", cfg.verIniMin, 5, 3600)
+  CF("vcs", cfg.verCicloS, 60, 7200)
+  CF("vcmax", cfg.verCicloMax, 0, 20)
+  CF("vcmin", cfg.verCicloMin, 5, 7200)
+  CF("rever", cfg.tRever, 10, 3600)
+  CF("resp", cfg.tResp, 10, 600)
+  CF("hip", cfg.hip, 0, 1)
+#undef CF
+  return false;
+}
+
+// ---------------------------------------------------------------------
+//  Calibracion basal
+// ---------------------------------------------------------------------
+void reiniciarBasal() {
+  bSum = bSum2 = bSumA = bSumB = 0; bN = bNa = bNb = 0; bMin = 1e9; bMax = 0; bCorte = false;
+}
+
+// Deja la calibracion lista para empezar: espera el registro basal.
 void iniciarCalibracion() {
   cerrarActivacion();
+  expirarPendiente();
   modo = CALIBRANDO;
   faseCal = CAL_ESPERA;
-  faseContrae = false;
-  bloquesFase = 0; repCal = 0;
-  for (int f = 0; f < 3; f++) reiniciarFase(f);
-  cReposo = cSd = cRestRms = cPasMedia = cPasPico = cActRms = cActEnv = cSnr = cArt = 0;
-  pistaPendiente = 0;
-  msg(">> CALIBRACION (60 s): REPOSO 10 s -> PASIVA 10 s -> 5 x (ARRIBA 4 s + ABAJO 4 s)");
-  if (CALIBRACION_AUTOMATICA) empezarFase(0);
-  else msg(">> Esperando: comienza el REPOSO desde la pagina, con BOOT o con la tecla 1.");
+  bloquesFase = 0;
+  reiniciarBasal();
+  msg(">> CALIBRACION BASAL (%.0f s): solo RMS en reposo; no se piden movimientos ni contracciones.", cfg.basalS);
+  msg(">> Esperando: pon al nino comodo y estable, con la cabeza apoyada, y registra el basal desde la pagina, con BOOT o con la tecla 1.");
 }
 
 void iniciarSesion(bool nueva) {
@@ -482,6 +758,7 @@ void iniciarSesion(bool nueva) {
     nActivaciones = 0;
     tiempoActivoTotal = 0;
     msSesion = 0;
+    reiniciarVerificacion();
   }
   modo = SESION;
   bajando = false;                 // el vaiven sigue donde iba
@@ -490,176 +767,117 @@ void iniciarSesion(bool nueva) {
   tInicioPremio = tFinPremio = millis();   // tras una pausa esperan 1.5 s antes de bajar
   premio1 = false;
   rmsSuave = reposo;               // no arrastra la contraccion de la calibracion
-  msg(PREMIO_AL_RELAJAR ? ">> SESION: relaja para subir las estrellas."
-                        : ">> SESION: contrae para subir las estrellas.");
+  reiniciarEstadoRms();            // el RMS de antes de la pausa no se mezcla con el de ahora
+  if (nueva) msg(controlAuto ? ">> SESION: control automatico de los actuadores." :
+                 ">> SESION SUPERVISADA: el umbral aun no controla los actuadores (estrellas lentas, luz azul tenue, sin sonido).");
+  else msg(">> SESION: continua.");
 }
 
-// Calcula los resultados con las 3 fases hechas y, si es valida, la aplica.
-void terminarCalibracion() {
-  faseContrae = false;
-  bloquesFase = 0;
-  cSnr = cRestRms > 0 ? cActRms / cRestRms : 0;
-  cArt = cActEnv > 0 ? 100.0f * cPasPico / cActEnv : 0;
-
-  // Advertencias automaticas
-  if (cActRms <= 0) {
-    msg("!! No se detecto contraccion activa. Revisa electrodos y repite la fase ACTIVA (3) o toda la calibracion (c).");
-    msg("!! La terapia no puede comenzar sin una calibracion valida.");
-    faseCal = CAL_FALLIDA;
-    return;                           // no se aplica
-  }
-
-  // Aplica la calibracion nueva
-  reposo = cReposo;
-  sdReposo = cSd;
-  restRms = cRestRms;
-  pasivaMedia = cPasMedia;
-  pasivaPico = cPasPico;
-  activeRms = cActRms;
-  activeEnv = cActEnv;
-  snr = cSnr;
-  artefactoPct = cArt;
-  maximo = activeEnv;                 // el 100 % del esfuerzo de ese nino hoy
-  calcularUmbrales();
-  imprimirCalibracion();
-
-  if (snr < SNR_MINIMA)
-    msg("!! SNR < 3: la contraccion apenas se distingue del reposo (mal contacto o electrodo mal ubicado).");
-  if (artefactoPct > ARTEFACTO_MAX_PCT)
-    msg("!! Artefacto > 80 %%: las transiciones podrian contarse como activaciones (sube el umbral con + o mejora la fijacion de cables).");
-
+// Pone en uso la calibracion basal (aceptada, con advertencias o a la fuerza)
+void aplicarBasal(uint8_t nivel) {
+  cb.nivel = nivel;
+  reposo = cb.media; sdReposo = cb.sd;
+  float on, off; umbralesBasal(on, off);
+  histN = 0;
+  fijarUmbral(on, off, 0);
   calibrado = true;
   faseCal = CAL_LISTA;
-  if (CALIBRACION_AUTOMATICA) iniciarSesion(true);
-  else msg(">> Calibracion LISTA. Inicia la sesion desde la pagina, con BOOT o con la tecla s.");
+  imprimirCalibracion();
+  msg(">> Calibracion LISTA. Inicia la sesion desde la pagina, con BOOT o con la tecla s. El umbral es preliminar.");
 }
 
-// Una fase termino: si ya estan las 3, resultados; si no, espera el siguiente paso.
-void finFase() {
-  if (hecho[0] && hecho[1] && hecho[2]) { terminarCalibracion(); return; }
-  faseCal = CAL_ESPERA;
-  faseContrae = false;
+void terminarBasal() {
+  int total = (int)lroundf(cfg.basalS * BLOQUES_POR_S), desc = (int)lroundf(cfg.descBasalS * BLOQUES_POR_S);
+  int esperados = max(total - desc, 1);
+  cb.n = bN;
+  cb.media = bN ? bSum / bN : 0;
+  double var = bN > 1 ? (bSum2 - bN * (double)cb.media * cb.media) / (bN - 1) : 0;
+  cb.sd = sqrtf(max((float)var, 0.0f));
+  cb.cv = cb.media > 0 ? cb.sd / cb.media : 0;
+  float mA = bNa ? bSumA / bNa : cb.media, mB = bNb ? bSumB / bNb : cb.media;
+  cb.deriva = cb.media > 0 ? (mB - mA) / cb.media : 0;
+  cb.minimo = bN ? bMin : 0; cb.maximo = bMax;
+  uint16_t f = 0;
+  if (bCorte) f |= F_CORTE;
+  if (bN < 0.8f * esperados) f |= F_POCOS;
+  if (cb.media < Q_MEDIA_MIN) f |= F_NULA;
+  if (cb.media > Q_MEDIA_MAX) f |= F_RUIDO;
+  if (cb.maximo >= Q_SATURADO) f |= F_SATURA;
+  if (bN > 1 && cb.sd < 0.01f) f |= F_PLANA;
+  if (cb.cv > Q_CV_RECHAZO) f |= F_CV_EXC; else if (cb.cv > Q_CV_AVISO) f |= F_CV;
+  if (fabsf(cb.deriva) > Q_DERIVA_RECHAZO) f |= F_DER_EXC; else if (fabsf(cb.deriva) > Q_DERIVA_AVISO) f |= F_DER;
+  if (cb.sd > 0 && cb.maximo > cb.media + Q_PICO_SD * cb.sd) f |= F_PICOS;
+  cb.flags = f;
   bloquesFase = 0;
-  int sig = !hecho[0] ? 0 : !hecho[1] ? 1 : 2;
-  if (CALIBRACION_AUTOMATICA) empezarFase(sig);
-  else msg(">> Esperando: comienza la fase %s desde la pagina, con BOOT o con la tecla %d.", NOMBRE_PASO[sig], sig + 1);
+  if (f & F_RECHAZO) {
+    cb.nivel = 2;
+    faseCal = CAL_RECHAZADA;
+    imprimirCalibracion();
+    msg("!! Calibracion RECHAZADA: la senal basal no es suficientemente estable. Revisa electrodos, postura y cables y repite (1).");
+    msg("!! Si la fisioterapeuta decide usarla igual: tecla f (queda marcada como aceptada a la fuerza).");
+    return;
+  }
+  aplicarBasal(f ? 1 : 0);
 }
 
-// Avanza la calibracion con cada bloque que llega (reloj de las muestras)
-void cambiarFaseCal(FaseCal f) {
-  faseCal = f;
-  bloquesFase = 0;
-  faseContrae = (f == CAL_ARRIBA);
-  if (f == CAL_REPOSO)
-    msg(">> FASE 1 - REPOSO (%.0f s): cabeza apoyada y relajada. No mover al nino.", CAL_REPOSO_S);
-  else if (f == CAL_PASIVA)
-    msg(">> FASE 2 - PASIVA (%.0f s): el terapeuta mueve la cabeza de abajo hacia arriba y viceversa. El nino NO hace fuerza.", CAL_PASIVA_S);
-  else if (f == CAL_ARRIBA)
-    msg(">> FASE 3 - ACTIVA, repeticion %d/%d: ARRIBA! El nino levanta la cabeza y la sostiene (%.0f s).",
-        repCal, CAL_REPS, CAL_ARRIBA_S);
-  else if (f == CAL_ABAJO)
-    msg("   ABAJO: baja la cabeza y relaja (%.0f s).", CAL_ABAJO_S);
-}
-
-// Empieza a medir una fase (0 reposo, 1 pasiva, 2 activa). Se puede repetir
-// una fase ya hecha; para avanzar hay que seguir el orden.
-void empezarFase(int f) {
+// Empieza el registro basal. Se puede repetir las veces que haga falta.
+void empezarBasal() {
   if (modo != CALIBRANDO) { msg("!! Primero comienza la calibracion (c)."); return; }
-  if (midiendo()) { msg("!! Ya se esta midiendo la fase %s. Espera a que termine o cancelala (x).", NOMBRE_FASE[faseCal]); return; }
-  if (f == 1 && !hecho[0]) { msg("!! Primero haz la fase de REPOSO (1)."); return; }
-  if (f == 2 && !hecho[1]) { msg("!! Primero haz la fase PASIVA (2)."); return; }
-  reiniciarFase(f);
-  if (f == 0) cambiarFaseCal(CAL_REPOSO);
-  else if (f == 1) cambiarFaseCal(CAL_PASIVA);
-  else { repCal = 1; cambiarFaseCal(CAL_ARRIBA); }
+  if (midiendo()) { msg("!! Ya se esta registrando el basal. Espera a que termine o cancelalo (x)."); return; }
+  reiniciarBasal();
+  faseCal = CAL_BASAL;
+  bloquesFase = 0;
+  msg(">> REGISTRO BASAL (%.0f s): cabeza apoyada y relajada. No mover al nino. Se descarta el primer %.1f s.", cfg.basalS, cfg.descBasalS);
 }
 
-void cancelarFase() {
+void cancelarBasal() {
   if (modo != CALIBRANDO || !midiendo()) return;
-  int f = faseCal == CAL_REPOSO ? 0 : faseCal == CAL_PASIVA ? 1 : 2;
-  reiniciarFase(f);
+  reiniciarBasal();
   faseCal = CAL_ESPERA;
-  faseContrae = false;
   bloquesFase = 0;
-  msg(">> Fase %s cancelada. Puedes volver a empezarla.", NOMBRE_PASO[f]);
+  msg(">> Registro basal cancelado. Puedes volver a empezarlo. La calibracion anterior (si habia) sigue vigente.");
 }
 
 // Devuelve true si el bloque se uso para la calibracion (no descartado)
 bool calibrarBloque(int mv) {
+  if (faseCal != CAL_BASAL) return false;
   float env = mv;                     // envolvente = RMS del bloque de 100 ms
   bool usado = false;
-  if (!midiendo()) return false;
   bloquesFase++;
-  switch (faseCal) {
-    case CAL_REPOSO:
-      if (bloquesFase > (int)lroundf(CAL_DESC_REPOSO_S * BLOQUES_POR_S)) {
-        sumaR += env; suma2R += (double)env * env; nR++;
-        usado = true;
-      }
-      if (bloquesFase >= (int)lroundf(CAL_REPOSO_S * BLOQUES_POR_S)) {
-        cReposo  = nR ? sumaR / nR : 0;
-        float var = nR ? suma2R / nR - (double)cReposo * cReposo : 0;
-        cSd      = sqrtf(max(var, 0.0f));
-        cRestRms = nR ? sqrt(suma2R / nR) : 0;
-        hecho[0] = true;
-        msg("   Reposo listo: media %.1f mV, SD %.1f mV.", cReposo, cSd);
-        finFase();
-      }
-      break;
-
-    case CAL_PASIVA:
-      if (bloquesFase > (int)lroundf(CAL_DESC_PASIVA_S * BLOQUES_POR_S)) {
-        sumaP += env; nP++;
-        if (env > picoP) picoP = env;
-        usado = true;
-      }
-      if (bloquesFase >= (int)lroundf(CAL_PASIVA_S * BLOQUES_POR_S)) {
-        cPasMedia = nP ? sumaP / nP : 0;
-        cPasPico  = picoP;
-        hecho[1] = true;
-        msg("   Pasiva lista: media %.1f mV, pico %.1f mV.", cPasMedia, cPasPico);
-        finFase();
-      }
-      break;
-
-    case CAL_ARRIBA: {
-      int total = (int)lroundf(CAL_ARRIBA_S * BLOQUES_POR_S);
-      int ini = (int)lroundf(CAL_DESC_INI_S * BLOQUES_POR_S);
-      int fin = (int)lroundf(CAL_DESC_FIN_S * BLOQUES_POR_S);
-      if (bloquesFase > ini && bloquesFase <= total - fin) {     // solo la ventana estable
-        sumaA += env; suma2A += (double)env * env; nA++;
-        usado = true;
-      }
-      if (bloquesFase >= total) {
-        if (nA > 0) {
-          float rms = sqrt(suma2A / nA), media = sumaA / nA;
-          sumaRepRms += rms; sumaRepEnv += media; nRepsOK++;
-          cRepRms[repCal - 1] = rms;
-          msg("   Repeticion %d: RMS %.1f mV, envolvente %.1f mV", repCal, rms, media);
-        }
-        sumaA = suma2A = 0; nA = 0;
-        cambiarFaseCal(CAL_ABAJO);
-      }
-      break;
-    }
-
-    case CAL_ABAJO:
-      if (bloquesFase >= (int)lroundf(CAL_ABAJO_S * BLOQUES_POR_S)) {
-        if (repCal < CAL_REPS) { repCal++; cambiarFaseCal(CAL_ARRIBA); }
-        else {
-          cActRms = nRepsOK ? sumaRepRms / nRepsOK : 0;
-          cActEnv = nRepsOK ? sumaRepEnv / nRepsOK : 0;
-          hecho[2] = true;
-          msg("   Activa lista: RMS de referencia %.1f mV, envolvente %.1f mV (%d repeticiones).", cActRms, cActEnv, nRepsOK);
-          finFase();
-        }
-      }
-      break;
-
-    default:
-      break;
+  int total = (int)lroundf(cfg.basalS * BLOQUES_POR_S), desc = (int)lroundf(cfg.descBasalS * BLOQUES_POR_S);
+  if (bloquesFase > desc) {
+    int esperados = max(total - desc, 1), mitad = esperados / 2;
+    bN++; bSum += env; bSum2 += (double)env * env;
+    if (bN <= mitad) { bSumA += env; bNa++; }
+    else if (bN > esperados - mitad) { bSumB += env; bNb++; }
+    if (env < bMin) bMin = env;
+    if (env > bMax) bMax = env;
+    usado = true;
   }
+  if (bloquesFase >= total) terminarBasal();
   return usado;
+}
+
+// Aprueba un umbral nuevo propuesto por la pagina (ya aprobado por la fisioterapeuta)
+void aplicarUmbralAprobado(float on, float off, uint32_t token) {
+  if (token && token == tokUmbral) return;             // reintento
+  if (!calibrado || !(off > 0 && on > off && on <= 5000)) { msg("!! Umbral rechazado por el atril (valores no validos)."); return; }
+  tokUmbral = token;
+  float antes = umbralOn;
+  fijarUmbral(on, off, 1);
+  msg(">> Umbral AJUSTADO (aprobado): U_ON %.1f -> %.1f mV, U_OFF %.1f mV.", antes, on, off);
+}
+
+void restaurarUmbral(uint32_t token) {
+  if (token && token == tokRestaurar) return;
+  if (histN < 2) { msg("!! No hay umbral anterior que restaurar."); return; }
+  tokRestaurar = token;
+  float antes = umbralOn;
+  histN--;                                              // descarta el vigente
+  UmbralHist h = hist[histN - 1];
+  histN--;                                              // fijarUmbral lo vuelve a anotar como restaurado
+  fijarUmbral(h.on, h.off, 2);
+  msg(">> Umbral RESTAURADO: U_ON %.1f -> %.1f mV, U_OFF %.1f mV.", antes, umbralOn, umbralOff);
 }
 
 void entrarParo() {
@@ -682,8 +900,7 @@ void siguientePaso() {
   if (modo == SESION || modo == PAUSA) { iniciarCalibracion(); return; }
   if (modo != CALIBRANDO || midiendo()) return;
   if (faseCal == CAL_LISTA) { iniciarSesion(true); return; }
-  if (faseCal == CAL_FALLIDA) { empezarFase(2); return; }
-  empezarFase(!hecho[0] ? 0 : !hecho[1] ? 1 : 2);
+  empezarBasal();                  // esperando o rechazada: (re)registrar el basal
 }
 
 // Comandos del monitor serie y de la pagina (todos pasan por aqui, en el loop)
@@ -694,25 +911,52 @@ void ejecutarComando(char c) {
       else if (modo == PARO) msg("!! Primero suelta el paro y reanuda (r).");
       else iniciarCalibracion();
       break;
-    case '1': empezarFase(0); break;
-    case '2': empezarFase(1); break;
-    case '3': empezarFase(2); break;
-    case 'x': cancelarFase(); break;
+    case '1': empezarBasal(); break;
+    case 'x': cancelarBasal(); break;
+    case 'f':
+      if (modo == CALIBRANDO && faseCal == CAL_RECHAZADA) { msg("!! Calibracion aceptada A LA FUERZA por decision de la fisioterapeuta."); aplicarBasal(3); }
+      break;
     case 's':
       if (modo == CALIBRANDO && faseCal == CAL_LISTA) iniciarSesion(true);
-      else msg("!! La sesion empieza cuando la calibracion este LISTA (reposo, pasiva y activa).");
+      else msg("!! La sesion empieza cuando la calibracion este LISTA.");
       break;
     case 'n': siguientePaso(); break;
     case 'p':
-      if (modo == SESION) { cerrarActivacion(); modo = PAUSA; msg(">> PAUSA (p para seguir)"); }
+      if (modo == SESION) { cerrarActivacion(); modo = PAUSA; msg(">> PAUSA (p para seguir). El tiempo de terapia se detiene."); }
       else if (modo == PAUSA) iniciarSesion(false);
       break;
     case 'r': if (modo == PARO) reanudarTrasParo(); break;
     case 'h': if (modo != PARO) iniciarArranque(); break;
-    case '+': umbralPct = min(umbralPct + 0.05f, 0.80f); calcularUmbrales(); imprimirCalibracion(); break;
-    case '-': umbralPct = max(umbralPct - 0.05f, 0.05f); calcularUmbrales(); imprimirCalibracion(); break;
+    case 'a':
+      controlAuto = !controlAuto;
+      msg(controlAuto ? ">> CONTROL AUTOMATICO habilitado: el umbral ahora controla los actuadores."
+                      : ">> Modo SUPERVISADO: el umbral ya no controla los actuadores.");
+      break;
     case 'i': imprimirCalibracion(); break;
     default: break;
+  }
+}
+
+enum TipoCmd : uint8_t { C_CONF = 1, C_MANUAL, C_UMBRAL, C_RESTAURAR, C_CFG };
+struct CmdWeb { uint8_t tipo; uint8_t p; uint32_t id; uint32_t token; float a, b; char k[8]; };
+QueueHandle_t colaWeb = NULL;       // comandos con datos de la pagina -> loop
+
+void ejecutarWeb(const CmdWeb &c) {
+  switch (c.tipo) {
+    case C_CONF:      responderEvento(c.id, c.p); break;
+    case C_MANUAL:    confirmarManual(c.p, c.token); break;
+    case C_UMBRAL:    aplicarUmbralAprobado(c.a, c.b, c.token); break;
+    case C_RESTAURAR: restaurarUmbral(c.token); break;
+    case C_CFG:
+      if (ajustarCfg(c.k, c.a, true)) {
+        msg(">> Parametro %s = %g", c.k, c.a);
+        // Si el umbral vigente es el basal sin ajustes, se recalcula con los factores nuevos
+        if ((!strcmp(c.k, "k") || !strcmp(c.k, "f")) && calibrado && umbralOrigen == 0) {
+          float on, off; umbralesBasal(on, off); fijarUmbral(on, off, 0);
+          msg(">> U_ON %.1f mV, U_OFF %.1f mV (factores nuevos).", umbralOn, umbralOff);
+        }
+      } else msg("!! Parametro no valido: %s", c.k);
+      break;
   }
 }
 
@@ -740,9 +984,13 @@ void procesarRms(int mv) {
   }
   if (modo != SESION) { guardarBloque(mv, 0); return; }
 
-  nivel = constrain((rmsSuave - reposo) / max(maximo - reposo, 1.0f), 0.0f, 1.0f);
+  nivel = constrain((rmsSuave - reposo) / (2 * max(umbralOn - reposo, 1.0f)), 0.0f, 1.0f);
 
-  // Histeresis + confirmacion en el tiempo
+  // Estados sostenidos con histeresis (no avisan: solo marcan candidatos a confirmacion)
+  ventanaAgregar(mv);
+  actualizarEstadoRms();
+
+  // Activacion de 300 ms (conteo y, con control automatico, actuadores): igual que antes
   if (!activo) {
     if (rmsSuave >= umbralOn) {
       if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; msSesionIni = msSesion; }
@@ -767,7 +1015,9 @@ void procesarRms(int mv) {
     }
   }
 
-  guardarBloque(mv, activo ? 1 : 0);
+  // Banderas del bloque para la pagina: 1 ALTO, 4 sostenido, 8 activacion
+  uint8_t fl = (estadoRms == RMS_ALTO ? 1 : 0) | ((bloquesEnEstado >= nVentana() && vN >= nVentana()) ? 4 : 0) | (activo ? 8 : 0);
+  guardarBloque(mv, fl);
 }
 
 void leerArduino() {
@@ -806,6 +1056,8 @@ void leerComandos() {
   while (Serial.available()) ejecutarComando(Serial.read());
   char c;
   while (colaCmd && xQueueReceive(colaCmd, &c, 0) == pdTRUE) ejecutarComando(c);
+  CmdWeb w;
+  while (colaWeb && xQueueReceive(colaWeb, &w, 0) == pdTRUE) ejecutarWeb(w);
 }
 
 void revisarBoot() {
@@ -855,6 +1107,8 @@ void actualizarModo() {
     datosAntes = ok;
     if (!ok) {
       cerrarActivacion(tUltimoDato);                 // no cuenta el tiempo sin senal
+      reiniciarEstadoRms();                          // no se mezclan datos de antes y despues del corte
+      if (modo == CALIBRANDO && faseCal == CAL_BASAL) bCorte = true;   // el registro basal ya no es continuo
       msg("!! Sin datos del Arduino: estrellas lentas y luz ambar hasta que vuelvan.");
     } else {
       if (!activo) { tInicioPremio = tFinPremio = ahora; premio1 = false; }  // 1.5 s para reconfirmar
@@ -862,7 +1116,8 @@ void actualizarModo() {
     }
   }
 
-  // La calibracion avanza con cada bloque recibido (calibrarBloque): sin datos, espera.
+  // El registro basal avanza con cada bloque recibido (calibrarBloque): sin datos, espera.
+  planificarVerificacion();                      // temporizadores de verificacion (no bloquea)
 
   // Sonido: estado premiado sostenido 1 s
   if (modo == SESION && premiado() && ok && !premio1 && ahora - tInicioPremio >= T_PREMIO) {
@@ -1000,8 +1255,8 @@ void actualizarLuz() {
   switch (modo) {
     case ARRANQUE:   r = 15; g = 15; b = 15; break;                 // blanco tenue
     case CALIBRANDO:
-      if (!midiendo()) { r = 15; g = 15; b = 15; }                  // blanco tenue: espera el siguiente paso
-      else if (faseContrae) g = 90; else b = 70;                    // verde / azul
+      if (!midiendo()) { r = 15; g = 15; b = 15; }                  // blanco tenue: espera el registro
+      else b = 70;                                                  // azul: registrando el basal
       break;
     case PAUSA:      r = 15; g = 15; b = 15; break;
     case PARO:       break;                                         // apagada
@@ -1036,16 +1291,12 @@ void imprimirEstado() {
     char est[16];
     if (modoE == E_SIN_TOPE) snprintf(est, sizeof est, "DESACTIVADAS");
     else snprintf(est, sizeof est, "%3d %%", (int)(altura() * 100));
-    Serial.printf("[SESION] RMS %4d mV (umbral %.0f) | nivel %3d %% | %s | estrellas %s | activaciones %d%s\n",
+    Serial.printf("[SESION] RMS %4d mV (U_ON %.0f) | nivel %3d %% | %s | estrellas %s | activaciones %d%s\n",
                   rmsUltimo, umbralOn, (int)(nivel * 100), activo ? "ACTIVO" : "reposo",
                   est, nActivaciones, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else if (modo == CALIBRANDO) {
-    if (faseCal == CAL_ARRIBA || faseCal == CAL_ABAJO)
-      Serial.printf("[CALIBRANDO %s %d/%d] RMS %4d mV%s\n", NOMBRE_FASE[faseCal], repCal, CAL_REPS,
-                    rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
-    else
-      Serial.printf("[CALIBRANDO %s] RMS %4d mV%s\n", NOMBRE_FASE[faseCal],
-                    rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
+    Serial.printf("[CALIBRANDO %s] RMS %4d mV%s\n", NOMBRE_FASE[faseCal],
+                  rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else {
     Serial.printf("[%s]%s\n", NOMBRE_MODO[modo], datosOK() ? "" : " sin datos del Arduino");
   }
@@ -1056,7 +1307,7 @@ void imprimirEstado() {
 //  que cambia el atril lo hace el loop con ejecutarComando().
 // ======================================================================
 WebServer web(80);
-static char js[8192];               // respuesta de /estado
+static char js[16384];              // respuesta de /estado
 static int jl = 0;
 
 void ja(const char *fmt, ...) {
@@ -1095,53 +1346,90 @@ uint32_t desde(const char *arg, uint32_t total, uint32_t guardados) {
   return (uint32_t)q;
 }
 
+const int EV_POR_RESPUESTA = 10;
+
 void manejarEstado() {
   static int32_t bv[N_BLQ];
   static uint8_t bf[N_BLQ];
   static Activacion av[N_ACT];
   static char lt[N_LOG][LARGO_LOG];
+  static Evento ev[EV_POR_RESPUESTA];
+
+  tUltimaConsulta = millis();                         // la pagina esta viva: ya se pueden hacer preguntas
 
   // Copia de lo que cambia en el otro nucleo
-  uint32_t nb, na, nl, b0, a0, l0;
+  uint32_t nb, na, nl, b0, a0, l0, rev, nev;
   portENTER_CRITICAL(&candado);
-  nb = nBlq; na = nActLista; nl = nLog;
+  nb = nBlq; na = nActLista; nl = nLog; rev = revGlobal; nev = nEv;
   portEXIT_CRITICAL(&candado);
   b0 = desde("b", nb, N_BLQ);
   a0 = desde("a", na, N_ACT);
   l0 = desde("l", nl, N_LOG);
+  uint32_t r0 = web.hasArg("r") ? (uint32_t)web.arg("r").toInt() : 0;
+  int nEvSal = 0;
+  uint32_t er = rev;
   portENTER_CRITICAL(&candado);
   for (uint32_t i = b0; i < nb; i++) { bv[i - b0] = blqVal[i % N_BLQ]; bf[i - b0] = blqFlag[i % N_BLQ]; }
   for (uint32_t i = a0; i < na; i++) av[i - a0] = actLista[i % N_ACT];
   for (uint32_t i = l0; i < nl; i++) memcpy(lt[i - l0], logTxt[i % N_LOG], LARGO_LOG);
+  // Eventos con revision nueva, de la mas antigua a la mas reciente (hasta EV_POR_RESPUESTA por vez)
+  uint32_t ultima = r0;
+  while (nEvSal < EV_POR_RESPUESTA) {
+    int mejor = -1; uint32_t rm = 0xFFFFFFFF;
+    for (int i = 0; i < N_EV; i++) {
+      if (evs[i].id == 0 || evs[i].id > nev || evs[i].rev <= ultima) continue;
+      if (evs[i].rev < rm) { rm = evs[i].rev; mejor = i; }
+    }
+    if (mejor < 0) break;
+    ev[nEvSal++] = evs[mejor];
+    ultima = rm;
+  }
   portEXIT_CRITICAL(&candado);
+  // Si quedaron eventos sin mandar, el cursor se queda en el ultimo mandado
+  bool hayMas = false;
+  for (int i = 0; i < N_EV && !hayMas; i++) hayMas = evs[i].id != 0 && evs[i].id <= nev && evs[i].rev > ultima;
+  if (hayMas) er = ultima;
 
-  int total = faseCal == CAL_REPOSO ? (int)lroundf(CAL_REPOSO_S * BLOQUES_POR_S)
-            : faseCal == CAL_PASIVA ? (int)lroundf(CAL_PASIVA_S * BLOQUES_POR_S)
-            : faseCal == CAL_ARRIBA ? (int)lroundf(CAL_ARRIBA_S * BLOQUES_POR_S)
-            : faseCal == CAL_ABAJO  ? (int)lroundf(CAL_ABAJO_S * BLOQUES_POR_S) : 0;
+  float t = tEfS();
+  Periodo per = periodoDe(t);
+  float espera = -1;
+  if (modo == SESION && solPer < per.max)
+    espera = max(max(tSolUlt + per.minEntre - t, per.ini + solPer * per.dur / (per.max + 1) - t), 0.0f);
+  int total = faseCal == CAL_BASAL ? (int)lroundf(cfg.basalS * BLOQUES_POR_S) : 0;
   unsigned long ahora = millis();
   bool act = activo;
+  Ventana vv;
+  bool sost = modo == SESION && sostenidoVigente(vv);
 
   jl = 0; js[0] = 0;
   ja("{\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"fase\":\"%s\"", VERSION_ATRIL, (unsigned long)idArranque, NOMBRE_MODO[modo], NOMBRE_FASE[faseCal]);
-  ja(",\"hechos\":[%d,%d,%d],\"rep\":%d,\"reps\":%d,\"bloq\":%d,\"total\":%d,\"auto\":%d",
-     hecho[0], hecho[1], hecho[2], repCal, CAL_REPS, bloquesFase, total, CALIBRACION_AUTOMATICA ? 1 : 0);
-  ja(",\"datos\":%d,\"rms\":%d,\"suave\":%.1f,\"calibrado\":%d,\"uon\":%.1f,\"uoff\":%.1f,\"pct\":%.0f",
-     datosOK() ? 1 : 0, rmsUltimo, rmsSuave, calibrado ? 1 : 0, umbralOn, umbralOff, umbralPct * 100);
+  ja(",\"bloq\":%d,\"total\":%d,\"datos\":%d,\"rms\":%d,\"suave\":%.1f,\"calibrado\":%d,\"uon\":%.1f,\"uoff\":%.1f,\"uorig\":%d,\"ctl\":%d",
+     bloquesFase, total, datosOK() ? 1 : 0, rmsUltimo, rmsSuave, calibrado ? 1 : 0, umbralOn, umbralOff, umbralOrigen, controlAuto ? 1 : 0);
   ja(",\"activo\":%d,\"nivel\":%d,\"durAct\":%.1f,\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f",
      act ? 1 : 0, (int)(nivel * 100), act ? (ahora - tInicioActivo) / 1000.0f : 0.0f, sesionId,
      nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f);
   ja(",\"alt\":%d,\"estOK\":%d,\"malas\":%lu,\"rssi\":%d",
      (int)(altura() * 100), modoE != E_SIN_TOPE ? 1 : 0, lineasMalas, (int)WiFi.RSSI());
-  ja(",\"cfg\":{\"reposo\":%.1f,\"pasiva\":%.1f,\"reps\":%d,\"arriba\":%.1f,\"abajo\":%.1f,\"descR\":%.1f,\"descP\":%.1f,\"descIni\":%.1f,\"descFin\":%.1f,\"bps\":%d}",
-     CAL_REPOSO_S, CAL_PASIVA_S, CAL_REPS, CAL_ARRIBA_S, CAL_ABAJO_S,
-     CAL_DESC_REPOSO_S, CAL_DESC_PASIVA_S, CAL_DESC_INI_S, CAL_DESC_FIN_S, BLOQUES_POR_S);
-  ja(",\"cal\":{\"reposo\":%.1f,\"sd\":%.1f,\"restRms\":%.1f,\"pasMedia\":%.1f,\"pasPico\":%.1f,\"actRms\":%.1f,\"actEnv\":%.1f,\"snr\":%.2f,\"art\":%.1f,\"repRms\":[",
-     cReposo, cSd, cRestRms, cPasMedia, cPasPico, cActRms, cActEnv, cSnr, cArt);
-  for (int i = 0; i < CAL_REPS; i++) ja(i ? ",%.1f" : "%.1f", cRepRms[i]);
-  ja("]},\"apl\":{\"reposo\":%.1f,\"sd\":%.1f,\"restRms\":%.1f,\"pasMedia\":%.1f,\"pasPico\":%.1f,\"actRms\":%.1f,\"actEnv\":%.1f,\"snr\":%.2f,\"art\":%.1f,\"maximo\":%.1f}",
-     reposo, sdReposo, restRms, pasivaMedia, pasivaPico, activeRms, activeEnv, snr, artefactoPct, maximo);
-  ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
+  ja(",\"est\":%d,\"bEst\":%.1f,\"sost\":%d,\"ep\":%lu,\"nDet\":%lu",
+     estadoRms, bloquesEnEstado / (float)BLOQUES_POR_S, sost ? 1 : 0, (unsigned long)episodio, (unsigned long)nDetectados);
+  ja(",\"cb\":{\"media\":%.2f,\"sd\":%.2f,\"cv\":%.3f,\"der\":%.3f,\"mn\":%.1f,\"mx\":%.1f,\"n\":%d,\"fl\":%u,\"niv\":%d}",
+     cb.media, cb.sd, cb.cv, cb.deriva, cb.minimo, cb.maximo, cb.n, (unsigned)cb.flags, cb.nivel);
+  ja(",\"ver\":{\"per\":%d,\"max\":%d,\"sol\":%d,\"tPer\":%.1f,\"dur\":%.0f,\"esp\":%.1f,\"pend\":%lu,\"nr\":[%lu,%lu],\"ne\":[%lu,%lu]}",
+     modo == SESION ? per.idx : -1, per.max, solPer, max(t - per.ini, 0.0f), per.dur, espera, (unsigned long)pendId,
+     (unsigned long)nResp[1], (unsigned long)nResp[2], (unsigned long)nErr[1], (unsigned long)nErr[2]);
+  ja(",\"cfg\":{\"basal\":%.1f,\"desc\":%.1f,\"k\":%.2f,\"f\":%.2f,\"tSost\":%.1f,\"v1s\":%.0f,\"v1max\":%d,\"v1min\":%.0f,\"vcs\":%.0f,\"vcmax\":%d,\"vcmin\":%.0f,\"rever\":%.0f,\"resp\":%.0f,\"hip\":%d,\"bps\":%d}",
+     cfg.basalS, cfg.descBasalS, cfg.k, cfg.f, cfg.tSost, cfg.verIniS, cfg.verIniMax, cfg.verIniMin,
+     cfg.verCicloS, cfg.verCicloMax, cfg.verCicloMin, cfg.tRever, cfg.tResp, cfg.hip, BLOQUES_POR_S);
+  ja(",\"hist\":[");
+  for (int i = 0; i < histN; i++) ja(i ? ",[%.1f,%.1f,%d,%.0f]" : "[%.1f,%.1f,%d,%.0f]", hist[i].on, hist[i].off, hist[i].origen, hist[i].tSes);
+  ja("],\"rev\":%lu,\"er\":%lu,\"ev\":[", (unsigned long)rev, (unsigned long)er);
+  for (int i = 0; i < nEvSal; i++) {
+    const Evento &e = ev[i];
+    ja(i ? ",[%lu,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%lu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]" : "[%lu,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%lu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]",
+       (unsigned long)e.id, (unsigned long)e.rev, (unsigned long)e.ep, e.origen, e.estado, e.status, e.postura, e.sid, e.periodo, e.nSol,
+       e.calidad, (unsigned long)e.tok, e.tIni, e.dur, e.media, e.sd, e.minimo, e.maximo, e.uon, e.uoff);
+  }
+  ja("],\"bn\":%lu,\"b\":[", (unsigned long)nb);
   for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%d]" : "[%ld,%d]", (long)bv[i], bf[i]);
   ja("],\"an\":%lu,\"acts\":[", (unsigned long)na);
   for (uint32_t i = 0; i < na - a0; i++)
@@ -1154,17 +1442,75 @@ void manejarEstado() {
   web.send(200, "application/json", String(js));
 }
 
-void manejarCmd() {
+void responder(int codigo, bool ok, const char *err) {
   cabeceras();
+  char t[96];
+  if (ok) snprintf(t, sizeof t, "{\"ok\":true}");
+  else snprintf(t, sizeof t, "{\"ok\":false,\"e\":\"%s\"}", err ? err : "error");
+  web.send(codigo, "application/json", t);
+}
+
+bool encolarWeb(const CmdWeb &c) { return colaWeb && xQueueSend(colaWeb, &c, 0) == pdTRUE; }
+
+uint8_t posturaDe(const String &p) {
+  if (p.length() != 1) return 0;
+  char c = p[0];
+  return c == 'E' ? POST_ERGUIDA : c == 'C' ? POST_CAIDA : c == 'D' ? POST_INDETERMINADA : 0;
+}
+
+void manejarCmd() {
   String c = web.arg("c");
-  const char *validos = "c123xsnprh+-i";
-  if (c.length() != 1 || !strchr(validos, c[0])) {
-    web.send(400, "application/json", "{\"ok\":false}");
-    return;
-  }
+  const char *validos = "c1xfsnprhai";
+  if (c.length() != 1 || !strchr(validos, c[0])) { responder(400, false, "comando"); return; }
   char ch = c[0];
   bool ok = colaCmd && xQueueSend(colaCmd, &ch, 0) == pdTRUE;
-  web.send(ok ? 200 : 503, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+  responder(ok ? 200 : 503, ok, "cola llena");
+}
+
+// Postura confirmada para un evento pendiente (idempotente: un reintento no duplica)
+void manejarConf() {
+  uint8_t p = posturaDe(web.arg("p"));
+  long id = web.arg("id").toInt();
+  if (!p || id <= 0) { responder(400, false, "datos"); return; }
+  CmdWeb c = {C_CONF, p, (uint32_t)id, 0, 0, 0, ""};
+  bool ok = encolarWeb(c);
+  responder(ok ? 200 : 503, ok, "cola llena");
+}
+
+void manejarManual() {
+  uint8_t p = posturaDe(web.arg("p"));
+  long n = web.arg("n").toInt();
+  if (!p || n <= 0) { responder(400, false, "datos"); return; }
+  CmdWeb c = {C_MANUAL, p, 0, (uint32_t)n, 0, 0, ""};
+  bool ok = encolarWeb(c);
+  responder(ok ? 200 : 503, ok, "cola llena");
+}
+
+void manejarUmbral() {
+  float on = web.arg("on").toFloat(), off = web.arg("off").toFloat();
+  long n = web.arg("n").toInt();
+  if (!(off > 0 && on > off && on <= 5000) || n <= 0) { responder(400, false, "umbral"); return; }
+  CmdWeb c = {C_UMBRAL, 0, 0, (uint32_t)n, on, off, ""};
+  bool ok = encolarWeb(c);
+  responder(ok ? 200 : 503, ok, "cola llena");
+}
+
+void manejarRestaurar() {
+  long n = web.arg("n").toInt();
+  if (n <= 0) { responder(400, false, "datos"); return; }
+  CmdWeb c = {C_RESTAURAR, 0, 0, (uint32_t)n, 0, 0, ""};
+  bool ok = encolarWeb(c);
+  responder(ok ? 200 : 503, ok, "cola llena");
+}
+
+void manejarCfg() {
+  String k = web.arg("k");
+  float v = web.arg("v").toFloat();
+  if (k.length() == 0 || k.length() > 7 || !ajustarCfg(k.c_str(), v, false)) { responder(400, false, "parametro"); return; }
+  CmdWeb c = {C_CFG, 0, 0, 0, v, 0, ""};
+  strncpy(c.k, k.c_str(), sizeof(c.k) - 1);
+  bool ok = encolarWeb(c);
+  responder(ok ? 200 : 503, ok, "cola llena");
 }
 
 void manejarOtro() {
@@ -1176,7 +1522,7 @@ void manejarOtro() {
     return;
   }
   web.send(200, "text/plain", String("ASTRA - atril ESP32 v") + VERSION_ATRIL + "\nModo: " + NOMBRE_MODO[modo] +
-                              "\nLa pagina usa /estado y /cmd?c=...\n");
+                              "\nLa pagina usa /estado y /cmd, /conf, /manual, /umbral, /restaurar, /cfg\n");
 }
 
 void tareaRed(void *) {
@@ -1187,6 +1533,11 @@ void tareaRed(void *) {
   WiFi.begin(RED_SSID, RED_CLAVE);
   web.on("/estado", HTTP_GET, manejarEstado);
   web.on("/cmd", HTTP_GET, manejarCmd);
+  web.on("/conf", HTTP_GET, manejarConf);
+  web.on("/manual", HTTP_GET, manejarManual);
+  web.on("/umbral", HTTP_GET, manejarUmbral);
+  web.on("/restaurar", HTTP_GET, manejarRestaurar);
+  web.on("/cfg", HTTP_GET, manejarCfg);
   web.onNotFound(manejarOtro);
   web.begin();
   bool conectado = false;
@@ -1234,6 +1585,7 @@ void setup() {
 
   idArranque = (uint32_t)random(1, 2000000000);
   colaCmd = xQueueCreate(16, sizeof(char));
+  colaWeb = xQueueCreate(16, sizeof(CmdWeb));
   if (USAR_WIFI) xTaskCreatePinnedToCore(tareaRed, "red", 8192, NULL, 1, NULL, 0);  // nucleo 0
 
   if (USAR_PARO && digitalRead(PIN_PARO) == LOW) {

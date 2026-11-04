@@ -9,7 +9,7 @@
   const EMG = (window.EMG = window.EMG || {});
 
   EMG.DEFAULTS = {
-    cfgVer: 2,       // sube cuando cambian los valores por defecto (descarta ajustes viejos de la v1)
+    cfgVer: 3,       // sube cuando cambian los valores por defecto (descarta ajustes viejos de la v1)
     ipArduino: '192.168.4.1',   // red WiFi "ASTRA" que crea el Arduino
     ipAtril: '192.168.4.200',   // IP fija del ESP32 del atril
     emgUsb: false,   // true: la señal EMG llega por USB (Web Serial) en vez de WiFi
@@ -21,6 +21,9 @@
     nArm: 7,         // notch en 60, 120 ... 420 Hz, como el Arduino
     hpHz: 20,        // pasa altas: elimina latido cardiaco y movimiento (solo para ver)
     winS: 15,        // ventana visible de las gráficas (s)
+    nMinClase: 4,    // análisis del umbral: observaciones independientes mínimas por postura
+    aucMin: 0.75,    // análisis del umbral: separación mínima (AUC) entre posturas
+    soundVerif: false, // pitido suave cuando aparece una pregunta de verificación (por defecto, silencioso)
     sound: true,
     sheetsUrl: '', sheetsName: false
   };
@@ -79,32 +82,6 @@
     }
   }
 
-  /* El mismo cálculo que hace el Arduino para el opto (arduino_emg.ino):
-   * quitar DC (α = 0.003) -> notch 60..420 Hz -> RMS de 100 muestras, en mV.
-   * Lo usa el simulador para alimentar al atril simulado. */
-  class BlockRms {
-    constructor(o) {
-      o = Object.assign({}, EMG.DEFAULTS, o);
-      this.fs = o.fs; this.n = Math.round(o.fs / 10);
-      this.vPerCount = o.vref / 1000 / o.adcMax;            // V por cuenta
-      this.arm = notchChain(60, 20, 7, o.fs);
-      this.dc = null; this.s = 0; this.k = 0;
-    }
-    /** @returns RMS en mV cuando se completa un bloque, o null */
-    feed(raw) {
-      const v = raw * this.vPerCount;
-      if (this.dc === null) this.dc = v;
-      this.dc += 0.003 * (v - this.dc);
-      let y = v - this.dc;
-      for (const n of this.arm) y = n.process(y);
-      this.s += y * y;
-      if (++this.k < this.n) return null;
-      const mv = Math.round(Math.sqrt(this.s / this.n) * 1000);
-      this.s = 0; this.k = 0;
-      return mv;
-    }
-  }
-
   // Calidad de señal / conexión: se evalúa cada ~500 ms
   class SignalQuality {
     constructor(adcMax) { this.adcMax = adcMax; this.reset(); }
@@ -131,5 +108,5 @@
     }
   }
 
-  Object.assign(EMG, { Biquad, Processor, BlockRms, SignalQuality });
+  Object.assign(EMG, { Biquad, Processor, SignalQuality });
 })();

@@ -16,7 +16,7 @@
   }
 
   /* Señal EMG cruda del Arduino (filtrada) en tiempo real: buffer circular, mín/máx por columna de píxeles.
-   * flag por muestra: 2 = activación (o ARRIBA en calibración), 1 = fase de calibración midiendo. */
+   * flag por muestra: 1 = registro basal, 2 = estado ALTO sostenido, 3 = estado BAJO sostenido. */
   class LiveChart {
     constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.setWindow(15); }
     setWindow(s) {
@@ -52,7 +52,7 @@
 
       for (let c = 0; c < cols; c++) {
         if (!fl[c]) continue;
-        ctx.fillStyle = fl[c] === 2 ? css('--green-bg') : css('--amber-bg');
+        ctx.fillStyle = fl[c] === 2 ? css('--green-bg') : fl[c] === 3 ? css('--blue-bg') : css('--amber-bg');   // 1 basal, 2 ALTO sostenido, 3 BAJO sostenido
         ctx.fillRect(L + c, T, 1, H);
       }
       axes(ctx, L, T, W, H, this.win, [-1, -0.5, 0, 0.5, 1].map(f => [Y(f * this.ymax), (f * this.ymax).toFixed(this.ymax < 10 ? 2 : 0)]), 'mV');
@@ -76,7 +76,7 @@
   }
 
   /* RMS que recibe el atril (un valor cada 100 ms) con sus umbrales.
-   * flag por bloque: 1 = activación (sesión), 2 = bloque usado por la calibración. */
+   * flag por bloque: 1 = estado ALTO, 2 = usado en el basal, 4 = estado sostenido, 8 = activación. */
   class RmsChart {
     constructor(canvas) { this.c = canvas; this.ymax = 50; this.lines = {}; this.setWindow(15); }
     setWindow(s) { this.win = s; this.N = Math.round(s * 10); this.v = new Float32Array(this.N).fill(NaN); this.f = new Uint8Array(this.N); this.w = 0; }
@@ -95,7 +95,8 @@
       for (let i = 0; i < N; i++) {
         const f = this.f[(this.w + i) % N];
         if (!f) continue;
-        ctx.fillStyle = f === 1 ? css('--green-bg') : css('--blue-bg');
+        // 2 = bloque usado en la calibración basal; 4 = estado sostenido (1 = ALTO, si no BAJO)
+        ctx.fillStyle = (f & 2) ? css('--amber-bg') : (f & 4) ? ((f & 1) ? css('--green-bg') : css('--blue-bg')) : (f & 1) ? 'rgba(21,128,61,.05)' : 'transparent';
         ctx.fillRect(L + i * W / N, T, bw + 0.5, H);
       }
       axes(ctx, L, T, W, H, this.win, [0, 0.25, 0.5, 0.75, 1].map(f => [Y(f * this.ymax), Math.round(f * this.ymax)]), 'mV');
