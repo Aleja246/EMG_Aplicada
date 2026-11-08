@@ -1,10 +1,8 @@
-/* Interfaz: navegación, pacientes, sesión en vivo (Arduino + atril), verificación, historial, ajustes.
+/* Interfaz: navegación, pacientes, sesión en vivo (Arduino + atril), historial, ajustes.
  * Quién hace qué:
- *   Arduino UNO R4 WiFi -> procesa la señal y calcula el RMS (la señal cruda solo se dibuja aquí)
- *   Atril ESP32         -> calibración basal, umbrales, estados sostenidos, contadores y temporizadores de
- *                          verificación, y los actuadores. Conserva todo aunque la página se desconecte.
- *   Página              -> muestra todo, pregunta a la fisioterapeuta, analiza las confirmaciones, propone
- *                          ajustes y manda al atril solo lo que la fisioterapeuta aprueba.
+ *   Arduino UNO R4 WiFi -> señal EMG cruda (solo se dibuja aquí)
+ *   Atril ESP32         -> calibración paso a paso, detección, motores, luz y sonido
+ *   Página              -> manda los pasos al atril, muestra todo y guarda la sesión
  */
 (function () {
   'use strict';
@@ -17,8 +15,8 @@
   const fmtDate = iso => { const d = new Date(iso); return d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }); };
   const fmtDateTime = iso => fmtDate(iso) + ' ' + pad(new Date(iso).getHours()) + ':' + pad(new Date(iso).getMinutes());
   const f0 = v => (isFinite(v) ? Math.round(v).toString() : '—');
-  const f1 = v => (isFinite(v) ? (+v).toFixed(1) : '—');
   const f2 = v => (isFinite(v) ? (+v).toFixed(2) : '—');
+  const f1 = v => (isFinite(v) ? (+v).toFixed(1) : '—');
   function ageText(iso) {
     const b = new Date(iso + 'T00:00:00'), n = new Date();
     let m = (n.getFullYear() - b.getFullYear()) * 12 + n.getMonth() - b.getMonth();
@@ -31,7 +29,6 @@
     const t = $('toast'); t.textContent = msg; t.hidden = false;
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
   }
-  const setText = (id, t) => { const el = $(id); if (el.textContent !== t) el.textContent = t; };
 
   /* ---------- estado global ---------- */
   let S = E.Store.settings();
@@ -39,24 +36,13 @@
   let view = 'home', patient = null;
   let emg = null, emgConn = { status: 'disconnected', msg: '' };       // señal del Arduino
   let atril = null, atrilConn = { status: 'disconnected', msg: '' };   // ESP32 (o simulado)
-  let sim = null;                    // AtrilSim cuando se usa la simulación
+  let sim = null;                    // { atril: AtrilSim, blk: BlockRms } en modo simulación
   let st = null;                     // último estado del atril (/estado)
-  let calPreparada = false;          // se pulsó «Comenzar calibración» en esta sesión
-  let rec = null;                    // registro de la terapia en curso (lo que se guarda al finalizar)
+  let rec = null;                    // registro de la sesión en curso (lo que se guarda al finalizar)
   let logLines = [], logDirty = false;
-  const evStore = new Map();         // eventos de verificación: clave boot:id -> evento (+ visto)
-  const tareas = [];                 // comandos con reintento (idempotentes en el atril)
-  const respondidos = new Set();     // preguntas que ya se contestaron (el aviso se oculta enseguida)
-  let propuesta = null, rechazadas = [], ajustesLog = [];
-  let analisis = null, analisisSig = '';
   const rx = { lastData: 0, samples: 0, lastCount: 0, lastT: performance.now(), fs: 0, lostSeen: 0, lostAt: 0, connectedAt: 0, pulse: false };
   const qCount = { sat: 0, flat: 0, noisy: 0 }; let qLast = null;
   let prevCrit = new Set();
-  const auto = { on: false, err: 0, demora: 4, visto: 0 };      // fisioterapeuta simulada (solo en simulación)
-
-  const evKey = (boot, id) => boot + ':' + id;
-  const midiendo = s => !!s && s.modo === 'CALIBRANDO' && s.fase === 'BASAL';
-  const nextTok = (() => { let n = (Date.now() % 1000000000) + 1; return () => ++n; })();
 
   function rebuildDsp() {
     proc = new E.Processor(S);
@@ -73,11 +59,10 @@
     if (name === 'search') renderSearch();
     if (name === 'history') renderHistory();
     if (name === 'session') { chart.setWindow(S.winS); rmsChart.setWindow(S.winS); renderCal(); }
-    if (name !== 'session') $('notif').hidden = true;
   }
   function goHome() {
     if (view === 'session' && rec && !confirm('La terapia sigue en curso. ¿Salir sin finalizar? Los datos de esta sesión se perderán.')) return;
-    if (view === 'session') { rec = null; calPreparada = false; }
+    if (view === 'session') rec = null;
     show('home');
   }
   document.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', () => show(b.dataset.nav)));
@@ -151,8 +136,8 @@
   }
   function emgFlag() {
     if (!st) return 0;
-    if (st.modo === 'CALIBRANDO') return st.fase === 'BASAL' ? 1 : 0;
-    if (st.modo === 'SESION' && st.sost) return st.est === 1 ? 2 : 3;      // 2 = ALTO sostenido, 3 = BAJO sostenido
+    if (st.modo === 'SESION' && st.activo) return 2;
+    if (st.modo === 'CALIBRANDO') return 1;
     return 0;
   }
   function onSamples(arr) {
@@ -166,15 +151,16 @@
   }
 
   async function disconnectAll() {
-    const e = emg, a = atril; emg = null; atril = null; sim = null; st = null; tareas.length = 0;
+    const e = emg, a = atril; emg = null; atril = null; sim = null; st = null;
     if (a) a.stop();
     if (e) { if (e.stop) e.stop(); else await e.disconnect(); }
     emgConn = { status: 'disconnected', msg: '' }; atrilConn = { status: 'disconnected', msg: '' };
-    $('sim-panel').hidden = true;
     renderConn(); if (view === 'session') renderCal();
   }
   async function connectAstra() {
-    if (S.emgUsb && !E.SerialSource.supported()) { alert('Este navegador no soporta Web Serial. Usa Google Chrome o Microsoft Edge en una computadora, o desactiva «Señal EMG por USB» en Ajustes.'); return; }
+    if (S.emgUsb) {                    // hay que pedir el puerto mientras dura el clic
+      if (!E.SerialSource.supported()) { alert('Este navegador no soporta Web Serial. Usa Google Chrome o Microsoft Edge en una computadora, o desactiva «Señal EMG por USB» en Ajustes.'); return; }
+    }
     await disconnectAll();
     rebuildDsp();
     atril = new E.AtrilLink(new E.AtrilHttp(S.ipAtril), onEstado, onAtrilStatus);
@@ -190,12 +176,14 @@
   function startSim() {
     disconnectAll();
     rebuildDsp();
-    sim = new E.AtrilSim({ speed: +$('sp-speed').value || 1 });
-    simPanelSync();
-    atril = new E.AtrilLink(sim, onEstado, onAtrilStatus);
-    emg = new E.SimSource(arr => onSamples(arr), onEmgStatus, () => sim.simCtx(), S.fs);
+    const asim = new E.AtrilSim(), blk = new E.BlockRms(S);
+    sim = { atril: asim, blk };
+    atril = new E.AtrilLink(asim, onEstado, onAtrilStatus);
+    emg = new E.SimSource(arr => {
+      onSamples(arr);
+      for (let i = 0; i < arr.length; i++) { const mv = blk.feed(arr[i]); if (mv !== null) asim.feedBlock(mv); }  // el "opto"
+    }, onEmgStatus, () => asim.simCtx(), S.fs);
     emg.start();
-    $('sim-panel').hidden = false;
   }
   const realOn = () => (atril && atril.kind !== 'sim') || (emg && emg.kind !== 'sim');
   $('btn-connect').addEventListener('click', () => (realOn() ? disconnectAll() : connectAstra()));
@@ -206,24 +194,6 @@
   function sendCmd(c) {
     if (!atril || atrilConn.status !== 'connected') { toast('El atril no está conectado.'); return; }
     atril.cmd(c).then(ok => { if (!ok) toast('El atril no recibió el comando. Revisa la conexión WiFi.'); });
-  }
-  /* Comando con datos: se reintenta hasta que el estado del atril muestra que se aplicó. Los comandos llevan un
-   * identificador, así que un reintento nunca duplica nada en el atril. */
-  function tarea(nombre, enviar, hecho, ok) {
-    tareas.push({ nombre, enviar, hecho, ok, intentos: 0, t: 0 });
-    revisarTareas(true);
-  }
-  function revisarTareas(ya) {
-    if (!tareas.length) return;
-    const now = performance.now();
-    for (const t of tareas.slice()) {
-      if (st && t.hecho(st)) { tareas.splice(tareas.indexOf(t), 1); if (t.ok) t.ok(); continue; }
-      if (!atril || atrilConn.status !== 'connected') continue;
-      if (ya && t.intentos === 0 || now - t.t > 1500) {
-        if (t.intentos >= 8) { tareas.splice(tareas.indexOf(t), 1); toast('No se pudo confirmar en el atril: ' + t.nombre + '.'); continue; }
-        t.t = now; t.intentos++; t.enviar();
-      }
-    }
   }
 
   function renderConn() {
@@ -244,7 +214,7 @@
     chip.className = 'chip';
     if (c === 'connected' && st) {
       chip.classList.add(st.modo === 'PARO' ? 'bad' : st.datos ? 'ok' : 'warn');
-      t.textContent = 'Atril: ' + st.modo + (st.modo === 'CALIBRANDO' ? ' · ' + st.fase : '') + (st.datos ? '' : ' · sin datos del Arduino');
+      t.textContent = 'Atril: ' + st.modo + (st.modo === 'CALIBRANDO' ? ' · ' + Math.ceil(st.cal.restante) + ' s' : st.modo === 'SESION' ? ' · cabeza ' + (st.abajo ? 'ABAJO' : 'arriba') : '') + (st.datos ? '' : ' · sin datos del Arduino');
     } else if (c === 'connecting' || c === 'connected') { chip.classList.add('warn'); t.textContent = 'Atril: conectando…'; }
     else if (c === 'error') { chip.classList.add('bad'); t.textContent = 'Atril: sin respuesta'; }
     else t.textContent = 'Atril: sin conexión';
@@ -259,89 +229,82 @@
 
   /* ---------- lo que llega del atril ---------- */
   function addLog(t) { logLines.push(t); if (logLines.length > 300) logLines.splice(0, logLines.length - 300); logDirty = true; }
-  let ultEv = 0;       // para detectar si cambió algo que haya que dibujar
   function onEstado(s) {
     const prev = st; st = s;
-    if (s.reinicio) { addLog('--- el atril se reinició ---'); toast('El atril (ESP32) se reinició.'); evStore.clear(); respondidos.clear(); }
-    for (const [v, f] of s.b) rmsChart.push(v, f);
-    const aplicado = s.calibrado && (s.modo === 'SESION' || s.modo === 'PAUSA' || s.fase === 'LISTA');
-    rmsChart.lines = { reposo: aplicado ? s.cb.media : 0, uon: aplicado ? s.uon : 0, uoff: aplicado ? s.uoff : 0 };
+    if (s.reinicio) { addLog('--- el atril se reinició ---'); toast('El atril (ESP32) se reinició.'); }
+    for (const [v, m, f] of s.b) rmsChart.push(v, f, m);
+    const c = s.cal, umb = c.ok && s.modo !== 'CALIBRANDO';
+    rmsChart.lines = { reposo: c.ok ? c.reposo : 0, uon: umb ? c.uon : 0, uoff: umb ? c.uoff : 0 };
     for (const t of s.logs) addLog(t);
-    for (const e of s.ev) {
-      const k = evKey(s.boot, e.id), old = evStore.get(k);
-      evStore.set(k, Object.assign(e, { boot: s.boot, key: k, visto: old ? old.visto : new Date().toISOString() }));
-      ultEv++;
-    }
     if (rec) recordUpdate(s);
-    // La sesión del atril empezó (botón «Iniciar sesión», BOOT o tecla s): se registra
+    // Terminó la calibración basal y empezó la sesión: se registra al paciente que está en pantalla
     if (!rec && view === 'session' && patient && prev && prev.modo === 'CALIBRANDO' && s.modo === 'SESION') startRecording(s);
-    revisarTareas();
-    simAuto(s);
     renderConn();
-    if (view === 'session') { renderCal(); renderNotif(); }
+    if (view === 'session') renderCal();
   }
 
-  /* ---------- registro de la terapia ---------- */
+  /* ---------- registro de la sesión (con lo que da el atril) ---------- */
+  const keyOf = (s, sid) => s.boot + ':' + (sid === undefined ? s.sid : sid);
   function snapshotCal(s) {
-    return { origen: 'atril', tipo: 'basal', reposo: s.cb.media, sd: s.cb.sd, cv: s.cb.cv, deriva: s.cb.der, minimo: s.cb.mn, maximo: s.cb.mx, bloques: s.cb.n,
-      calidadNivel: s.cb.niv, calidadBanderas: s.cb.fl, k: s.cfg.k, f: s.cfg.f, uon: s.uon, uoff: s.uoff, umbralOrigen: s.uorig, fecha: new Date().toISOString() };
-  }
-  function addSid(s, primera) {
-    if (rec.offs[s.sid] !== undefined) return;
-    // tiempo de terapia ANTES de que empiece este tramo del atril; al unirse a mitad de sesión el cero es «ahora»
-    rec.offs[s.sid] = primera ? -s.tSes : rec.total;
-    rec.minAct[s.sid] = primera ? s.nAct : 0;
-    rec.cals.push(snapshotCal(s));
+    const c = s.cal;
+    return { origen: 'atril v5', tipo: 'basal', reposo: c.reposo, sd: c.sd, cv: c.cv, bloques: c.n, k: c.k, margen: c.margen, koff: c.koff,
+      uon: c.uon, uoff: c.uoff, pocos: !!c.pocos, inestable: !!c.inestable, abajoEsActividad: !!s.abajoAct, fecha: new Date().toISOString() };
   }
   function startRecording(s) {
-    rec = { start: new Date().toISOString(), boot: s.boot, offs: {}, minAct: {}, total: 0, acts: [], seen: new Set(), rms: [], cals: [], recal: 0, cfg: Object.assign({}, s.cfg) };
-    addSid(s, true);
+    rec = { start: new Date().toISOString(), key: keyOf(s), t0: s.tSes, base: 0, last: s.tSes, minId: s.nAct,
+      acts: [], seen: new Set(), rms: [], cal: snapshotCal(s), recal: 0 };
     localStorage.setItem('emg.fisio', $('m-fisio').value);
-    propuesta = null; rechazadas = []; ajustesLog = []; analisis = null; analisisSig = '';
-    toast('Sesión en curso: se registran las confirmaciones y las activaciones del atril.');
+    toast('Sesión en curso: se registran los datos que mide el atril.');
   }
-  const recTime = () => (rec && st && rec.offs[st.sid] !== undefined && st.boot === rec.boot ? rec.offs[st.sid] + st.tSes : rec ? rec.total : 0);
+  const recTime = () => (rec ? rec.base + rec.last - rec.t0 : 0);
   function recordUpdate(s) {
-    if (s.boot !== rec.boot) return;
-    if ((s.modo === 'SESION' || s.modo === 'PAUSA') && rec.offs[s.sid] === undefined) {   // recalibraron: la misma terapia continúa
-      addSid(s, false); rec.recal++;
+    const take = () => {
+      for (const [sid, id, ini, dur, rms] of s.acts) {
+        const k = keyOf(s, sid), uid = s.boot + '#' + id;
+        if (k !== rec.key || id <= rec.minId || rec.seen.has(uid)) continue;
+        rec.seen.add(uid);
+        rec.acts.push({ n: rec.acts.length + 1, inicioS: rec.base + ini - rec.t0, durS: dur, rms });
+      }
+    };
+    take();
+    const enSesion = s.modo === 'SESION' || s.modo === 'PAUSA';
+    if (enSesion && keyOf(s) !== rec.key) {            // recalibraron: sigue la misma terapia con la calibración nueva
+      rec.base += rec.last - rec.t0; rec.key = keyOf(s); rec.t0 = 0; rec.last = s.tSes; rec.minId = 0;
+      rec.cal = snapshotCal(s); rec.recal++;
+      take();
     }
-    if (rec.offs[s.sid] !== undefined) rec.total = Math.max(rec.total, rec.offs[s.sid] + s.tSes);
-    for (const [sid, id, ini, dur, rms, pct] of s.acts) {
-      const uid = s.boot + ':' + sid + ':' + id;
-      if (rec.offs[sid] === undefined || id <= (rec.minAct[sid] || 0) || rec.seen.has(uid)) continue;
-      rec.seen.add(uid);
-      rec.acts.push({ n: rec.acts.length + 1, inicioS: rec.offs[sid] + ini, durS: dur, rms, pct });
-    }
-    if (s.modo === 'SESION' && rec.offs[s.sid] !== undefined) {
+    if (enSesion && keyOf(s) === rec.key) rec.last = s.tSes;
+    if (s.modo === 'SESION' && keyOf(s) === rec.key) {
       const t = recTime(), n = s.b.length;
-      s.b.forEach(([v, f], i) => rec.rms.push([+(t - (n - 1 - i) * 0.1).toFixed(1), v, f & 1 ? 'ALTO' : 'BAJO', f & 4 ? 1 : 0]));
+      s.b.forEach(([v, m, f], i) => rec.rms.push([+(t - (n - 1 - i) * 0.1).toFixed(1), v, m, f === 1 ? 1 : 0]));
     }
   }
-  const liveAct = () => (rec && st && st.modo === 'SESION' && st.activo && rec.offs[st.sid] !== undefined ? st.durAct : 0);
-  /** Eventos de la terapia en curso (todos los tramos) y del tramo vigente del atril */
-  const eventosRec = () => (rec ? [...evStore.values()].filter(e => e.boot === rec.boot && rec.offs[e.sid] !== undefined).sort((a, b) => a.sid - b.sid || a.id - b.id) : []);
-  const eventosVigentes = () => (st ? [...evStore.values()].filter(e => e.boot === st.boot && e.sid === st.sid).sort((a, b) => a.id - b.id) : []);
-  const tEvento = e => (rec && rec.offs[e.sid] !== undefined ? rec.offs[e.sid] + e.tIni : e.tIni);
+  function liveAct() {
+    return rec && st && st.modo === 'SESION' && st.activo && keyOf(st) === rec.key ? st.durAct : 0;
+  }
+  // Qué significa una activación (RMS sobre U_on) según ABAJO_ES_ACTIVIDAD / tecla x
+  const posturaAct = () => (!st || st.abajoAct ? 'abajo' : 'arriba');
 
   /* ---------- alarmas ---------- */
-  function beep(f, vol) {
+  function beep() {
+    if (!S.sound) return;
     try {
       const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator(), g = a.createGain();
-      o.frequency.value = f || 880; g.gain.value = vol || 0.15; o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + 0.35);
+      o.frequency.value = 880; g.gain.value = 0.15; o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + 0.35);
       setTimeout(() => a.close(), 600);
     } catch (e) { /* sin audio */ }
   }
   function evalAlarms(now) {
     const A = {}, inSes = view === 'session';
+    // Atril
     const ac = atrilConn.status;
-    if (ac === 'error') A.atril = ['crit', 'El atril (ESP32) no responde en ' + S.ipAtril + ': ' + atrilConn.msg + '. ¿Está encendido y la laptop conectada a la red WiFi «ASTRA»? El atril sigue funcionando y conserva sus umbrales; se vuelve a sincronizar solo.'];
+    if (ac === 'error') A.atril = ['crit', 'El atril (ESP32) no responde en ' + S.ipAtril + ': ' + atrilConn.msg + '. ¿Está encendido y la laptop conectada a la red WiFi «ASTRA»?'];
     else if (ac === 'disconnected' && inSes) A.atril = ['crit', 'Atril sin conexión. Pulsa «Conectar ASTRA» (o «Simulación» para probar).'];
     if (st) {
       if (st.modo === 'PARO') A.paro = ['crit', 'PARO DE EMERGENCIA en el atril.'];
-      else if (!st.datos && st.modo !== 'ARRANQUE') A.opto = ['crit', 'El atril no recibe el RMS del Arduino (opto). Revisa que el Arduino esté encendido y el cable del opto.' + (midiendo(st) ? ' El registro basal espera hasta que vuelvan los datos y, si se cortan, se rechaza.' : '')];
-      if (!st.estOK) A.tope = ['warn', 'Estrellas desactivadas: el atril no encontró el tope (microswitch).'];
+      else if (!st.datos && st.modo !== 'ARRANQUE') A.opto = ['crit', 'El atril no recibe el RMS del Arduino (opto). Revisa que el Arduino esté encendido y el cable del opto.' + (st.modo === 'CALIBRANDO' ? ' La calibración basal termina a los 10 s aunque no lleguen datos: recalibra cuando vuelvan.' : '')];
     }
+    // Señal EMG (solo la gráfica)
     const c = emgConn.status;
     if (c === 'error' && inSes) A.emg = ['warn', 'Señal EMG del Arduino: ' + emgConn.msg + '. Solo afecta a la gráfica; el atril sigue funcionando. Reintentando…'];
     else if (c === 'disconnected' && inSes && atril) A.emg = ['warn', 'La señal EMG del Arduino no está conectada (solo afecta a la gráfica).'];
@@ -371,7 +334,7 @@
       d.textContent = (lvl === 'crit' ? '⚠ ' : '! ') + msg; el.appendChild(d);
       if (lvl === 'crit') crit.add(k);
     });
-    if (S.sound) for (const k of crit) if (!prevCrit.has(k)) { beep(); break; }
+    for (const k of crit) if (!prevCrit.has(k)) { beep(); break; }
     prevCrit = crit;
   }
 
@@ -379,7 +342,7 @@
    * Sesión
    * =================================================================== */
   function startSession() {
-    rec = null; calPreparada = false; propuesta = null; rechazadas = []; ajustesLog = [];
+    rec = null;
     $('s-name').textContent = fullName(patient);
     $('s-dob').textContent = 'Nacimiento: ' + fmtDate(patient.nacimiento) + ' (' + ageText(patient.nacimiento) + ') · GMFCS ' + patient.gmfcs;
     ['m-electrodo', 'm-posicion', 'm-notas'].forEach(i => { $(i).value = ''; });
@@ -388,20 +351,17 @@
     if (!atril) toast('Conecta el sistema ASTRA (o activa la simulación) para empezar.');
   }
 
-  // Botones de la calibración basal (cada uno manda un comando al atril)
-  $('btn-cal-start').addEventListener('click', () => { calPreparada = true; sendCmd('c'); renderCal(); });
-  $('btn-basal').addEventListener('click', () => sendCmd('1'));
-  $('btn-phase-cancel').addEventListener('click', () => sendCmd('x'));
-  $('btn-run-start').addEventListener('click', () => sendCmd('s'));
-  $('btn-cal-redo').addEventListener('click', () => { calPreparada = true; sendCmd('1'); });
-  $('btn-force').addEventListener('click', () => {
-    if (confirm('La señal basal no cumplió los criterios de calidad. Usarla de todas formas es una decisión clínica: el umbral podría ser poco fiable. ¿Aceptarla de todas formas?')) sendCmd('f');
-  });
+  // Botones (cada uno manda al atril la misma tecla del monitor serie)
   $('btn-attach').addEventListener('click', () => { if (st) { startRecording(st); renderCal(); } });
-  $('btn-attach-cal').addEventListener('click', () => { calPreparada = true; sendCmd('c'); });
+  $('btn-attach-cal').addEventListener('click', () => sendCmd('c'));
   $('btn-pause').addEventListener('click', () => sendCmd('p'));
+  $('btn-thr-down').addEventListener('click', () => sendCmd('-'));
+  $('btn-thr-up').addEventListener('click', () => sendCmd('+'));
   $('btn-recal').addEventListener('click', () => {
-    if (confirm('¿Recalibrar? El atril deja la sesión y vuelve a registrar el RMS basal. El tiempo de terapia se detiene mientras tanto y luego continúa; las confirmaciones anteriores se conservan.')) { calPreparada = true; sendCmd('c'); }
+    if (confirm('¿Recalibrar? El atril registra otra vez 10 s de RMS basal (cabeza apoyada y estable). El tiempo de terapia se detiene mientras tanto y luego continúa.')) sendCmd('c');
+  });
+  $('btn-invert').addEventListener('click', () => {
+    if (confirm('¿Invertir qué estado del EMG cuenta como «cabeza abajo»? Úsalo solo si el atril está detectando al revés.')) sendCmd('x');
   });
   $('btn-resume').addEventListener('click', () => sendCmd('r'));
 
@@ -409,260 +369,86 @@
     $('cal-msg').hidden = !text; $('cal-msg').textContent = text || ''; $('cal-msg').className = 'callout ' + (cls || '');
     $('cal-msg-actions').hidden = !showResume;
   }
-  const TXT_FLAGS = [
-    [1, 'Se interrumpieron los datos durante el registro.', 1], [2, 'Señal casi nula: revisa electrodos y sensor.', 1], [4, 'RMS basal muy alto: ruido o mal contacto.', 1],
-    [8, 'Señal saturada.', 1], [16, 'Señal plana (sin variación): ¿sensor sin alimentación o cable suelto?', 1], [32, 'Variabilidad excesiva del RMS en reposo.', 1],
-    [64, 'Variabilidad alta del RMS en reposo.', 0], [128, 'Deriva excesiva entre la primera y la segunda mitad del registro.', 1], [256, 'Deriva notable entre la primera y la segunda mitad.', 0],
-    [512, 'Picos aislados (¿el niño se movió?).', 0], [1024, 'Muy pocos bloques válidos.', 1]];
   function renderCal() {
     const on = atrilConn.status === 'connected' && st;
-    let intro = false, steps = false, result = false, run = false, attach = false;
     const badge = $('atril-badge');
-    badge.className = 'badge'; badge.textContent = on ? st.modo + (st.modo === 'CALIBRANDO' ? ' · ' + st.fase : '') + (st.modo === 'SESION' || st.modo === 'PAUSA' ? (st.ctl ? ' · control automático' : ' · supervisado') : '') : 'sin conexión';
+    badge.className = 'badge'; badge.textContent = on ? st.modo : 'sin conexión';
     const cls = on ? { PARO: 'bad', SESION: 'ok', CALIBRANDO: 'warn' }[st.modo] : null;
     if (cls) badge.classList.add(cls);
+    let cue = false, result = false, run = false, attach = false;
     setMsg('');
-    if (!on) setMsg(atrilConn.status === 'connecting' || atrilConn.status === 'connected' ? 'Conectando con el atril…' : 'Conecta el atril («Conectar ASTRA» o «Simulación») para calibrar.', 'warn');
-    else if (st.modo === 'ARRANQUE') setMsg('El atril está buscando el tope de las estrellas. La calibración se habilita al terminar.');
+    if (!on) setMsg(atrilConn.status === 'connecting' || atrilConn.status === 'connected' ? 'Conectando con el atril…' : 'Conecta el atril («Conectar ASTRA» o «Simulación»).', 'warn');
+    else if (st.modo === 'ARRANQUE') setMsg('Las estrellas están buscando el microswitch. Al encontrarlo, el atril hace solo la calibración basal (10 s): deja la cabeza del niño apoyada y estable.');
     else if (st.modo === 'PARO') setMsg('Paro de emergencia. Suelta el hongo y pulsa «Reanudar el atril».', 'bad', true);
-    else if (st.modo === 'CALIBRANDO') {
-      const started = calPreparada || st.fase !== 'ESPERA';
-      intro = !started; steps = started && (st.fase === 'ESPERA' || st.fase === 'BASAL'); result = st.fase === 'LISTA' || st.fase === 'RECHAZADA';
-    } else if (rec) run = true;
-    else attach = true;
+    else if (st.modo === 'CALIBRANDO') { cue = true; result = !!st.cal.ok; }
+    else { result = true; if (rec) run = true; else attach = true; }
 
-    $('cal-intro').hidden = !intro; $('cal-steps').hidden = !steps; $('cal-result').hidden = !result;
-    $('run-ctrl').hidden = !run; $('attach').hidden = !attach;
-    $('cal-title').textContent = run ? 'Sesión en el atril' : 'Calibración basal';
+    $('cue').hidden = !cue; $('cal-result').hidden = !result; $('run-ctrl').hidden = !run; $('attach').hidden = !attach;
+    $('cal-title').textContent = run ? 'Sesión en el atril' : 'Calibración basal en el atril';
     $('meta-box').open = !rec;
-    if (steps) renderBasal();
-    if (result) renderResult();
+    if (cue) {
+      const c = st.cal;
+      $('cue-count').textContent = Math.ceil(c.restante) + ' s';
+      $('cue-bar').style.width = (100 * (1 - c.restante / c.total)) + '%';
+      const t = c.total - c.restante;
+      $('cue-note').textContent = (t < c.desc ? 'Descartando el primer ' + c.desc + ' s…' : 'Midiendo el RMS basal (' + c.n + ' bloques)…') +
+        ' · mediana ahora: ' + f1(st.med) + ' mV' + (st.datos ? '' : ' · ¡NO LLEGAN DATOS DEL ARDUINO!');
+    }
+    if (result) renderResult(st.modo === 'CALIBRANDO');
     if (run) {
-      $('cal-compact').textContent = 'U_ON ' + f1(st.uon) + ' mV · U_OFF ' + f1(st.uoff) + ' mV · umbral ' + ['basal (preliminar)', 'ajustado y aprobado', 'restaurado'][st.uorig] +
-        ' · media basal ' + f1(st.cb.media) + ' ± ' + f1(st.cb.sd) + ' mV' + (rec.recal ? ' · recalibrado ' + rec.recal + ' vez/veces' : '');
+      $('cal-compact').textContent = 'U_on ' + f1(st.cal.uon) + ' mV · U_off ' + f1(st.cal.uoff) + ' mV · basal ' + f1(st.cal.reposo) + ' ± ' + f1(st.cal.sd) +
+        ' mV · factor ' + f1(st.cal.k) + ' SD · activación = cabeza ' + posturaAct() + (rec.recal ? ' · recalibrado ' + rec.recal + ' vez/veces' : '');
       $('btn-pause').textContent = st.modo === 'PAUSA' ? '▶ Seguir' : '❚❚ Pausa';
     }
-    if (attach) $('attach-thr').textContent = 'U_ON ' + f1(st.uon) + ' mV, sesión ' + st.sid + ' del atril';
     $('btn-csv').disabled = !rec; $('btn-finish').disabled = !rec;
   }
-  function renderBasal() {
-    const s = st, mid = midiendo(s), cfg = s.cfg, bps = cfg.bps || 10;
-    $('basal-step').hidden = mid;
-    $('btn-basal').textContent = 'Registrar RMS basal (' + f0(cfg.basal) + ' s)';
-    $('cue').hidden = !mid;
-    if (!mid) return;
-    const left = Math.max(0, Math.ceil((s.total - s.bloq) / bps));
-    setText('cue-count', left + ' s');
-    $('cue-bar').style.width = (100 * s.bloq / Math.max(1, s.total)) + '%';
-    let note = s.bloq <= cfg.desc * bps ? 'Descartando el primer ' + cfg.desc + ' s (los filtros se estabilizan)…' : 'Registrando el RMS basal…';
-    if (!s.datos) note = 'El atril no recibe datos del Arduino. Si se cortan, el registro se rechaza.';
-    setText('cue-note', note + ' · RMS ahora: ' + s.rms + ' mV');
-  }
-  function renderResult() {
-    const s = st, c = s.cb, rech = s.fase === 'RECHAZADA';
-    const niv = ['aceptada', 'aceptada con advertencias', 'RECHAZADA', 'aceptada a la fuerza'][c.niv];
-    $('cal-result-title').textContent = rech ? 'La calibración basal no es aceptable.' : 'Calibración basal lista.';
-    $('cal-result-sub').textContent = 'Calidad de la señal: ' + niv + '.';
-    const items = [['RMS basal (media)', f2(c.media) + ' mV'], ['Desviación estándar', f2(c.sd) + ' mV'], ['Variabilidad (SD / media)', f2(c.cv)],
-      ['Deriva (2.ª mitad vs 1.ª)', (c.der >= 0 ? '+' : '') + Math.round(c.der * 100) + ' %'], ['Mínimo – máximo', f1(c.mn) + ' – ' + f1(c.mx) + ' mV'], ['Bloques usados', String(c.n)]];
-    if (!rech) items.push(['U_ON (media + ' + s.cfg.k + ' × SD)', f1(s.uon) + ' mV'], ['U_OFF (media + ' + s.cfg.f + ' × (U_ON − media))', f1(s.uoff) + ' mV']);
+  function renderResult(anterior) {
+    const c = st.cal;
+    $('cal-result-title').textContent = anterior ? 'Calibración anterior (se reemplaza al terminar):' : 'Calibración basal.';
+    $('cal-result-sub').textContent = anterior ? '' : c.n + ' bloques de RMS (mediana de 0.5 s), sin el primer ' + c.desc + ' s.';
+    const items = [['Media basal (μ)', f1(c.reposo) + ' mV'], ['Desviación estándar (σ)', f2(c.sd) + ' mV'], ['Variación (σ / μ)', f0(100 * c.cv) + ' %'],
+      ['U_on = μ + máx(' + f1(c.k) + 'σ, ' + f1(c.margen) + ' mV)', f1(c.uon) + ' mV'], ['U_off = μ + ' + c.koff + '·(U_on − μ)', f1(c.uoff) + ' mV'],
+      ['Activación (RMS sobre U_on)', 'cabeza ' + posturaAct()]];
     $('cal-values').innerHTML = items.map(() => '<div><span></span><b></b></div>').join('');
     $('cal-values').querySelectorAll('div').forEach((d, i) => { d.firstChild.textContent = items[i][0]; d.lastChild.textContent = items[i][1]; });
-    const w = TXT_FLAGS.filter(([bit]) => c.fl & bit).map(([, t, rechazo]) => (rechazo ? 'Motivo de rechazo: ' : 'Advertencia: ') + t);
-    if (rech) w.push('Revisa electrodos, postura y cables y repite el registro. Si decides usarla de todas formas, queda marcada en el registro.');
+    const w = [];
+    if (c.pocos) w.push('La última calibración casi no recibió datos (' + c.n + ' bloques, mínimo ' + c.nMin + '): el atril conservó los umbrales anteriores. Revisa el Arduino y el opto y recalibra.');
+    if (c.inestable) w.push('El RMS basal fue inestable (variación > ' + f0(100 * c.cvMax) + ' %). Revisa electrodos y cables; el atril sigue funcionando. Puedes recalibrar.');
     $('cal-warnings').innerHTML = w.map(() => '<li></li>').join('');
     $('cal-warnings').querySelectorAll('li').forEach((li, i) => { li.textContent = w[i]; });
-    $('cal-prelim').hidden = rech;
-    $('btn-run-start').disabled = rech; $('btn-force').hidden = !rech;
   }
-
-  /* ---------- aviso de verificación (discreto) ---------- */
-  let notifId = 0;
-  function renderNotif() {
-    const box = $('notif');
-    const ev = st && st.ver.pend ? evStore.get(evKey(st.boot, st.ver.pend)) : null;
-    const activo = ev && ev.status === 1 && !respondidos.has(ev.key) && view === 'session' && st.modo === 'SESION';
-    if (!activo) { box.hidden = true; notifId = 0; return; }
-    const restante = Math.max(0, st.cfg.resp - (st.tSes - ev.tIni - ev.dur));
-    const cambio = st.ep !== ev.ep;
-    setText('notif-meta', 'Aviso ' + ev.nSol + ' de ' + st.ver.max + ' · ventana de ' + f0(ev.dur) + ' s ya registrada · caduca en ' + clock(restante) +
-      (cambio ? ' · El estado del RMS cambió desde entonces: responde solo si recuerdas cómo estaba cuando apareció el aviso, o elige «No se puede determinar».' : ''));
-    if (notifId !== ev.id) { notifId = ev.id; if (S.soundVerif) beep(660, 0.05); }
-    box.hidden = false;
-  }
-  document.querySelectorAll('[data-resp]').forEach(b => b.addEventListener('click', () => {
-    const ev = st && st.ver.pend ? evStore.get(evKey(st.boot, st.ver.pend)) : null;
-    if (ev) responder(ev, b.dataset.resp);
-  }));
-  function responder(ev, p) {
-    respondidos.add(ev.key); $('notif').hidden = true;
-    tarea('respuesta de verificación', () => atril.conf(ev.id, p), s => { const e = evStore.get(evKey(s.boot, ev.id)); return !e || e.status !== 1; });
-    renderVerif();
-  }
-  document.querySelectorAll('[data-manual]').forEach(b => b.addEventListener('click', () => {
-    if (!st || st.modo !== 'SESION') { toast('La confirmación manual necesita la sesión en marcha.'); return; }
-    const p = b.dataset.manual, tok = nextTok(), boot = st.boot;
-    tarea('confirmación manual', () => atril.manual(p, tok), s => [...evStore.values()].some(e => e.boot === boot && e.tok === tok), () => toast('Confirmación manual registrada.'));
-  }));
-
-  /* ---------- verificación, análisis y ajuste ---------- */
-  const NOM_POST = { 1: 'Erguida', 2: 'Caída', 3: 'No se puede determinar' };
-  const NOM_STATUS = { 1: 'pendiente', 2: 'confirmada', 3: 'descartada', 4: 'sin respuesta' };
-  const cfgAn = () => ({ nMinClase: S.nMinClase, aucMin: S.aucMin });
-  function calidadTxt(e) {
-    return (e.calidad === 0 ? 'buena' : 'dudosa') + (st && st.sid === e.sid && st.cb.niv >= 1 ? ' · basal ' + (st.cb.niv === 1 ? 'con avisos' : st.cb.niv === 3 ? 'forzado' : '') : '');
-  }
-  function renderVerif() {
-    if (!st) { setText('ver-status', 'Conecta el atril para ver la verificación.'); return; }
-    const v = st.ver, enSes = st.modo === 'SESION', hip = st.cfg.hip;
-    const badge = $('ver-badge'); badge.className = 'badge';
-    let txt;
-    if (st.modo === 'SESION' || st.modo === 'PAUSA') {
-      const min = x => f0(x / 60);
-      const per = v.per === 0 ? 'Primeros ' + min(v.dur) + ' min' : 'Ciclo ' + v.per + ' (min ' + min(v.dur * (v.per - 1) + (st.cfg.v1s)) + '–' + min(v.dur * v.per + st.cfg.v1s) + ')';
-      badge.textContent = per; badge.classList.add(st.modo === 'PAUSA' ? 'warn' : 'ok');
-      let sig;
-      if (st.modo === 'PAUSA') sig = 'En pausa: el tiempo de verificación está detenido.';
-      else if (v.pend) sig = 'Hay una pregunta pendiente.';
-      else if (v.esp < 0 || v.sol >= v.max) sig = 'Cupo completo en este periodo; se reinicia en ' + clock(v.dur - v.tPer) + '.';
-      else if (v.esp > 0.5) sig = 'Próxima pregunta posible en ' + clock(v.esp) + ' (si hay un estado sostenido).';
-      else sig = 'Se preguntará cuando haya un estado sostenido.';
-      txt = per + ': ' + v.sol + ' de ' + v.max + ' confirmaciones automáticas. ' + sig;
-      $('ver-bar').style.width = Math.min(100, 100 * v.tPer / Math.max(1, v.dur)) + '%';
-    } else { badge.textContent = '—'; txt = 'La verificación comienza al iniciar la sesión (primeros 5 min: máx. 4 confirmaciones; luego ciclos de 10 min: máx. 3).'; $('ver-bar').style.width = '0'; }
-    setText('ver-status', txt);
-    document.querySelectorAll('[data-manual]').forEach(b => { b.disabled = !enSes; });
-
-    const evs = eventosRec();
-    const r = E.Analisis.resumen(evs, hip);
-    const chips = [['Estados sostenidos detectados: ' + st.nDet, ''], ['Automáticas: ' + r.auto, ''], ['Manuales: ' + r.manual, ''], ['Confirmadas: ' + r.confirmadas, ''],
-      ['Coinciden con el umbral: ' + r.coinciden, r.coinciden ? 'ok' : ''], ['No coinciden: ' + r.noCoinciden, r.noCoinciden ? 'bad' : ''],
-      ['Falsos positivos: ' + r.falsosPositivos, r.falsosPositivos ? 'bad' : ''], ['Falsos negativos: ' + r.falsosNegativos, r.falsosNegativos ? 'bad' : ''],
-      ['Descartadas: ' + r.descartadas, ''], ['Sin respuesta: ' + r.expiradas, '']];
-    const sig = chips.map(c => c[0]).join('|');
-    if ($('ver-chips').dataset.sig !== sig) {
-      $('ver-chips').dataset.sig = sig; $('ver-chips').innerHTML = chips.map(() => '<span></span>').join('');
-      $('ver-chips').querySelectorAll('span').forEach((el, i) => { el.textContent = chips[i][0]; if (chips[i][1]) el.className = chips[i][1]; });
-    }
-    renderConfTable(evs, hip);
-    renderAjuste();
-  }
-  function renderConfTable(evs, hip) {
-    const tb = $('conf-body'), key = evs.map(e => e.key + e.status + e.postura).join(',') + hip;
-    if (tb.dataset.key === key) return;
-    tb.dataset.key = key; tb.innerHTML = '';
-    if (!evs.length) { tb.innerHTML = '<tr><td colspan="10" class="muted">Sin confirmaciones todavía.</td></tr>'; return; }
-    evs.slice().reverse().forEach((e, i) => {
-      const res = E.Analisis.resultado(e, hip);
-      const cells = [evs.length - i, clock(tEvento(e)), e.origen ? 'manual' : 'automática', e.periodo === 0 ? '0–5 min' : 'ciclo ' + e.periodo,
-        f1(e.media) + ' ± ' + f1(e.sd) + ' (' + f1(e.minimo) + '–' + f1(e.maximo) + ') mV', e.estado === 1 ? 'ALTO (≥ U_ON)' : 'BAJO (< U_OFF)',
-        f1(e.uon) + ' / ' + f1(e.uoff), e.postura ? NOM_POST[e.postura] : NOM_STATUS[e.status], res, calidadTxt(e)];
-      const tr = document.createElement('tr');
-      cells.forEach((v, c) => { const td = document.createElement('td'); td.textContent = v; if (c === 8) td.className = res === 'coincide' ? 'res-coincide' : res === 'no coincide' ? 'res-no' : ''; tr.appendChild(td); });
-      tb.appendChild(tr);
-    });
-  }
-  function renderAjuste() {
-    const evs = eventosVigentes(), hip = st.cfg.hip;
-    const sig = evs.map(e => e.key + e.status + e.postura).join(',') + '|' + st.uon + '|' + st.uoff + '|' + hip + '|' + st.cb.media + '|' + S.nMinClase + '|' + S.aucMin + '|' + rechazadas.length;
-    if (sig !== analisisSig) {
-      analisisSig = sig;
-      analisis = E.Analisis.evaluar({ events: evs, uon: st.uon, uoff: st.uoff, base: { media: st.cb.media, sd: st.cb.sd }, f: st.cfg.f, hip, cfg: cfgAn() });
-      propuesta = null;
-      if (analisis.estado === 'propuesta') {
-        const p = analisis.propuesta, rej = rechazadas.find(x => Math.abs(x.uon - p.uon) / x.uon < 0.05 && analisis.n.total < x.n + 3);
-        if (rej) { analisis = Object.assign({}, analisis, { estado: 'rechazada_antes', titulo: 'Propuesta rechazada anteriormente',
-          motivo: 'Rechazaste un ajuste parecido (U_ON ' + f1(rej.uon) + ' mV). No se vuelve a proponer hasta tener al menos 3 observaciones independientes nuevas. ' + analisis.motivo }); }
-        else { propuesta = p; const k = f0(p.uon * 10) + ':' + analisis.n.total; if (!ajustesLog.some(a => a.k === k)) ajustesLog.push({ k, tipo: 'propuesta', t: new Date().toISOString(), tSes: recTime(), uonAntes: st.uon, uoffAntes: st.uoff, uonNuevo: p.uon, uoffNuevo: p.uoff, motivo: analisis.motivo, balActual: p.actual.bal, balNuevo: p.bal, loo: p.loo }); }
-      }
-      pintarAjuste();
-    }
-    // botones que dependen del estado del atril (no del análisis)
-    const enSes = st.modo === 'SESION' || st.modo === 'PAUSA';
-    $('btn-restaurar').hidden = !(enSes && st.hist.length >= 2);
-    const bc = $('btn-control');
-    bc.hidden = !(enSes && (st.ctl || (analisis && analisis.apto)));
-    bc.textContent = st.ctl ? 'Volver al modo supervisado (quitar el control automático)' : 'Habilitar el control automático de los actuadores (hay evidencia suficiente)';
-    $('aj-badge').className = 'badge ' + (st.ctl ? 'warn' : 'ok'); setText('aj-badge', st.ctl ? 'Control automático' : 'Modo supervisado');
-    const h = st.hist.map((x, i) => 'Atril · U_ON ' + f1(x[0]) + ' mV / U_OFF ' + f1(x[1]) + ' mV · ' + ['basal', 'ajustado (aprobado)', 'restaurado'][x[2]] + ' · a los ' + clock(x[3]) + ' de terapia' + (i === st.hist.length - 1 ? ' ← vigente' : ''))
-      .concat(ajustesLog.filter(a => a.tipo !== 'propuesta').map(a => 'Página · ' + a.tipo + ' · U_ON ' + f1(a.uonAntes) + (a.uonNuevo !== undefined ? ' → ' + f1(a.uonNuevo) : '') + ' mV · ' + fmtDateTime(a.t)));
-    const hs = h.join('|');
-    if ($('aj-hist').dataset.sig !== hs) { $('aj-hist').dataset.sig = hs; $('aj-hist').innerHTML = h.map(() => '<li></li>').join(''); $('aj-hist').querySelectorAll('li').forEach((li, i) => { li.textContent = h[i]; }); }
-  }
-  function pintarAjuste() {
-    const a = analisis;
-    const cls = { correcto: 'ok', propuesta: 'warn', invertida: 'bad', contradictorio: 'bad', ruido: 'bad', fuera_de_rango: 'bad' }[a.estado] || '';
-    setText('aj-titulo', a.titulo); setText('aj-motivo', a.motivo);
-    $('aj-titulo').className = cls === 'bad' ? 'danger-text' : '';
-    const det = a.detalles.slice(); $('aj-detalles').innerHTML = det.map(() => '<li></li>').join(''); $('aj-detalles').querySelectorAll('li').forEach((li, i) => { li.textContent = det[i]; });
-    const items = [['Confirmadas', String(a.n.confirmadas)], ['Observaciones independientes', a.n.A + ' (' + a.nombres.A + ') + ' + a.n.B + ' (' + a.nombres.B + ')']];
-    if (a.actual) items.push(['Umbral actual: exactitud balanceada', f2(a.actual.bal)], ['Falsos positivos / negativos', a.actual.fp + ' / ' + a.actual.fn]);
-    if (a.stats) items.push(['Separación entre posturas (AUC)', f2(a.stats.auc)], ['RMS mediano ' + a.nombres.A + ' / ' + a.nombres.B, f0(a.stats.medA) + ' / ' + f0(a.stats.medB) + ' mV']);
-    $('aj-nums').innerHTML = items.map(() => '<div><span></span><b></b></div>').join('');
-    $('aj-nums').querySelectorAll('div').forEach((d, i) => { d.firstChild.textContent = items[i][0]; d.lastChild.textContent = items[i][1]; });
-    const p = propuesta; $('aj-prop').hidden = !p;
-    if (p) {
-      setText('pp-on0', f1(st.uon) + ' mV'); setText('pp-on1', f1(p.uon) + ' mV'); setText('pp-off0', f1(st.uoff) + ' mV'); setText('pp-off1', f1(p.uoff) + ' mV');
-      setText('pp-bal0', f2(p.actual.bal)); setText('pp-bal1', f2(p.bal) + ' (validación cruzada ' + f2(p.loo) + ')');
-      setText('pp-err0', p.actual.fp + ' / ' + p.actual.fn); setText('pp-err1', p.m.fp + ' / ' + p.m.fn);
-    }
-  }
-  $('btn-aprobar').addEventListener('click', () => {
-    const p = propuesta; if (!p || !st) return;
-    const on = +p.uon.toFixed(1), off = +p.uoff.toFixed(1), tok = nextTok(), antes = { on: st.uon, off: st.uoff };
-    propuesta = null; $('aj-prop').hidden = true;
-    tarea('aplicar el umbral aprobado', () => atril.umbral(on, off, tok), s => Math.abs(s.uon - on) < 0.06 && s.uorig === 1, () => {
-      ajustesLog.push({ k: 'ap' + tok, tipo: 'aprobado', t: new Date().toISOString(), tSes: recTime(), uonAntes: antes.on, uoffAntes: antes.off, uonNuevo: on, uoffNuevo: off, motivo: analisis ? analisis.motivo : '' });
-      analisisSig = ''; toast('Umbral nuevo aplicado en el atril: U_ON ' + f1(on) + ' mV.');
-    });
-  });
-  $('btn-rechazar').addEventListener('click', () => {
-    const p = propuesta; if (!p || !st) return;
-    rechazadas.push({ uon: p.uon, n: analisis.n.total });
-    ajustesLog.push({ k: 'rj' + Date.now(), tipo: 'rechazado', t: new Date().toISOString(), tSes: recTime(), uonAntes: st.uon, uoffAntes: st.uoff, uonNuevo: p.uon, uoffNuevo: p.uoff, motivo: analisis.motivo });
-    propuesta = null; analisisSig = ''; toast('Propuesta rechazada: se conserva el umbral actual.');
-  });
-  $('btn-restaurar').addEventListener('click', () => {
-    if (!st || st.hist.length < 2) return;
-    const prev = st.hist[st.hist.length - 2], antes = { on: st.uon, off: st.uoff }, tok = nextTok();
-    if (!confirm('¿Restaurar el umbral anterior (U_ON ' + f1(prev[0]) + ' mV)?')) return;
-    tarea('restaurar el umbral anterior', () => atril.restaurar(tok), s => s.uorig === 2 && Math.abs(s.uon - prev[0]) < 0.06, () => {
-      ajustesLog.push({ k: 'rs' + tok, tipo: 'restaurado', t: new Date().toISOString(), tSes: recTime(), uonAntes: antes.on, uoffAntes: antes.off, uonNuevo: prev[0], uoffNuevo: prev[1], motivo: 'Restaurado por la fisioterapeuta.' });
-      analisisSig = ''; toast('Umbral anterior restaurado.');
-    });
-  });
-  $('btn-control').addEventListener('click', () => {
-    if (!st) return;
-    const quiere = !st.ctl;
-    if (quiere && !confirm('¿Habilitar el control automático? A partir de ahora el umbral moverá estrellas, luz y sonido. El análisis indica que el RMS separa bien las posturas de este niño en esta sesión, pero sigue siendo tu decisión.')) return;
-    sendCmd('a');
-  });
 
   /* ---------- UI de sesión (4 Hz; las gráficas van a 60 fps aparte) ---------- */
   function renderSession() {
-    const t = recTime(), live = liveAct();
+    const t = recTime(), live = liveAct(), post = posturaAct();
     $('s-time').textContent = $('k-time').textContent = clock(t);
     const acts = rec ? rec.acts : [];
     const totalActive = acts.reduce((a, s) => a + s.durS, 0) + live;
+    $('k-count-label').textContent = 'Activaciones (cabeza ' + post + ')';
+    $('k-active-label').textContent = 'Tiempo con la cabeza ' + post;
     $('k-count').textContent = acts.length + (live ? 1 : 0);
-    $('k-active').textContent = f1(totalActive) + ' s con RMS sobre U_ON';
-    $('k-cal').textContent = rec ? 'sin contar pausas ni recalibraciones' : 'empieza con «Iniciar sesión»';
+    $('k-disc').textContent = live ? 'Una en curso' : '';
+    $('k-active').textContent = f1(totalActive) + ' s';
+    $('k-pct').textContent = t > 1 ? Math.round(100 * totalActive / t) + ' % del tiempo de sesión' : '';
+    $('k-max').textContent = f1(Math.max(0, live, ...acts.map(a => a.durS))) + ' s';
+    $('k-cur').textContent = live ? 'En curso: ' + f1(live) + ' s' : (acts.length ? 'Última: ' + f1(acts[acts.length - 1].durS) + ' s' : '');
+    $('k-rms').textContent = acts.length ? Math.round(acts.reduce((a, s) => a + s.rms, 0) / acts.length) : '—';
+    $('k-cal').textContent = rec ? 'sin contar pausas ni recalibraciones' : 'empieza al terminar la calibración basal';
     if (st) {
-      const evs = eventosRec(), r = E.Analisis.resumen(evs, st.cfg.hip);
-      $('k-det').textContent = st.nDet; $('k-est').textContent = st.modo === 'SESION' ? (st.est === 1 ? 'ahora: ALTO · ' + f0(st.bEst) + ' s' : st.est === 2 ? 'ahora: BAJO · ' + f0(st.bEst) + ' s' : '') : '';
-      $('k-conf').textContent = r.confirmadas;
-      $('k-coin').textContent = r.confirmadas ? Math.round(100 * r.coinciden / r.confirmadas) + ' % coincide con el umbral' : 'sin confirmaciones';
-      $('k-per').textContent = st.modo === 'SESION' || st.modo === 'PAUSA' ? st.ver.sol + ' / ' + st.ver.max : '—';
-      $('k-perdet').textContent = st.modo === 'SESION' || st.modo === 'PAUSA' ? (st.ver.per === 0 ? 'primeros 5 min' : 'ciclo ' + st.ver.per) : '';
-      const items = [['RMS', st.rms + ' mV'], ['Suavizado', f1(st.suave) + ' mV'], ['Estado', st.modo === 'SESION' ? (st.est === 1 ? 'ALTO' : st.est === 2 ? 'BAJO' : '—') + (st.sost ? ' (sostenido)' : '') : st.modo],
-        ['Estrellas', st.estOK ? st.alt + ' %' : 'desactivadas'], ['WiFi del atril', st.rssi + ' dBm']];
-      const html = items.map(i => i[0] + ': ' + i[1]).join('|');
-      if ($('readouts').dataset.sig !== html) {
-        $('readouts').dataset.sig = html; $('readouts').innerHTML = items.map(() => '<span><span></span>: <b></b></span>').join('');
-        $('readouts').querySelectorAll(':scope > span').forEach((el, i) => { el.firstChild.textContent = items[i][0]; el.lastChild.textContent = items[i][1]; });
-      }
-    } else { $('readouts').textContent = ''; $('readouts').dataset.sig = ''; }
-    renderVerif();
+      const items = [['RMS', st.rms + ' mV'], ['Mediana', f1(st.med) + ' mV'], ['Cabeza', st.modo === 'SESION' ? (st.abajo ? 'ABAJO' : 'arriba') : st.modo],
+        ['Estrellas', st.velE + ' pasos/s'], ['Canción', st.cancion], ['WiFi del atril', st.rssi + ' dBm']];
+      $('readouts').innerHTML = items.map(() => '<span><span></span>: <b></b></span>').join('');
+      $('readouts').querySelectorAll(':scope > span').forEach((el, i) => {
+        el.firstChild.textContent = items[i][0]; el.lastChild.textContent = items[i][1];
+        if (i === 2 && st.modo === 'SESION' && st.abajo) el.lastChild.className = 'on';
+      });
+      const sesion = st.modo === 'SESION' && st.cal.ok;
+      $('gauge-fill').style.width = sesion ? st.nivel + '%' : '0';
+      $('gauge-val').textContent = sesion ? st.nivel + ' %' : '—';
+      $('gauge-mark').style.left = '100%';
+    } else {
+      $('readouts').textContent = ''; $('gauge-fill').style.width = '0'; $('gauge-val').textContent = '—';
+    }
     renderTable(acts, live);
     if (logDirty && $('log-card').open) {
       logDirty = false;
@@ -670,13 +456,12 @@
       el.textContent = logLines.join('\n');
       if (atEnd) el.scrollTop = el.scrollHeight;
     }
-    if (sim) setText('sp-real', sim.posturaReal() ? 'erguido' : 'caído');
   }
   function renderTable(acts, live) {
     const tb = $('act-body'); tb.innerHTML = '';
-    const rows = acts.map(a => [a.n, clock(a.inicioS), f1(a.durS), f0(a.rms), f0(a.pct)]);
-    if (live) rows.push([acts.length + 1 + ' (en curso)', '—', f1(live), '—', '—']);
-    if (!rows.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">Sin activaciones todavía.</td></tr>'; return; }
+    const rows = acts.map(a => [a.n, clock(a.inicioS), f1(a.durS), f0(a.rms)]);
+    if (live) rows.push([acts.length + 1 + ' (en curso)', '—', f1(live), '—']);
+    if (!rows.length) { tb.innerHTML = '<tr><td colspan="4" class="muted">Sin activaciones todavía.</td></tr>'; return; }
     rows.slice().reverse().forEach((r, k) => {
       const tr = document.createElement('tr'); if (live && k === 0) tr.className = 'live-row';
       r.forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
@@ -687,46 +472,30 @@
 
   /* ---------- guardar / finalizar ---------- */
   function buildRecord() {
-    const t = recTime(), acts = rec.acts, tot = acts.reduce((a, s) => a + s.durS, 0), hip = rec.cfg.hip;
-    const evs = eventosRec(), resumenV = E.Analisis.resumen(evs, hip);
-    const conf = evs.map(e => ({
-      id: e.id, sid: e.sid, origen: e.origen ? 'manual' : 'automatica', periodo: e.periodo === 0 ? 'primeros 5 min' : 'ciclo ' + e.periodo, solicitud: e.nSol,
-      tEventoS: tEvento(e), horaVista: e.visto, rmsMedio: e.media, rmsSD: e.sd, rmsMin: e.minimo, rmsMax: e.maximo, ventanaS: e.dur,
-      estadoRms: e.estado === 1 ? 'ALTO' : 'BAJO', umbralOn: e.uon, umbralOff: e.uoff,
-      postura: e.postura ? ['', 'erguida', 'caida', 'no determinada'][e.postura] : '', estado: NOM_STATUS[e.status], resultado: E.Analisis.resultado(e, hip),
-      calidadVentana: e.calidad === 0 ? 'buena' : 'dudosa', episodio: e.ep }));
+    const t = recTime(), acts = rec.acts, tot = acts.reduce((a, s) => a + s.durS, 0);
     return {
-      patientId: patient.id, fecha: rec.start, duracionS: t, origen: 'atril-basal',
+      patientId: patient.id, fecha: rec.start, duracionS: t, origen: 'atril v5',
       electrodo: $('m-electrodo').value.trim(), posicion: $('m-posicion').value.trim(), fisio: $('m-fisio').value.trim(), notas: $('m-notas').value.trim(),
-      calibracion: rec.cals[0], calibraciones: rec.cals, umbralMV: rec.cals[0].uon, recalibraciones: rec.recal, parametros: rec.cfg,
-      confirmaciones: conf, ajustes: ajustesLog.filter(a => a.tipo !== 'propuesta' || true).map(a => Object.assign({}, a)),
-      analisisFinal: analisis ? { estado: analisis.estado, titulo: analisis.titulo, motivo: analisis.motivo, n: analisis.n, actual: analisis.actual, stats: analisis.stats } : null,
+      calibracion: rec.cal, umbralMV: rec.cal.uon, recalibraciones: rec.recal,
       resumen: { activaciones: acts.length, tiempoActivoS: tot, pctActivo: t > 0 ? 100 * tot / t : 0, maxContrS: Math.max(0, ...acts.map(a => a.durS)),
-        medContrS: acts.length ? tot / acts.length : 0, rmsNormMedio: acts.length ? acts.reduce((a, s) => a + s.pct, 0) / acts.length : null, descartadas: 0,
-        confirmaciones: resumenV.confirmadas, coinciden: resumenV.coinciden, noCoinciden: resumenV.noCoinciden },
-      activaciones: acts.map(a => ({ n: a.n, inicioS: a.inicioS, finS: a.inicioS + a.durS, durS: a.durS, rms: a.rms, mav: null, rmsNorm: a.pct }))
+        medContrS: acts.length ? tot / acts.length : 0, rmsMedio: acts.length ? acts.reduce((a, s) => a + s.rms, 0) / acts.length : null,
+        activacionEs: 'cabeza ' + (rec.cal.abajoEsActividad ? 'abajo' : 'arriba') },
+      activaciones: acts.map(a => ({ n: a.n, inicioS: a.inicioS, finS: a.inicioS + a.durS, durS: a.durS, rms: a.rms }))
     };
   }
-  function activationsCSV(r, p) {
-    const H = ['paciente', 'expediente', 'gmfcs', 'fecha_sesion', 'activacion', 'inicio_s', 'fin_s', 'duracion_s', 'rms_medio_mV', 'pct_del_umbral', 'media_basal_mV', 'umbral_on_mV'];
-    const c = r.calibracion || {};
-    const rows = r.activaciones.map(a => [fullName(p), p.expediente || '', p.gmfcs, r.fecha, a.n, a.inicioS, a.finS, a.durS, a.rms, a.rmsNorm, c.reposo !== undefined ? c.reposo : c.restMean, r.umbralMV]);
-    E.download(E.slug(fullName(p)) + '_' + r.fecha.slice(0, 16).replace(/[:T]/g, '-') + '_activaciones.csv', E.toCSV(H, rows));
-  }
-  function confirmacionesCSV(r, p) {
-    const H = ['paciente', 'expediente', 'fecha_sesion', 'evento', 'origen', 'periodo', 'solicitud', 'tiempo_terapia_s', 'hora_aprox', 'ventana_s', 'rms_medio_mV', 'rms_sd_mV', 'rms_min_mV', 'rms_max_mV',
-      'estado_rms', 'umbral_on_mV', 'umbral_off_mV', 'postura_confirmada', 'estado_confirmacion', 'resultado', 'calidad_ventana', 'calidad_basal'];
-    const niv = ['aceptada', 'con advertencias', 'rechazada', 'forzada'];
-    const rows = (r.confirmaciones || []).map(c => [fullName(p), p.expediente || '', r.fecha, c.id, c.origen, c.periodo, c.solicitud, c.tEventoS, c.horaVista, c.ventanaS, c.rmsMedio, c.rmsSD, c.rmsMin, c.rmsMax,
-      c.estadoRms, c.umbralOn, c.umbralOff, c.postura, c.estado, c.resultado, c.calidadVentana, niv[(r.calibraciones && r.calibraciones[0] ? r.calibraciones[0].calidadNivel : 0)] || '']);
-    E.download(E.slug(fullName(p)) + '_' + r.fecha.slice(0, 16).replace(/[:T]/g, '-') + '_confirmaciones.csv', E.toCSV(H, rows));
+  function activationsCSV(rec, p) {
+    const H = ['paciente', 'expediente', 'gmfcs', 'fecha_sesion', 'activacion', 'inicio_s', 'fin_s', 'duracion_s', 'rms_medio_mV', 'media_basal_mV', 'sd_basal_mV', 'umbral_on_mV', 'umbral_off_mV'];
+    const c = rec.calibracion || {};
+    const rows = rec.activaciones.map(a => [fullName(p), p.expediente || '', p.gmfcs, rec.fecha, a.n, a.inicioS, a.finS, a.durS, a.rms,
+      c.reposo !== undefined ? c.reposo : c.restMean, c.sd !== undefined ? c.sd : c.restSD, c.uon !== undefined ? c.uon : rec.umbralMV, c.uoff]);
+    E.download(E.slug(fullName(p)) + '_' + rec.fecha.slice(0, 16).replace(/[:T]/g, '-') + '_activaciones.csv', E.toCSV(H, rows));
   }
   $('btn-csv').addEventListener('click', () => {
     if (!rec) return;
     const r = buildRecord(), stamp = r.fecha.slice(0, 16).replace(/[:T]/g, '-');
-    confirmacionesCSV(r, patient); activationsCSV(r, patient);
-    E.download(E.slug(fullName(patient)) + '_' + stamp + '_rms_atril.csv', E.toCSV(['tiempo_s', 'rms_mV', 'estado', 'sostenido'], rec.rms));
-    toast('CSV descargados (confirmaciones, activaciones y RMS del atril)');
+    activationsCSV(r, patient);
+    E.download(E.slug(fullName(patient)) + '_' + stamp + '_rms_atril.csv', E.toCSV(['tiempo_s', 'rms_mV', 'mediana_mV', 'activacion'], rec.rms));
+    toast('CSV descargados (activaciones + RMS del atril)');
   });
   $('btn-finish').addEventListener('click', async () => {
     if (!rec || !confirm('¿Finalizar la terapia y guardar la sesión en el historial? El atril queda en pausa.')) return;
@@ -736,15 +505,15 @@
     if (S.sheetsUrl) {
       try {
         await E.sendToSheets(S.sheetsUrl, { tipo: 'sesion', paciente: S.sheetsName ? fullName(patient) : (patient.expediente || patient.id), gmfcs: patient.gmfcs,
-          fecha: r.fecha, duracionS: r.duracionS, electrodo: r.electrodo, posicion: r.posicion, fisio: r.fisio, notas: r.notas, resumen: r.resumen, activaciones: r.activaciones, confirmaciones: r.confirmaciones });
+          fecha: r.fecha, duracionS: r.duracionS, electrodo: r.electrodo, posicion: r.posicion, fisio: r.fisio, notas: r.notas, resumen: r.resumen, activaciones: r.activaciones });
       } catch (e) { toast('Sesión guardada, pero no se pudo enviar a Google Sheets.'); }
     }
-    rec = null; calPreparada = false; propuesta = null; toast('Sesión guardada en el historial'); show('history');
+    rec = null; toast('Sesión guardada en el historial'); show('history');
   });
 
   /* ---------- historial ---------- */
   const METRICS = { pctActivo: ['% del tiempo', '%'], maxContrS: ['Contracción más larga', 's'], medContrS: ['Duración media', 's'], activaciones: ['Activaciones', ''],
-    tiempoActivoS: ['Tiempo activo', 's'], rmsNormMedio: ['% del umbral', '%'], confirmaciones: ['Confirmaciones', ''] };
+    tiempoActivoS: ['Tiempo activo', 's'], rmsMedio: ['RMS medio', 'mV'] };
   function renderHistory() {
     const p = patient; if (!p) return show('search');
     const ses = E.Store.sessionsFor(p.id);
@@ -764,10 +533,10 @@
     const tb = $('h-body'); tb.innerHTML = '';
     ses.slice().reverse().forEach(s => {
       const r = s.resumen, tr = document.createElement('tr');
-      [fmtDateTime(s.fecha), clock(s.duracionS), r.activaciones, f1(r.tiempoActivoS), Math.round(r.pctActivo), f1(r.maxContrS), r.rmsNormMedio == null ? '—' : Math.round(r.rmsNormMedio)]
+      [fmtDateTime(s.fecha), clock(s.duracionS), r.activaciones, f1(r.tiempoActivoS), Math.round(r.pctActivo), f1(r.maxContrS), r.rmsMedio == null ? '—' : Math.round(r.rmsMedio)]
         .forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
       const td = document.createElement('td'), b = document.createElement('button'), d = document.createElement('button');
-      b.className = 'btn small ghost'; b.textContent = 'CSV'; b.addEventListener('click', () => { if (s.confirmaciones) confirmacionesCSV(s, p); activationsCSV(s, p); });
+      b.className = 'btn small ghost'; b.textContent = 'CSV'; b.addEventListener('click', () => activationsCSV(s, p));
       d.className = 'btn small ghost'; d.textContent = '🗑'; d.title = 'Eliminar sesión';
       d.addEventListener('click', () => { if (confirm('¿Eliminar esta sesión del historial?')) { E.Store.deleteSession(s.id); renderHistory(); } });
       td.append(b, ' ', d); tr.appendChild(td); tb.appendChild(tr);
@@ -776,9 +545,8 @@
   $('h-metric').addEventListener('change', renderHistory);
   $('btn-hist-csv').addEventListener('click', () => {
     const ses = E.Store.sessionsFor(patient.id);
-    const H = ['paciente', 'expediente', 'gmfcs', 'fecha', 'duracion_s', 'activaciones', 'tiempo_activo_s', 'pct_activo', 'max_contraccion_s', 'media_contraccion_s', 'pct_del_umbral_medio', 'confirmaciones', 'coinciden', 'no_coinciden', 'electrodo', 'posicion', 'fisio', 'notas'];
-    E.download(E.slug(fullName(patient)) + '_historial.csv', E.toCSV(H, ses.map(s => [fullName(patient), patient.expediente || '', patient.gmfcs, s.fecha, s.duracionS, s.resumen.activaciones, s.resumen.tiempoActivoS, s.resumen.pctActivo, s.resumen.maxContrS, s.resumen.medContrS, s.resumen.rmsNormMedio,
-      s.resumen.confirmaciones, s.resumen.coinciden, s.resumen.noCoinciden, s.electrodo, s.posicion, s.fisio, s.notas])));
+    const H = ['paciente', 'expediente', 'gmfcs', 'fecha', 'duracion_s', 'activaciones', 'tiempo_activo_s', 'pct_activo', 'max_contraccion_s', 'media_contraccion_s', 'rms_medio_mV', 'electrodo', 'posicion', 'fisio', 'notas'];
+    E.download(E.slug(fullName(patient)) + '_historial.csv', E.toCSV(H, ses.map(s => [fullName(patient), patient.expediente || '', patient.gmfcs, s.fecha, s.duracionS, s.resumen.activaciones, s.resumen.tiempoActivoS, s.resumen.pctActivo, s.resumen.maxContrS, s.resumen.medContrS, s.resumen.rmsMedio, s.electrodo, s.posicion, s.fisio, s.notas])));
   });
 
   /* ---------- ajustes ---------- */
@@ -787,27 +555,15 @@
     ['emgUsb', 'Señal EMG por USB (Web Serial) en vez de WiFi', 'checkbox'],
     ['fs', 'Frecuencia de muestreo (Hz) — igual que FS del Arduino'], ['adcMax', 'Máximo del ADC (14 bits = 16383)'], ['vref', 'Referencia ADC (mV)'],
     ['gain', 'Ganancia (1 = mV a la salida de Nova)'], ['hpHz', 'Pasa altas para ver la señal (Hz)'], ['notchHz', 'Frecuencia de la red (Hz)'], ['nArm', 'Notch: n.º de armónicos (7, como el Arduino)'],
-    ['nMinClase', 'Análisis: observaciones independientes mínimas por postura'], ['aucMin', 'Análisis: separación mínima (AUC, 0.5–1)'],
-    ['soundVerif', 'Pitido suave al aparecer una pregunta de verificación', 'checkbox'],
     ['sheetsUrl', 'URL de Google Sheets (Apps Script)', 'text'], ['sheetsName', 'Enviar nombre del paciente a Sheets', 'checkbox'], ['sound', 'Sonido en alarmas críticas', 'checkbox']
   ];
-  // Parámetros que viven en el ESP32 (se guardan allí, no en la página)
-  const FIELDS_ATRIL = [
-    ['basal', 'Calibración basal: duración (s)'], ['desc', 'Calibración basal: segundos que se descartan'], ['k', 'Umbral: K (U_ON = media + K × SD)'], ['f', 'Umbral: F (U_OFF = media + F × (U_ON − media))'],
-    ['tSost', 'Estado sostenido: segundos (y ventana de RMS)'], ['v1s', 'Primer periodo de verificación (s)'], ['v1max', 'Primer periodo: máximo de confirmaciones'], ['v1min', 'Primer periodo: intervalo mínimo (s)'],
-    ['vcs', 'Ciclos siguientes (s)'], ['vcmax', 'Cada ciclo: máximo de confirmaciones'], ['vcmin', 'Cada ciclo: intervalo mínimo (s)'], ['rever', 'Mismo estado prolongado: volver a comprobar tras (s)'],
-    ['resp', 'Tiempo para responder una pregunta (s)'], ['hip', 'Hipótesis a verificar: RMS alto ↔ cabeza erguida (1) o caída (0)']
-  ];
   $('btn-settings').addEventListener('click', () => {
-    const conectado = atrilConn.status === 'connected' && st;
     $('settings-fields').innerHTML = FIELDS.map(([k, label, type]) => {
       const t = type || 'number';
       return t === 'checkbox' ? '<label class="check"><input type="checkbox" id="set-' + k + '"> ' + label + '</label>'
         : '<label>' + label + '<input id="set-' + k + '" type="' + t + '" step="any"></label>';
-    }).join('') + '<h3 style="grid-column:1/-1;margin-top:.8rem">Parámetros del atril ' + (conectado ? '(se guardan en el ESP32)' : '(conecta el atril para cambiarlos)') + '</h3>' +
-      FIELDS_ATRIL.map(([k, label]) => '<label>' + label + '<input id="seta-' + k + '" type="number" step="any"' + (conectado ? '' : ' disabled') + '></label>').join('');
+    }).join('');
     FIELDS.forEach(([k, , type]) => { const el = $('set-' + k); if (type === 'checkbox') el.checked = !!S[k]; else el.value = S[k]; });
-    if (conectado) FIELDS_ATRIL.forEach(([k]) => { $('seta-' + k).value = st.cfg[k]; });
     $('dlg-settings').showModal();
   });
   $('btn-save-settings').addEventListener('click', () => {
@@ -818,19 +574,10 @@
       else if (type === 'text') next[k] = el.value.trim();
       else { const v = parseFloat(el.value); if (!isFinite(v) || v <= 0) { toast('Valor no válido en: ' + k); return; } next[k] = v; }
     }
-    const cambios = [];
-    if (atrilConn.status === 'connected' && st) {
-      for (const [k] of FIELDS_ATRIL) {
-        const v = parseFloat($('seta-' + k).value);
-        if (!isFinite(v)) { toast('Valor no válido en el parámetro del atril: ' + k); return; }
-        if (Math.abs(v - st.cfg[k]) > 1e-9) cambios.push([k, v]);
-      }
-    }
     const reconnect = next.ipArduino !== S.ipArduino || next.ipAtril !== S.ipAtril || next.emgUsb !== S.emgUsb;
-    S = next; E.Store.saveSettings(S); rebuildDsp(); chart.setWindow(S.winS); analisisSig = '';
-    cambios.forEach(([k, v]) => tarea('parámetro ' + k, () => atril.setCfg(k, v), s => Math.abs(s.cfg[k] - v) < 0.06));
+    S = next; E.Store.saveSettings(S); rebuildDsp(); chart.setWindow(S.winS);
     $('dlg-settings').close();
-    toast(reconnect && realOn() ? 'Ajustes guardados. Vuelve a pulsar «Conectar ASTRA» para usar la nueva conexión.' : cambios.length ? 'Ajustes guardados; parámetros del atril enviados.' : 'Ajustes guardados');
+    toast(reconnect && realOn() ? 'Ajustes guardados. Vuelve a pulsar «Conectar ASTRA» para usar la nueva conexión.' : 'Ajustes guardados');
   });
   $('btn-backup').addEventListener('click', () => E.download('backup-emg-' + new Date().toISOString().slice(0, 10) + '.json', E.Store.backup(), 'application/json'));
   $('btn-restore').addEventListener('click', () => $('file-restore').click());
@@ -839,37 +586,6 @@
     catch (err) { toast('No se pudo importar: ' + err.message); }
     e.target.value = '';
   });
-
-  /* ===================================================================
-   * Panel de pruebas de la simulación
-   * =================================================================== */
-  function simPanelSync() {
-    if (!sim) return;
-    sim.speed = +$('sp-speed').value || 1;
-    sim.esc.relacion = $('sp-rel').value; sim.esc.basal = $('sp-basal').value;
-    sim.esc.altoMean = +$('sp-alto').value || 150; sim.esc.bajoMean = +$('sp-bajo').value || 30;
-    auto.on = $('sp-auto').value === '1'; auto.err = Math.max(0, Math.min(100, +$('sp-err').value || 0)) / 100; auto.demora = Math.max(0, +$('sp-demora').value || 0);
-  }
-  ['sp-speed', 'sp-rel', 'sp-basal', 'sp-alto', 'sp-bajo', 'sp-auto', 'sp-err', 'sp-demora'].forEach(id => $(id).addEventListener('change', simPanelSync));
-  $('sp-up').addEventListener('click', () => { if (sim) sim.setPostura(true, true); });
-  $('sp-down').addEventListener('click', () => { if (sim) sim.setPostura(false, true); });
-  $('sp-rand').addEventListener('click', () => { if (sim) { sim.esc.prolongado = false; sim.esc.auto = true; sim.esc.resto = 1000; } });
-  $('sp-nodata').addEventListener('click', () => { if (sim) { sim.esc.sinDatos = true; setTimeout(() => { if (sim) sim.esc.sinDatos = false; }, 5000); } });
-  $('sp-disc').addEventListener('click', () => {
-    if (!atril) return;
-    const a = atril; a.pausar(true); toast('Página desconectada del atril 15 s (el atril sigue funcionando).');
-    setTimeout(() => { if (atril === a) { a.pausar(false); toast('Página reconectada: se resincroniza todo.'); } }, 15000);
-  });
-  /* La fisioterapeuta simulada responde con lo que «vio» cuando apareció la pregunta (con un % de error) */
-  function simAuto(s) {
-    if (!sim || !auto.on || !s.ver.pend) return;
-    const ev = evStore.get(evKey(s.boot, s.ver.pend));
-    if (!ev || ev.status !== 1 || respondidos.has(ev.key) || auto.visto === ev.key) return;
-    auto.visto = ev.key;
-    const vio = sim.verdadDe(ev.id), err = Math.random() < auto.err;   // lo que vio cuando apareció la pregunta
-    const p = (vio !== err) ? 'E' : 'C';
-    setTimeout(() => { const e = evStore.get(ev.key); if (e && e.status === 1 && !respondidos.has(e.key)) responder(e, p); }, auto.demora * 1000 / Math.max(1, sim.speed));
-  }
 
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
@@ -883,12 +599,10 @@
     const now = performance.now();
     if (now - rx.lastT >= 1000) { rx.fs = (rx.samples - rx.lastCount) * 1000 / (now - rx.lastT); rx.lastCount = rx.samples; rx.lastT = now; }
     renderConn();
-    revisarTareas();
-    if (view === 'session') { renderSession(); renderNotif(); }
+    if (view === 'session') renderSession();
     if (++tick % 2 === 0) evalAlarms(now);
   }, 250);
   window.addEventListener('resize', () => { if (view === 'history') progChart.draw(); });
   window.addEventListener('beforeunload', e => { if (rec) { e.preventDefault(); e.returnValue = ''; } });
   show('home');
-  window.__astra = { get st() { return st; }, get sim() { return sim; }, get rec() { return rec; }, evStore, get analisis() { return analisis; }, get propuesta() { return propuesta; }, get ajustes() { return ajustesLog; }, buildRecord: () => buildRecord() };
 })();

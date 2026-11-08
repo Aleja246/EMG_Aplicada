@@ -125,19 +125,19 @@
         <h2 id="s-name">—</h2>
         <p class="muted" id="s-dob">—</p>
       </div>
-      <div class="timer"><span class="muted">Tiempo efectivo de terapia</span><b id="s-time">00:00</b></div>
+      <div class="timer"><span class="muted">Tiempo de sesión</span><b id="s-time">00:00</b></div>
     </div>
 
-    <!-- Calibración basal: la hace el atril (ESP32) con el RMS en reposo -->
+    <!-- Calibración basal y sesión: las hace el atril (ESP32) -->
     <div class="card" id="cal-card">
       <div class="row-between">
-        <h3 id="cal-title">Calibración basal</h3>
+        <h3 id="cal-title">Calibración basal en el atril</h3>
         <span class="badge" id="atril-badge">—</span>
       </div>
       <details class="more" id="meta-box" open>
         <summary>Datos de la sesión</summary>
         <div class="grid3 session-meta">
-          <label>Músculo / lado de los electrodos<input id="m-electrodo" placeholder="p. ej. extensores cervicales, bilateral"></label>
+          <label>Músculo / lado de los electrodos<input id="m-electrodo" placeholder="p. ej. semiespinosos, bilateral"></label>
           <label>Posición del niño<input id="m-posicion" placeholder="p. ej. prono sobre cuña"></label>
           <label>Fisioterapeuta<input id="m-fisio"></label>
         </div>
@@ -149,49 +149,26 @@
         <button class="btn" id="btn-resume" type="button">Reanudar el atril</button>
       </div>
 
-      <div id="cal-intro" hidden>
-        <p>La calibración usa <b>solo el RMS en reposo</b> (unos 10 s). No se piden movimientos pasivos, contracciones voluntarias ni movimientos repetidos.</p>
-        <ol class="small-text muted">
-          <li>Coloca al niño en una postura cómoda y estable, con la cabeza apoyada.</li>
-          <li>El atril registra ~10 s de RMS y descarta el primer segundo (los filtros se estabilizan).</li>
-          <li>Se calcula la media y la desviación estándar basales y se evalúa la calidad de la señal.</li>
-          <li>Se obtiene un umbral <b>preliminar</b> individualizado, que se comprueba durante la terapia con tus confirmaciones.</li>
-        </ol>
-        <div class="form-actions left"><button class="btn primary" id="btn-cal-start" type="button">Comenzar calibración</button></div>
-      </div>
-
-      <div id="cal-steps" hidden>
-        <div class="basal-step" id="basal-step">
-          <p class="step-desc">Postura cómoda y estable, cabeza apoyada. No muevas al niño ni le pidas ningún movimiento durante el registro.</p>
-          <button class="btn primary" type="button" id="btn-basal">Registrar RMS basal (10 s)</button>
-        </div>
-        <div class="cue rest" id="cue" hidden>
-          <div class="cue-title">REPOSO</div>
-          <div class="cue-text">Cabeza apoyada y relajada. No mover al niño.</div>
-          <div class="cue-count" id="cue-count"></div>
-          <div class="bar"><div id="cue-bar"></div></div>
-          <p class="cue-note" id="cue-note"></p>
-          <button class="btn ghost small" id="btn-phase-cancel" type="button">Cancelar el registro</button>
-        </div>
+      <!-- Mientras el atril registra el RMS basal (empieza solo al encontrar el tope o con «Recalibrar») -->
+      <div class="cue rest" id="cue" hidden>
+        <div class="cue-title">REGISTRO BASAL</div>
+        <div class="cue-text">Cabeza apoyada y estable. No pedir contracciones.</div>
+        <div class="cue-count" id="cue-count"></div>
+        <div class="bar"><div id="cue-bar"></div></div>
+        <p class="cue-note" id="cue-note"></p>
       </div>
 
       <div id="cal-result" hidden>
-        <p><b id="cal-result-title">Calibración lista.</b> <span class="muted" id="cal-result-sub"></span></p>
+        <p><b id="cal-result-title">Calibración basal.</b> <span class="muted" id="cal-result-sub"></span></p>
         <div class="cal-grid" id="cal-values"></div>
         <ul class="warnings" id="cal-warnings"></ul>
-        <p class="callout" id="cal-prelim">El umbral es <b>preliminar</b>: se comprobará durante la terapia con las confirmaciones de la fisioterapeuta y la sesión empieza en modo <b>supervisado</b> (el umbral aún no controla los actuadores).</p>
-        <div class="form-actions left">
-          <button class="btn primary" id="btn-run-start" type="button">▶ Iniciar sesión</button>
-          <button class="btn ghost" id="btn-cal-redo" type="button">Repetir el registro basal</button>
-          <button class="btn ghost danger-text" id="btn-force" type="button" hidden>Aceptar de todas formas</button>
-        </div>
       </div>
 
       <div id="attach" hidden>
-        <p>El atril ya está en sesión con una calibración anterior (<span id="attach-thr"></span>).</p>
+        <p>El atril ya está en sesión con esta calibración. Pulsa para empezar a registrar los datos del paciente.</p>
         <div class="form-actions left">
-          <button class="btn primary" id="btn-attach" type="button">Registrar la sesión desde ahora</button>
-          <button class="btn ghost" id="btn-attach-cal" type="button">Comenzar calibración nueva</button>
+          <button class="btn primary" id="btn-attach" type="button">▶ Registrar la sesión desde ahora</button>
+          <button class="btn ghost" id="btn-attach-cal" type="button">Recalibrar primero</button>
         </div>
       </div>
 
@@ -199,7 +176,10 @@
         <p class="muted small-text" id="cal-compact"></p>
         <div class="form-actions left">
           <button class="btn" id="btn-pause" type="button">Pausa</button>
+          <button class="btn ghost" id="btn-thr-down" type="button" title="Factor de la SD − 0.5">Umbral −</button>
+          <button class="btn ghost" id="btn-thr-up" type="button" title="Factor de la SD + 0.5">Umbral +</button>
           <button class="btn ghost" id="btn-recal" type="button">Recalibrar</button>
+          <button class="btn ghost" id="btn-invert" type="button" title="Cambia qué estado del EMG cuenta como cabeza abajo">Invertir abajo / arriba</button>
         </div>
       </div>
     </div>
@@ -210,9 +190,8 @@
         <h3>Señal EMG del Arduino (tiempo real)</h3>
         <div class="legend">
           <span><i class="sw sw-signal"></i>EMG filtrada</span>
-          <span><i class="sw sw-valid"></i>Estado ALTO sostenido</span>
-          <span><i class="sw sw-blue"></i>Estado BAJO sostenido</span>
-          <span><i class="sw sw-cal"></i>Registro basal</span>
+          <span><i class="sw sw-valid"></i>Activación (RMS sobre U_on)</span>
+          <span><i class="sw sw-cal"></i>Calibración basal</span>
           <label class="inline">Ventana
             <select id="win-sel"><option value="10">10 s</option><option value="15" selected>15 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
           </label>
@@ -227,126 +206,45 @@
       <div class="row-between">
         <h3>RMS que recibe el atril (cada 100 ms)</h3>
         <div class="legend">
-          <span><i class="sw sw-env"></i>RMS</span>
-          <span><i class="sw sw-thr"></i>U_ON / U_OFF</span>
-          <span><i class="sw sw-rest"></i>Media basal</span>
+          <span><i class="sw sw-env"></i>Mediana 0.5 s (la que decide)</span>
+          <span><i class="sw sw-signal"></i>RMS</span>
+          <span><i class="sw sw-thr"></i>U_on / U_off</span>
+          <span><i class="sw sw-rest"></i>Reposo</span>
+          <span><i class="sw sw-valid"></i>Activación</span>
+          <span><i class="sw sw-used"></i>Usado en la calibración</span>
         </div>
       </div>
       <canvas id="rms" class="rms"></canvas>
       <div class="readouts" id="readouts"></div>
-    </div>
-
-    <!-- Verificación con la fisioterapeuta -->
-    <div class="card" id="ver-card">
-      <div class="row-between">
-        <h3>Verificación del umbral</h3>
-        <span class="badge" id="ver-badge">—</span>
-      </div>
-      <p class="muted small-text">El atril detecta estados musculares sostenidos y la página te pregunta de vez en cuando cómo está la cabeza del niño, para comprobar si el umbral interpreta bien la postura. No se asume que RMS alto sea cabeza erguida: eso es justo lo que se verifica.</p>
-      <p id="ver-status"></p>
-      <div class="bar"><div id="ver-bar"></div></div>
-      <div class="manual-row">
-        <span class="muted small-text">Confirmación manual (cuando tú lo consideres necesario):</span>
-        <button class="btn small ghost" type="button" data-manual="E">Cabeza y cuello erguidos</button>
-        <button class="btn small ghost" type="button" data-manual="C">Cabeza y cuello caídos</button>
-        <button class="btn small ghost" type="button" data-manual="D">No se puede determinar</button>
-      </div>
-      <div class="chips" id="ver-chips"></div>
-      <div class="table-wrap">
-        <table id="conf-table">
-          <thead><tr><th>#</th><th>Hora</th><th>Origen</th><th>Periodo</th><th>RMS medio ± SD (mín–máx)</th><th>Estado RMS</th><th>U_ON / U_OFF</th><th>Postura confirmada</th><th>Resultado</th><th>Calidad</th></tr></thead>
-          <tbody id="conf-body"><tr><td colspan="10" class="muted">Sin confirmaciones todavía.</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Ajuste adaptativo -->
-    <div class="card" id="aj-card">
-      <div class="row-between">
-        <h3>¿El umbral está funcionando?</h3>
-        <span class="badge" id="aj-badge">—</span>
-      </div>
-      <p><b id="aj-titulo">—</b></p>
-      <p class="muted" id="aj-motivo"></p>
-      <ul class="small-text muted" id="aj-detalles"></ul>
-      <div class="cal-grid" id="aj-nums"></div>
-      <div class="propuesta" id="aj-prop" hidden>
-        <h4>Propuesta de ajuste</h4>
-        <table class="mini">
-          <thead><tr><th></th><th>Umbral actual</th><th>Umbral propuesto</th></tr></thead>
-          <tbody>
-            <tr><td>U_ON</td><td id="pp-on0"></td><td id="pp-on1"></td></tr>
-            <tr><td>U_OFF</td><td id="pp-off0"></td><td id="pp-off1"></td></tr>
-            <tr><td>Exactitud balanceada</td><td id="pp-bal0"></td><td id="pp-bal1"></td></tr>
-            <tr><td>Falsos positivos / negativos</td><td id="pp-err0"></td><td id="pp-err1"></td></tr>
-          </tbody>
-        </table>
-        <p class="muted small-text">Nada cambia en el atril hasta que lo apruebes. Si lo rechazas, el umbral actual se conserva.</p>
-        <div class="form-actions left">
-          <button class="btn green" id="btn-aprobar" type="button">Aprobar y enviar al atril</button>
-          <button class="btn ghost" id="btn-rechazar" type="button">Rechazar</button>
-        </div>
-      </div>
-      <div class="form-actions left">
-        <button class="btn ghost" id="btn-restaurar" type="button" hidden>Restaurar el umbral anterior</button>
-        <button class="btn ghost" id="btn-control" type="button" hidden></button>
-      </div>
-      <details class="more"><summary>Historial de umbrales y ajustes</summary>
-        <ul class="small-text" id="aj-hist"></ul>
-      </details>
+      <div class="gauge-row"><span class="muted">Nivel (100 % = en U_on)</span>
+        <div class="gauge"><div id="gauge-fill"></div><div id="gauge-mark"></div></div>
+        <b id="gauge-val">—</b></div>
     </div>
 
     <!-- Métricas -->
     <div class="kpis">
-      <div class="kpi"><span>Estados sostenidos detectados</span><b id="k-det">0</b><small id="k-est"></small></div>
-      <div class="kpi"><span>Confirmaciones</span><b id="k-conf">0</b><small id="k-coin"></small></div>
-      <div class="kpi"><span>Preguntas en este periodo</span><b id="k-per">—</b><small id="k-perdet"></small></div>
-      <div class="kpi"><span>Activaciones RMS (≥ U_ON)</span><b id="k-count">0</b><small id="k-active"></small></div>
-      <div class="kpi"><span>Tiempo efectivo de terapia</span><b id="k-time">00:00</b><small id="k-cal"></small></div>
+      <div class="kpi"><span id="k-count-label">Veces cabeza abajo</span><b id="k-count">0</b><small id="k-disc"></small></div>
+      <div class="kpi"><span id="k-active-label">Tiempo con la cabeza abajo</span><b id="k-active">0.0 s</b><small id="k-pct"></small></div>
+      <div class="kpi"><span>Episodio más largo</span><b id="k-max">0.0 s</b><small id="k-cur"></small></div>
+      <div class="kpi"><span>RMS medio de las activaciones</span><b id="k-rms">—</b><small id="k-rms-sub">mV (RMS sobre el umbral)</small></div>
+      <div class="kpi"><span>Tiempo total de sesión</span><b id="k-time">00:00</b><small id="k-cal"></small></div>
     </div>
 
-    <!-- Activaciones RMS -->
-    <details class="card">
-      <summary><b>Activaciones RMS</b> <span class="muted small-text">(RMS sobre U_ON ≥ 300 ms; sin confirmar la postura)</span></summary>
+    <!-- Tabla -->
+    <div class="card">
+      <h3>Activaciones detectadas por el atril (RMS sobre U_on)</h3>
       <div class="table-wrap">
         <table id="act-table">
-          <thead><tr><th>Activación</th><th>Inicio</th><th>Duración (s)</th><th>RMS medio (mV)</th><th>% del umbral</th></tr></thead>
-          <tbody id="act-body"><tr><td colspan="5" class="muted">Sin activaciones todavía.</td></tr></tbody>
+          <thead><tr><th>Activación</th><th>Inicio</th><th>Duración (s)</th><th>RMS medio (mV)</th></tr></thead>
+          <tbody id="act-body"><tr><td colspan="4" class="muted">Sin activaciones todavía.</td></tr></tbody>
         </table>
       </div>
-    </details>
+    </div>
 
     <!-- Mensajes del atril -->
     <details class="card" id="log-card">
       <summary><b>Mensajes del atril</b> <span class="muted small-text">(los mismos del monitor serie del ESP32)</span></summary>
       <pre id="log" class="log"></pre>
-    </details>
-
-    <!-- Panel de pruebas (solo con la simulación) -->
-    <details class="card" id="sim-panel" hidden open>
-      <summary><b>Panel de pruebas de la simulación</b> <span class="muted small-text">(no existe con el hardware real)</span></summary>
-      <div class="grid3">
-        <label>Velocidad del tiempo
-          <select id="sp-speed"><option value="1">1× (tiempo real)</option><option value="10">10×</option><option value="60">60×</option><option value="300">300×</option></select></label>
-        <label>Relación RMS ↔ postura
-          <select id="sp-rel"><option value="normal">Normal (erguido = RMS alto)</option><option value="invertida">Invertida (caído = RMS alto)</option><option value="ninguna">Sin relación</option></select></label>
-        <label>Calidad del registro basal (próximo registro)
-          <select id="sp-basal"><option value="normal">Normal</option><option value="ruidoso">Ruidoso</option><option value="plano">Plano</option><option value="nulo">Casi nulo</option><option value="deriva">Deriva moderada</option><option value="deriva2">Deriva fuerte</option><option value="saturado">Saturado</option></select></label>
-        <label>RMS con cabeza erguida (mV)<input id="sp-alto" type="number" value="150"></label>
-        <label>RMS con cabeza caída (mV)<input id="sp-bajo" type="number" value="30"></label>
-        <label>Respuestas automáticas
-          <select id="sp-auto"><option value="0">No (respondo yo)</option><option value="1">Sí, con la postura real</option></select></label>
-        <label>Error de la fisioterapeuta simulada (%)<input id="sp-err" type="number" value="0" min="0" max="100"></label>
-        <label>Demora al responder (s)<input id="sp-demora" type="number" value="4" min="0"></label>
-        <div><span class="muted small-text">Postura real del niño simulado:</span> <b id="sp-real">—</b></div>
-      </div>
-      <div class="form-actions left">
-        <button class="btn small ghost" type="button" id="sp-up">Mantener cabeza erguida</button>
-        <button class="btn small ghost" type="button" id="sp-down">Mantener cabeza caída</button>
-        <button class="btn small ghost" type="button" id="sp-rand">Postura cambiante</button>
-        <button class="btn small ghost" type="button" id="sp-disc">Cortar la página 15 s</button>
-        <button class="btn small ghost" type="button" id="sp-nodata">Sin datos del Arduino 5 s</button>
-      </div>
     </details>
 
     <div class="form-actions bottom">
@@ -371,12 +269,12 @@
         <h3>Progreso entre sesiones</h3>
         <label class="inline">Métrica
           <select id="h-metric">
-            <option value="pctActivo">% del tiempo con cabeza arriba</option>
-            <option value="maxContrS">Contracción más larga (s)</option>
-            <option value="medContrS">Duración media de contracción (s)</option>
-            <option value="activaciones">N.º de activaciones válidas</option>
+            <option value="pctActivo">% del tiempo con activación (RMS sobre el umbral)</option>
+            <option value="maxContrS">Episodio más largo (s)</option>
+            <option value="medContrS">Duración media de los episodios (s)</option>
+            <option value="activaciones">N.º de activaciones</option>
             <option value="tiempoActivoS">Tiempo activo válido total (s)</option>
-            <option value="rmsNormMedio">Esfuerzo medio (% de la referencia)</option>
+            <option value="rmsMedio">RMS medio de las activaciones (mV)</option>
           </select>
         </label>
       </div>
@@ -388,7 +286,7 @@
     <div class="card">
       <h3>Sesiones</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Fecha</th><th>Duración</th><th>Activ.</th><th>T. activo (s)</th><th>% activo</th><th>Máx (s)</th><th>Esfuerzo (%)</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Duración</th><th>Activ.</th><th>T. activo (s)</th><th>% activo</th><th>Máx (s)</th><th>RMS medio (mV)</th><th></th></tr></thead>
         <tbody id="h-body"></tbody>
       </table></div>
     </div>
@@ -414,21 +312,10 @@
   </form>
 </dialog>
 
-<aside id="notif" class="notif" hidden role="status" aria-live="polite">
-  <p class="notif-q" id="notif-q">Se detectó un estado muscular sostenido. ¿El niño tiene la cabeza y el cuello erguidos?</p>
-  <div class="notif-btns">
-    <button class="btn small green" type="button" data-resp="E">Sí, cabeza y cuello erguidos.</button>
-    <button class="btn small blue" type="button" data-resp="C">No, cabeza y cuello caídos.</button>
-    <button class="btn small ghost" type="button" data-resp="D">No se puede determinar / descartar.</button>
-  </div>
-  <p class="notif-meta" id="notif-meta"></p>
-</aside>
-
 <div id="toast" class="toast" hidden></div>
 
 <script src="js/dsp.js"></script>
 <script src="js/sources.js"></script>
-<script src="js/analisis.js"></script>
 <script src="js/atril.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/charts.js"></script>

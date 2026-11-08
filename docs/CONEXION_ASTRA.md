@@ -1,89 +1,76 @@
-# Conexión de la página con ASTRA (Arduino + atril ESP32)
+# ASTRA + página web: cómo funciona y cómo conectarlo
 
-La página ahora trabaja con los **dos** aparatos del sistema ASTRA al mismo tiempo:
+## Qué hace cada parte
 
-| Aparato | Qué le da a la página | Cómo |
+```
+Electrodos → Nova → Arduino UNO R4 WiFi ──opto: RMS cada 100 ms──→ ESP32 (atril) → estrellas, lazy susan, luz, música
+                         │  red WiFi "ASTRA"                               │ WiFi
+                         └── señal EMG cruda (1000/s) ──→ LAPTOP ←── estado, activaciones, comandos ──┘
+                                                        (página)
+```
+
+| Parte | Programa | Qué hace |
 |---|---|---|
-| **Arduino UNO R4 WiFi** (`firmware/arduino_emg`) | La **señal EMG cruda** (1000 muestras/s, no el RMS) para verla en tiempo real | WiFi: crea la red **ASTRA** y manda la señal en `http://192.168.4.1/stream` |
-| **Atril ESP32** (`firmware/esp32_calibracion`) | Su estado en vivo: fase de calibración, RMS de cada bloque, umbrales, activaciones y mensajes. Recibe los pasos de la calibración. | WiFi: se une a la red ASTRA con la IP fija `192.168.4.200` (`/estado` y `/cmd`) |
+| **Arduino UNO R4 WiFi** | `firmware/arduino_emg/arduino_emg.ino` (v4) | Lee la señal 1000 veces/s, quita DC, 60 Hz y armónicos, y cada 100 ms manda **un número (RMS en mV) al ESP32 por el opto** (igual que tu v2). Además crea la red WiFi **ASTRA** y manda la **señal cruda** a la página en `http://192.168.4.1/stream`. |
+| **ESP32 (atril)** | `firmware/esp32_calibracion/esp32_calibracion.ino` (v5.1) | Tu v5 sin cambios en lo que hace: calibración basal automática, mediana de 0.5 s, umbrales, «cabeza abajo», estrellas, lazy susan, luz y música. Lo nuevo: se une a la red ASTRA (`http://192.168.4.200`) y le cuenta a la página todo lo que mide. |
+| **Página** | `index.html` | Muestra la señal EMG del Arduino y el RMS del atril en tiempo real, y **guarda la sesión del paciente con los datos que da el ESP32** (activaciones, tiempos, RMS, calibración). Manda los mismos comandos que el monitor serie. |
 
-```
-Electrodos → Nova → Arduino R4 ──opto (RMS cada 100 ms, sin cambios)──→ ESP32 → motores, luz, sonido
-                       │  WiFi "ASTRA"                                      │ WiFi
-                       └──── señal cruda ──→  LAPTOP (página)  ←── estado / comandos ──┘
-```
+El opto sigue siendo el único enlace entre el Arduino y el ESP32. Si la página o el WiFi fallan, el atril funciona igual que antes.
+Todo es inalámbrico: la laptop no toca la tierra del niño ni la del atril (cada placa con su power bank).
 
-- **La calibración y la detección siguen en el ESP32**, igual que antes. La página no decide nada:
-  manda los pasos y muestra lo que mide el atril.
-- **El opto sigue siendo el único enlace entre el Arduino y el ESP32.** Si la página o el WiFi fallan,
-  el atril sigue funcionando (y se puede calibrar con el botón BOOT).
-- **Seguridad eléctrica:** como todo es inalámbrico, la laptop no toca la tierra del niño ni la del atril.
-  Ambos aparatos siguen con su propio power bank.
+## Cómo decide el ESP32 (v5)
 
-## 1. Cargar los programas (una vez)
+1. **Arranque:** las estrellas buscan el microswitch (ahí queda la posición 0).
+2. **Calibración basal automática (10 s, luz azul):** cabeza apoyada y estable, sin pedir contracciones.
+   Se descarta el primer segundo. Con la **mediana de 0.5 s** del RMS calcula
+   - μ = media basal, σ = desviación estándar (mínimo 0.5 mV)
+   - **U_on = μ + máx(2·σ, 2 mV)** (el factor 2 se cambia con «Umbral +/−» de 0.5 en 0.5)
+   - **U_off = μ + 0.6·(U_on − μ)**
+   Termina a los 10 s por reloj. Si llegaron menos de 20 bloques conserva los umbrales anteriores; si la señal fue inestable (σ/μ > 50 %) solo avisa.
+3. **Sesión:** cuando la mediana pasa **U_on durante 300 ms** empieza una activación; termina cuando baja de **U_off durante 300 ms**.
+   Con `ABAJO_ES_ACTIVIDAD = true`, activación = **cabeza abajo**: estrellas aceleran de 600 a 1000 pasos/s, luz brillante y colores rápidos.
+   Al **subir** la cabeza (tras ≥ 1 s abajo) cambia la canción.
+4. **Seguridad:** sin datos 500 ms → estrellas lentas y luz ámbar.
 
-1. **Arduino** (placa «Arduino UNO R4 WiFi»): abre `firmware/arduino_emg/arduino_emg.ino` y súbelo.
-   Si el monitor serie dice «No responde el módulo WiFi», actualiza el firmware del módulo:
-   IDE 2 → *Herramientas → Firmware Updater*.
-2. **ESP32** (placa «ESP32 Dev Module»): abre `firmware/esp32_calibracion/esp32_calibracion.ino` y súbelo.
-   Necesita la biblioteca AccelStepper (como antes); WiFi y WebServer vienen con las placas ESP32.
-3. El nombre y la clave de la red están al inicio de **los dos** programas y deben ser iguales:
-   `RED_SSID = "ASTRA"`, `RED_CLAVE = "astra2026"`. Cámbialos si quieres, en ambos.
+## Primera vez: cargar los programas
 
-## 2. Cada sesión
+1. **Arduino** (placa «Arduino UNO R4 WiFi»): `firmware/arduino_emg/arduino_emg.ino`. Si dice «No responde el módulo WiFi», actualiza el firmware del módulo (IDE 2 → *Herramientas → Firmware Updater*).
+2. **ESP32** («ESP32 Dev Module»): `firmware/esp32_calibracion/esp32_calibracion.ino`. Necesita AccelStepper; WiFi y WebServer vienen con las placas ESP32.
+3. La red y la clave están al inicio de **los dos** programas y deben ser iguales: `RED_SSID = "ASTRA"`, `RED_CLAVE = "astra2026"`.
 
-1. Enciende el Arduino y el atril (power banks). En unos segundos aparece la red WiFi **ASTRA**.
-2. Conecta la laptop a la red **ASTRA** (clave `astra2026`). No tiene internet: es normal.
-   En Windows, si ofrece cambiarse a otra red «con internet», di que no.
-3. Abre la página **desde el archivo**: doble clic en `index.html` (Chrome o Edge).
-   - Desde GitHub Pages (`https://…github.io`) el navegador bloquea las direcciones `http://192.168…`
-     de la red local, o pide permiso de «dispositivos de la red local». Si sale ese permiso, acéptalo;
-     si no funciona, usa el archivo local.
-4. Pulsa **Conectar ASTRA**. Arriba a la derecha deben quedar dos indicadores verdes:
-   **EMG (WiFi): 1000 Hz** y **Atril: CALIBRANDO · ESPERA** (o el modo en que esté).
-5. Busca o registra al paciente y pulsa **Iniciar terapia**.
+## Cada sesión
 
-## 3. Calibración y sesión (versión 4: calibración basal + verificación)
+1. Enciende el Arduino y el atril. En unos segundos aparece la red **ASTRA**.
+2. Conecta la laptop a la red **ASTRA** (clave `astra2026`; no tiene internet, es normal).
+3. Abre `index.html` **desde el archivo** (doble clic, Chrome o Edge) y pulsa **Conectar ASTRA**.
+   Desde GitHub Pages (`https://…`) el navegador bloquea las direcciones `http://192.168…` de la red local.
+4. Busca o registra al paciente → **Iniciar terapia**.
+5. **Si el atril todavía está calibrando** (o buscando el tope), la página muestra la cuenta regresiva del registro basal y,
+   al terminar, **empieza a registrar la sesión sola**.
+   **Si el atril ya estaba en sesión**, pulsa **Registrar la sesión desde ahora** (o **Recalibrar primero**).
+6. Durante la sesión: **Pausa / Seguir**, **Umbral − / +**, **Recalibrar**, **Invertir abajo / arriba** (tecla `x`).
+7. **Finalizar terapia** guarda la sesión en el historial del paciente y deja el atril en pausa. **Guardar datos en CSV** descarga las activaciones y el RMS.
 
-La calibración de reposo + pasiva + 5 repeticiones activas **ya no existe**. Ahora es una calibración **basal** (solo ~10 s de RMS en reposo) seguida de una sesión **supervisada** con confirmaciones de la fisioterapeuta. Todo está explicado, paso a paso, en [`CALIBRACION_BASAL.md`](CALIBRACION_BASAL.md).
+## Qué se guarda del paciente (todo lo mide el ESP32)
 
-Resumen de los botones: **Comenzar calibración** → **Registrar RMS basal (10 s)** → revisar calidad y umbral preliminar → **Iniciar sesión**. Durante la sesión la página muestra avisos discretos de verificación, y desde ahí puedes hacer confirmaciones manuales, aprobar/rechazar ajustes del umbral y restaurar el anterior.
+- Cada activación: inicio, duración y RMS medio (mV).
+- Resumen: número de activaciones, tiempo total con la cabeza abajo y % de la sesión, episodio más largo, duración media, RMS medio.
+- Calibración usada: μ, σ, σ/μ, bloques, factor, U_on, U_off, avisos, y si «activación» = cabeza abajo o arriba.
+- Datos de la sesión que escribes tú: músculo/electrodos, posición, fisioterapeuta, notas.
+- En **Historial** se grafica el progreso entre sesiones.
 
-## 4. Durante la sesión
-
-- **Señal EMG del Arduino** y **RMS que recibe el atril** (con U_ON, U_OFF y la media basal), igual que antes.
-- **Verificación del umbral**, **¿El umbral está funcionando?** y el aviso flotante de confirmación: ver `CALIBRACION_BASAL.md`.
-- **Mensajes del atril:** los mismos textos del monitor serie del ESP32.
-- **Finalizar terapia** guarda la sesión (con calibración, confirmaciones, ajustes y parámetros) y deja el atril en pausa.
-
-## 5. Si algo no conecta
+## Si algo no conecta
 
 | Indicador | Qué revisar |
 |---|---|
-| EMG: no se pudo conectar | ¿La laptop está en la red ASTRA? Abre `http://192.168.4.1` en el navegador: debe decir «ASTRA - Arduino EMG v4». |
-| Atril: sin respuesta | Abre `http://192.168.4.200`: debe decir «ASTRA - atril ESP32 v3.0». En el monitor serie del ESP32 debe salir «WiFi conectado a la red ASTRA». El ESP32 tiene que encenderse después o al mismo tiempo que el Arduino (si no, reintenta cada 15 s). |
-| Alarma «El atril no recibe el RMS del Arduino» | Es el opto, no el WiFi: cable del opto, Arduino encendido. |
-| Funciona en archivo local pero no en GitHub Pages | Es el bloqueo del navegador explicado arriba: usa el archivo local. |
-| La señal EMG se corta a ratos | Acerca la laptop al Arduino. El atril no se ve afectado. |
+| EMG: no se pudo conectar | ¿Laptop en la red ASTRA? Abre `http://192.168.4.1`: debe decir «ASTRA - Arduino EMG v4». |
+| Atril: sin respuesta | Abre `http://192.168.4.200`: debe decir «ASTRA - atril ESP32 v5.1». El monitor serie del ESP32 debe decir «WiFi conectado a la red ASTRA» (reintenta cada 15 s si el Arduino arrancó después). |
+| «El atril no recibe el RMS del Arduino» | Es el opto, no el WiFi: cable del opto y Arduino encendido. |
+| Funciona en el archivo local pero no en GitHub Pages | Bloqueo del navegador (ver arriba): usa el archivo local. |
 
-Las IP se cambian en **Ajustes** (IP del Arduino, IP del atril). Si un día prefieres la señal por cable,
-pon `USB_PARA_PAGINA = true` en el Arduino y marca «Señal EMG por USB» en Ajustes. En ese caso la laptop
-**no debe estar cargando** mientras el USB toca a un niño con electrodos.
+Las IP se cambian en **Ajustes**. Si prefieres la señal por cable, pon `USB_PARA_PAGINA = true` en el Arduino y marca
+«Señal EMG por USB» en Ajustes; en ese caso la laptop **no debe estar cargando** mientras el USB toca a un niño con electrodos.
 
-## 6. Qué cambió en los programas (v3.0, calibración por pasos)
-
-> La versión 4.0 del ESP32 reemplaza esa calibración por la basal; el Arduino no cambió. Ver `CALIBRACION_BASAL.md`.
-
-- **Arduino v4:** el muestreo de 1 kHz pasó a una interrupción de temporizador, porque el WiFi del R4
-  hace esperas de varios milisegundos. Las líneas del opto salen de una cola de 6.4 s, siempre completas.
-  El procesamiento y el formato que recibe el ESP32 no cambian.
-- **ESP32 v3.0:** calibración paso a paso, WiFi en el núcleo 0 (los motores siguen en el núcleo 1 y la
-  página no los frena), y cada sesión nueva reinicia el conteo de activaciones y el tiempo (sin pausas).
-  Las reglas de calibración y detección no cambian.
-
-**Límite que sigue igual** (ver el documento del sistema): U_off = 0.6 × U_on puede quedar por debajo
-del reposo, y entonces una activación casi nunca termina. La página lo advierte al terminar la calibración.
-
-**No probado en hardware.** Los programas se revisaron con un compilador de C++, pero no se compilaron con
-las placas reales. Revisa en el monitor serie que el Arduino diga «Red WiFi ASTRA lista» y que el
-ESP32 diga «WiFi conectado».
+**Probado sin hardware:** la lógica del ESP32 v5.1 se ejecutó en la computadora con el mismo escenario que tu v5 y
+produce exactamente los mismos mensajes; la página se probó contra ella por HTTP y con la simulación.
+Falta compilarlo y probarlo en las placas reales.

@@ -1,2 +1,0 @@
-#pragma once
-class AccelStepper { public: enum { HALF4WIRE=8 }; AccelStepper(int,int,int,int,int,bool){} void enableOutputs(){} void disableOutputs(){} long currentPosition(){return 0;} void setCurrentPosition(long){} float speed(){return 0;} void moveTo(long){} void stop(){} void setMaxSpeed(float){} void setSpeed(float){} void setAcceleration(float){} bool runSpeed(){return false;} long distanceToGo(){return 0;} bool run(){return false;} };

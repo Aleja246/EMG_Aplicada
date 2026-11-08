@@ -1,87 +1,99 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v4.0
-//  Calibracion BASAL individualizada + verificacion supervisada.
+//  ASTRA - Firmware del atril (ESP32) v5.1 (con pagina web)
+//  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
-//  Entrada: el Arduino UNO R4 WiFi (arduino_emg.ino) manda por el opto,
-//  cada 100 ms, una linea con el RMS en milivoltios ("640\n"). El Arduino
-//  sigue siendo quien procesa la senal y calcula el RMS; el opto sigue
-//  siendo el unico enlace entre los dos lados.
+//  Entrada: el Arduino UNO R4 (diagnostico_emg_enlace.ino) manda por el
+//  opto, cada 100 ms, una linea con el RMS en milivoltios ("640\n").
 //
 //  Que hace:
-//   1. ARRANQUE (igual que antes): sube las estrellas hasta el microswitch.
-//      El lazy susan empieza a girar desde el encendido.
-//   2. CALIBRANDO - calibracion BASAL: solo RMS en reposo. NO se piden
-//      movimientos pasivos, contracciones voluntarias ni MVC.
-//        "Comenzar calibracion" -> espera
-//        "Registrar basal"      -> ~10 s de RMS con el nino comodo y la cabeza
-//                                  apoyada (se descarta el 1.er segundo)
-//      Se calcula la media y la SD del RMS basal y se evalua la calidad
-//      (una senal inestable se RECHAZA). Si es aceptable:
-//        U_ON  = media + K x SD                   (K = 3)
-//        U_OFF = media + F x (U_ON - media)       (F = 0.6)
-//      Ese umbral es PRELIMINAR: se comprueba durante la terapia con las
-//      confirmaciones de la fisioterapeuta.
-//   3. SESION (supervisada):
-//      - Estado sostenido: el RMS suavizado cruza U_ON (ALTO) o U_OFF (BAJO)
-//        y se mantiene T_SOST (3 s) con histeresis. Eso solo lo hace
-//        "candidato a confirmacion"; no genera un aviso cada 3 s.
-//      - Verificacion: la pagina pregunta a la fisioterapeuta si la cabeza y el
-//        cuello estan erguidos. Maximo 4 preguntas automaticas en los primeros
-//        5 min y 3 en cada ciclo de 10 min, con intervalo minimo entre ellas
-//        (45 s / 120 s). El ESP32 lleva los contadores y los temporizadores
-//        (sin bloquear nada) con el tiempo EFECTIVO de terapia (la pausa no cuenta).
-//      - Cada pregunta guarda la ventana de RMS del EVENTO (media, SD, min, max),
-//        no la del momento en que se responde.
-//      - Ajuste del umbral: lo propone la pagina; solo se aplica aqui si la
-//        fisioterapeuta lo aprueba (/umbral). Se puede restaurar el anterior.
-//      - MODO SUPERVISADO: mientras no haya evidencia suficiente, el umbral NO
-//        controla los actuadores (estrellas lentas, luz azul tenue, sin sonido).
-//        La pagina puede habilitar el control automatico (tecla a) cuando el
-//        analisis lo respalda. CONTROL_AUTOMATICO_INICIAL = true lo habilita desde
-//        el arranque.
-//      - Estrellas, planetas, luz y sonido: mismas reglas de siempre.
+//   1. ARRANQUE: las estrellas buscan el microswitch; ahi queda la posicion 0
+//      y empieza su ciclo (como motor_endstop.ino). El lazy susan gira desde el encendido.
+//   2. CALIBRANDO: 10 s de RMS basal con la cabeza apoyada (luz azul).
+//      Descarta el primer segundo. U_on = R + 2 SD (minimo +2 mV), sobre la
+//      MEDIANA de 0.5 s (quita saltos sueltos: el umbral queda mas cerca del basal);
+//      U_off = R + 0.6 (U_on - R). Sin contracciones solicitadas.
+//      Termina a los 10 s por reloj; si la senal es inestable solo avisa.
+//      Las estrellas ya van y vienen, lento.
+//   3. SESION:
+//      - Activacion: RMS suave sobre U_on por 300 ms. Termina: bajo U_off
+//        por 300 ms.
+//      - CABEZA ABAJO = RMS SOBRE el umbral (ABAJO_ES_ACTIVIDAD; x lo invierte).
+//      - Estrellas (paso completo, como motor_endstop.ino): giran hasta pisar
+//        el endstop, regresan a 0, giran al otro lado, pisan, regresan... sin
+//        parar. CABEZA ABAJO: aceleran de 200 a 600 pasos/s en 2 s. ARRIBA: 200.
+//      - Lazy susan: gira siempre desde el encendido; solo el PARO lo detiene.
+//      - Luz: CABEZA ABAJO = brillo maximo y cambia de color rapido (vuelta en
+//        4 s). CABEZA ARRIBA = tenue (15 %) y casi quieta (vuelta en 40 s).
+//      - Musica: siempre sonando desde el encendido; cada vez que SUBE la
+//        cabeza pasa a la siguiente cancion (1..NUM_CANCIONES).
 //   4. Seguridad: sin datos validos por 500 ms las estrellas pasan a lento y
 //      la luz a ambar. PARO (IO34, con USAR_PARO) y la pausa p detienen todo.
-//   5. WiFi: se une a la red "ASTRA" que crea el Arduino y atiende a la
-//      pagina en http://192.168.4.200:
-//        /estado?b=&a=&l=&r=   estado, RMS, eventos de verificacion, contadores
-//        /cmd?c=<letra>        comandos simples
-//        /conf?id=&p=E|C|D     postura confirmada para un evento
-//        /manual?p=E|C|D&n=    confirmacion manual
-//        /umbral?on=&off=&n=   umbral aprobado por la fisioterapeuta
-//        /restaurar?n=         vuelve al umbral anterior
-//        /cfg?k=&v=            parametros (factores, tiempos, limites)
-//      Los comandos con identificador (id / n) son idempotentes: si la pagina
-//      reintenta, no se duplica nada. La red corre en el nucleo 0; motores, luz y
-//      deteccion siguen en el nucleo 1. La configuracion vigente (umbrales,
-//      parametros, eventos, contadores) vive en el ESP32: si la pagina se
-//      desconecta, el atril sigue igual y al volver se resincroniza.
 //
-//  Comandos (monitor serie a 115200, "Sin ajuste de linea", o la pagina):
-//   c = comenzar (o repetir) la calibracion: queda esperando el registro
-//   1 = registrar el RMS basal (10 s)       x = cancelar el registro
-//   f = aceptar una calibracion RECHAZADA de todas formas (decision clinica)
-//   s = iniciar la sesion (con la calibracion LISTA)
-//   n = siguiente paso (lo mismo que el boton BOOT)
-//   p = pausa / seguir   r = reanudar tras el paro
-//   a = habilitar / deshabilitar el control automatico de los actuadores
-//   h = volver a buscar el tope   i = info de calibracion
-//  Boton BOOT de la placa: siguiente paso de la calibracion; en sesion,
-//  recalibrar; tras el paro, reanudar.
+//  Comandos (monitor serie a 115200, "Sin ajuste de linea"):
+//   c = recalibrar   p = pausa / seguir   r = reanudar tras el paro
+//   h = volver a buscar el microswitch   + / - = factor SD   i = info
+//   x = invertir que estado del EMG es "cabeza abajo"
+//   o = probar la siguiente combinacion del lazy susan (6: orden x medio/completo)
+//  Boton BOOT de la placa: recalibrar (o reanudar tras el paro).
 //
-//  Placa: "ESP32 Dev Module". Bibliotecas: AccelStepper. WiFi y WebServer
-//  vienen con el paquete de placas ESP32 (el DFPlayer se maneja con
-//  comandos directos, no necesita su biblioteca).
+//  Placa: "ESP32 Dev Module". Biblioteca: AccelStepper (el DFPlayer se maneja
+//  con comandos directos, no necesita su biblioteca). WiFi y WebServer vienen
+//  con el paquete de placas ESP32.
 //
-//  Cambios v4.0 respecto a v3.0 (motores, luz, DFPlayer, tope y paro NO cambian):
-//   - Calibracion basal (10 s de RMS en reposo) en lugar de reposo + pasiva +
-//     5 repeticiones activas. Calidad de la senal antes de aceptarla.
-//   - Estados sostenidos, verificaciones con ventana de RMS por evento,
-//     periodos de 5 y 10 min, contadores y temporizadores no bloqueantes.
-//   - Umbral ajustable solo con aprobacion; historial y restauracion.
-//   - Modo supervisado para los actuadores.
-//   - Parametros nuevos configurables desde la pagina (/cfg).
+//  v5.1 = v5 + PAGINA WEB (la deteccion, la calibracion, los motores, la luz
+//  y la musica NO cambian):
+//   - Se une a la red WiFi "ASTRA" que crea el Arduino (arduino_emg.ino v4)
+//     con la IP fija 192.168.4.200 y atiende a la pagina:
+//       /estado         -> estado en vivo, calibracion, RMS y mediana de cada
+//                          bloque, activaciones y mensajes del monitor serie
+//       /cmd?c=<letra>  -> los mismos comandos del monitor serie
+//   - La red corre en el nucleo 0; motores, luz y deteccion siguen en el
+//     nucleo 1: la pagina nunca frena a los motores. Sin WiFi o sin pagina
+//     el atril funciona igual que v5.
+//   - Para la pagina se numera cada sesion (sube al terminar cada
+//     calibracion) y se mide su tiempo sin contar pausas.
+//   - Los mensajes (Log.print...) salen por el monitor serie Y a la pagina.
+//
+//  Cambios v2 respecto a v1 (mismas reglas del documento):
+//   - Buscar el tope siempre va a 400 pasos/s (en v1, despues de una bajada,
+//     AccelStepper lo recortaba a 300).
+//   - La espera de 1.5 s cuenta desde que se CONFIRMA la relajacion
+//     (confirmacion 0.3 s + espera 1.5 s, como el documento; en v1 la espera
+//     real era 1.2 s). La duracion se sigue midiendo hasta que la senal bajo
+//     del umbral, y el RMS medio usa justo esas muestras (en v1 empezaba
+//     despues de la confirmacion).
+//   - Confirmacion de 300 ms = 4 bloques seguidos, aunque un bloque llegue
+//     unos ms antes (en v1 a veces hacian falta 5 bloques).
+//   - Watchdog: al cortarse los datos se cierra la activacion en curso (no
+//     suma tiempo sin senal) y se avisa una sola vez en el monitor. Al volver,
+//     las estrellas esperan 1.5 s antes de bajar (dan tiempo a reconfirmar).
+//   - El frenado por pausa / calibracion / sin datos ya no puede quedar
+//     "olvidado" de una sesion anterior.
+//   - Microswitch: tambien detiene si lo tocan por inercia al frenar, y fija
+//     el tope sin romper la secuencia de las bobinas (sin tiron hacia arriba).
+//   - Sonido: si una pista no puede sonar por la pausa de 3 s, suena en
+//     cuanto se pueda si su motivo sigue vigente (antes la pista 2 se perdia).
+//     Los comandos se mandan aunque el DFPlayer no conteste al arrancar
+//     (p. ej. si se enciende con el paro presionado), y el volumen se
+//     reenvia cada vez que se busca el tope (tambien con h).
+//   - Lectura: la primera linea (puede llegar a medias) y una linea cortada
+//     a la mitad se descartan. EMG_INVERTIDO por si el opto invierte.
+//   - Las bobinas quedan apagadas desde el primer instante del arranque.
+//  v2.1 (diagnostico en el atril):
+//   - La linea [SESION] muestra el umbral y dice si las estrellas estan
+//     DESACTIVADAS (no se encontro el tope).
+//   - Si al bajar del tope el microswitch sigue presionado (cableado en NC o
+//     atorado), las estrellas se desactivan y lo avisa, en vez de seguir
+//     desenrollando el hilo.
+//   - Los planetas arrancan con rampa suave (permite subir V_PLANETAS).
+//  v2.2: PREMIO_AL_RELAJAR. Sin contraccion las estrellas suben rapido
+//   (700 pasos/s) y la luz lila crece; al contraer esperan 1.5 s y bajan
+//   rapido (500 pasos/s). PREMIO_AL_RELAJAR = false vuelve a la logica original.
+//  v2.3: el lazy susan gira siempre (salvo PARO o pausa). Las estrellas suben
+//   y bajan sin parar entre fondo y tope: rapido (700) con el musculo relajado,
+//   lento (250) activo. Orden de bobinas configurable, USAR_TOPE, y el arranque
+//   ya no espera al DFPlayer.
 //  Para probar motores, luz, microswitch y opto por separado: prueba_atril.ino
 // =====================================================================
 
@@ -97,9 +109,26 @@
 // El "false" final: los pines se configuran en setup() con las bobinas apagadas.
 // Si un motor VIBRA en vez de girar parejo, cambia su ORDEN_B a true
 // (prueba primero con la tecla o de prueba_atril.ino).
-const bool ORDEN_B_PLANETAS  = false;
+// LAZY SUSAN: si VIBRA y no gira, escribe o en el monitor serie para probar la
+// siguiente combinacion en vivo (6: 3 ordenes de bobinas x medio paso / paso
+// completo). El paso completo da mas fuerza si el motor no alcanza a mover la
+// carga. Cuando gire parejo, pon ese numero en ORDEN_PLANETAS y vuelve a cargar.
+const int  N_ORDENES_P       = 6;
+const int  ORDEN_PLANETAS    = 0;  // 0 a 5
 const bool ORDEN_B_ESTRELLAS = false;
-AccelStepper planetas(AccelStepper::HALF4WIRE, 23, ORDEN_B_PLANETAS ? 22 : 21, ORDEN_B_PLANETAS ? 21 : 22, 19, false);
+AccelStepper planetasOrden[N_ORDENES_P] = {
+  AccelStepper(AccelStepper::HALF4WIRE, 23, 21, 22, 19, false),   // 0: medio paso, IN1 IN3 IN2 IN4 (normal)
+  AccelStepper(AccelStepper::HALF4WIRE, 23, 22, 21, 19, false),   // 1: medio paso, IN1 IN2 IN3 IN4
+  AccelStepper(AccelStepper::HALF4WIRE, 23, 19, 22, 21, false),   // 2: medio paso, IN1 IN4 IN2 IN3
+  AccelStepper(AccelStepper::FULL4WIRE, 23, 21, 22, 19, false),   // 3: paso completo (mas fuerza), IN1 IN3 IN2 IN4
+  AccelStepper(AccelStepper::FULL4WIRE, 23, 22, 21, 19, false),   // 4: paso completo, IN1 IN2 IN3 IN4
+  AccelStepper(AccelStepper::FULL4WIRE, 23, 19, 22, 21, false)};  // 5: paso completo, IN1 IN4 IN2 IN3
+const char *NOMBRE_ORDEN_P[N_ORDENES_P] = {"medio paso, IN1 IN3 IN2 IN4", "medio paso, IN1 IN2 IN3 IN4",
+  "medio paso, IN1 IN4 IN2 IN3", "paso completo, IN1 IN3 IN2 IN4", "paso completo, IN1 IN2 IN3 IN4",
+  "paso completo, IN1 IN4 IN2 IN3"};
+int ordenP = ORDEN_PLANETAS;
+AccelStepper *planetas = &planetasOrden[ORDEN_PLANETAS];
+// Estrellas: paso completo, orden IN1, IN3, IN2, IN4 (igual que motor_endstop.ino)
 AccelStepper estrellas(AccelStepper::HALF4WIRE, 18, ORDEN_B_ESTRELLAS ? 17 : 16, ORDEN_B_ESTRELLAS ? 16 : 17, 4, false);
 
 const int PIN_ROJO  = 25;   // LEDR -> ULN2803 I1 + I2
@@ -114,81 +143,75 @@ const int DF_RX     = 27;   // TX del DFPlayer
 const int DF_TX     = 26;   // RX del DFPlayer (por R5 de 1k)
 
 // ------------------------- Ajustes mecanicos --------------------------
-const int  DIR_SUBIR     = 1;      // si las estrellas BAJAN al buscar el tope, cambia a -1
-const long RECORRIDO     = 17400;  // pasos del fondo al tope (40 cm, carrete de 3 cm)
-const int  V_HOMING      = 400;    // pasos/s al buscar el tope
-const int  V_VAIVEN_RAPIDO = 700;  // pasos/s subiendo y bajando con el musculo RELAJADO
-const int  V_VAIVEN_LENTO  = 250;  // pasos/s con el musculo ACTIVO, calibrando o sin datos
-const int  ACELERACION   = 800;    // pasos/s^2
-const int  V_PLANETAS    = 120;    // pasos/s (~1.8 rpm, una vuelta del eje en ~34 s). Hasta ~400 si quieres mas rapido
+// ---- Estrellas (como motor_endstop.ino) ----
+// Al encender, la posicion actual es 0. Gira hacia SENTIDO_INICIAL hasta pisar el
+// endstop, regresa a 0 (todo lo que avanzo), gira hacia el otro lado hasta pisar
+// el endstop, regresa a 0... y asi sin parar. El endstop SOLO actua sobre las estrellas.
+const int  SENTIDO_INICIAL = 1;      // +1 = hacia un lado, -1 = hacia el otro
+const long MUY_LEJOS       = 1000000L;   // objetivo "infinito": gira hasta pisar el endstop
+// Arranque (como antes): al encender buscan el microswitch y ahi queda la posicion 0
+const int  V_HOMING_E      = 200;        // pasos completos/s al buscar el microswitch
+                                         // (= los 400 medios pasos/s del arranque de la V3)
+const long HOMING_MAX_PASOS = 20000;     // si no lo encuentra en estos pasos, sigue sin el
+// Velocidades en pasos completos por segundo (el 28BYJ-48 aguanta hasta ~600-700)
+const int  V_ESTRELLAS_RAPIDO = 1000;  // con la CABEZA ABAJO
+const int  V_ESTRELLAS_LENTO  = 600;  // con la CABEZA ARRIBA, calibrando o sin datos
+const int  ACELERACION   = 1500;    // pasos/s^2: que tan rapido arranca, frena y cambia de sentido
+const int  V_PLANETAS    = 400;    // pasos/s (~1.8 rpm, una vuelta del eje en ~34 s). Hasta ~400 si quieres mas rapido
 const int  ACEL_PLANETAS = 200;    // pasos/s^2: arranque suave del lazy susan
-const long TOPE_SUELTA   = 1000;   // pasos: al bajar del tope, el microswitch debe soltarse antes de esto (~2 cm)
 
 // ------------------------- Ajustes de deteccion -----------------------
-// (La deteccion de "activacion" de 300 ms se conserva: alimenta el conteo de
-//  activaciones y, con control automatico, los actuadores.)
+const float UMBRAL_K_INICIAL = 2.0f; // factor sobre la SD basal (ajustable con +/- de 0.5 en 0.5)
+const float MARGEN_MIN_MV    = 2.0f; // el umbral queda al menos 2 mV sobre el basal
+const float UMBRAL_OFF_FACTOR = 0.6f; // histeresis relativa a la media basal
 const unsigned long T_CONFIRMAR = 300;  // ms sobre/bajo el umbral para cambiar de estado
 const unsigned long HOLGURA_MS  = 50;   // tolera que un bloque llegue unos ms antes (300 ms = 4 bloques seguidos)
 const unsigned long T_PREMIO    = 1000; // ms sostenidos para el sonido de activacion
 const unsigned long WATCHDOG_MS = 500;  // sin datos por mas de esto -> todo se detiene
-const float SUAVIZADO           = 0.5;  // 0..1 (mas alto = responde mas rapido)
-
-// ------------------------- Calibracion basal ---------------------------
-// Solo RMS en reposo. Los valores de esta seccion y de las dos siguientes son
-// los INICIALES: la pagina puede cambiarlos con /cfg y el ESP32 los conserva
-// (en RAM) aunque la pagina se desconecte.
-const int   BLOQUES_POR_S      = 10;    // el Arduino manda un bloque cada 100 ms
-const float CAL_BASAL_S        = 10;    // duracion del registro basal
-const float CAL_DESC_BASAL_S   = 1.0;   // se descartan los primeros segundos (filtros)
-const float UMBRAL_K_SD        = 3.0;   // U_ON  = media + K x SD
-const float UMBRAL_OFF_FACTOR  = 0.6;   // U_OFF = media + F x (U_ON - media)
-// Calidad de la calibracion basal (advertencia / rechazo). Valores en mV de RMS.
-const float Q_MEDIA_MIN     = 2.0;      // por debajo: senal casi nula (sensor o electrodos)
-const float Q_MEDIA_MAX     = 1500.0;   // por encima: ruido o mal contacto
-const float Q_SATURADO      = 2400.0;   // un bloque asi de alto: senal saturada
-const float Q_CV_AVISO      = 0.30;     // SD / media: advertencia
-const float Q_CV_RECHAZO    = 0.60;     //             rechazo
-const float Q_DERIVA_AVISO  = 0.25;     // |media 2.a mitad - 1.a mitad| / media: advertencia
-const float Q_DERIVA_RECHAZO = 0.50;    //                                         rechazo
-const float Q_PICO_SD       = 6.0;      // bloque > media + 6 SD: pico aislado (advertencia)
-
-// ------------------------- Estados sostenidos y verificacion -----------
-const float T_SOSTENIDO_S      = 3.0;   // estado estable = candidato a confirmacion (y ventana de RMS)
-const float VENT_DERIVA_MAX    = 0.35;  // las dos mitades de la ventana no pueden diferir mas de 35 %: si cruza un cambio de postura, no se pregunta
-const float VER_INI_S          = 300;   // primer periodo de verificacion: 5 min
-const int   VER_INI_MAX        = 4;     //   maximo de preguntas automaticas
-const float VER_INI_MIN_ENTRE_S = 45;   //   intervalo minimo entre preguntas
-const float VER_CICLO_S        = 600;   // ciclos siguientes: 10 min (se repiten hasta el final)
-const int   VER_CICLO_MAX      = 3;
-const float VER_CICLO_MIN_ENTRE_S = 120;
-const float T_REVERIFICAR_S    = 120;   // un estado que dura mucho se vuelve a comprobar tras esto
-const float T_RESPUESTA_S      = 120;   // tiempo efectivo para responder una pregunta
-const bool  HIPOTESIS_ALTO_ES_ERGUIDO = true;  // interpretacion a comprobar: RMS alto = cabeza erguida
-const bool  CONTROL_AUTOMATICO_INICIAL = false; // false = SUPERVISADO (actuadores no usan el umbral)
+const int   N_MEDIANA           = 5;    // la senal que se compara es la MEDIANA de los ultimos
+                                        // 5 bloques (0.5 s): quita los saltos sueltos del ruido
+const unsigned long CAL_MS = 10000;          // 10 s de RMS basal (por reloj: nunca se traba)
+const unsigned long CAL_DESCARTAR_MS = 1000;  // se descarta el primer segundo
+const int CAL_MIN_MUESTRAS = 20;              // minimo de bloques para aceptar la calibracion
+const float CAL_CV_MAX = 0.50f;        // si SD/media pasa esto, AVISA (ya no detiene el atril)
 
 // ------------------------- Luz y sonido -------------------------------
 const int BRILLO_MAX = 128;        // tope del 50 %
 const int PASO_LUZ   = 2;          // por cada 20 ms -> 0 a 128 en ~1.3 s
 const int VOLUMEN    = 15;         // 0 a 30
 const unsigned long PAUSA_SONIDO = 3000;  // ms minimos entre sonidos
+// Musica: SIEMPRE sonando desde el encendido (arranque, calibracion y sesion).
+// Cada vez que se detecta que baja la cabeza pasa a la SIGUIENTE cancion (1, 2,
+// 3 ... NUM_CANCIONES y vuelve a 1). Solo se detiene con el PARO. Copia las
+// canciones a la microSD en orden (0001.mp3, 0002.mp3, ...).
+const int NUM_CANCIONES = 3;
+const unsigned long T_ABAJO_MIN_MS  = 1000;  // la cabeza debe haber estado abajo al menos esto
+const unsigned long T_ENTRE_CANCIONES = 5000; // y pasar esto desde el ultimo cambio (evita rebotes)
+// Luz relajado: cambia de color cada vez mas rapido y mas brillante.
+const float PERIODO_COLOR_LENTO  = 40000;  // ms por vuelta de colores con la CABEZA ARRIBA (casi quieta)
+const float PERIODO_COLOR_RAPIDO = 4000;   // ms por vuelta con la CABEZA ABAJO (no bajar de ~3000)
+const float BRILLO_MIN_FRAC      = 0.15;   // brillo con la cabeza arriba (fraccion de BRILLO_MAX)
 
 // ------------------------- Enlace y paro ------------------------------
 // Que premia el atril:
 //   true  = RELAJAR: sin contraccion las estrellas suben rapido y la luz crece
 //           en color lila; al contraer esperan 1.5 s y bajan rapido.
 //   false = CONTRAER: la logica original del documento.
-const bool PREMIO_AL_RELAJAR = true;
+const bool PREMIO_AL_RELAJAR = true;     // (se conserva; lo que manda ahora es ABAJO_ES_ACTIVIDAD)
+// Con los semiespinosos, al BAJAR la cabeza el musculo trabaja para sostenerla,
+// asi que el RMS SUBE: RMS sobre el umbral = CABEZA ABAJO.
+// Si en otro montaje resulta al reves, pon false (o escribe x en el monitor).
+const bool ABAJO_ES_ACTIVIDAD = true;
 const int  LILA_R = 80, LILA_G = 0, LILA_B = 128;   // color del premio al relajar (0..128)
-const unsigned long T_BRILLO_RELAJADO = 5000;      // ms relajado hasta llegar al brillo maximo
+const unsigned long T_BRILLO_RELAJADO = 2000;      // ms con la cabeza abajo hasta el maximo (luz y estrellas)
 
-const bool USAR_TOPE = true;       // false si no hay microswitch: enciende con las estrellas ABAJO
 const bool USAR_PARO = false;      // pon true cuando el divisor del paro (R6, R7) este conectado
 const bool EMG_INVERTIDO = false;  // pon true si el opto invierte (aviso "!! Llegan bytes ...")
 const unsigned long CORTE_LINEA_MS = 50;  // una linea con un hueco mayor a esto se descarta
 
 // ------------------------- WiFi (pagina web) --------------------------
 // El Arduino UNO R4 WiFi crea la red; el atril se une con una IP fija.
-// Deben coincidir con RED_SSID / RED_CLAVE de arduino_emg.ino y con
+// RED_SSID / RED_CLAVE iguales que en arduino_emg.ino; IP_ATRIL igual que
 // "IP del atril" en los Ajustes de la pagina.
 const bool USAR_WIFI = true;
 const char *RED_SSID  = "ASTRA";
@@ -196,17 +219,24 @@ const char *RED_CLAVE = "astra2026";
 const IPAddress IP_ATRIL(192, 168, 4, 200);
 const IPAddress IP_PUERTA(192, 168, 4, 1);    // el Arduino
 const IPAddress MASCARA(255, 255, 255, 0);
-const char *VERSION_ATRIL = "4.0";
+const char *VERSION_ATRIL = "5.1";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
-enum ModoEstrellas { E_HOMING, E_CONTROL, E_SIN_TOPE };
+enum EstadoEstrellas { E_BUSCANDO, E_GIRANDO, E_REGRESANDO };
 const char *NOMBRE_MODO[] = {"ARRANQUE", "CALIBRANDO", "SESION", "PAUSA", "PARO"};
 
 Modo modo = ARRANQUE;
-ModoEstrellas modoE = E_HOMING;
-const long POS_TOPE  = 0;
-const long POS_FONDO = -DIR_SUBIR * RECORRIDO;
+EstadoEstrellas estadoE = E_GIRANDO;
+int  sentidoE = SENTIDO_INICIAL;
+bool endstopArmado = false;          // evita contar el mismo picado dos veces
+long vueltasEndstop = 0;
+long pasosHoming = 0;
+bool abajoEsActividad = ABAJO_ES_ACTIVIDAD;
+unsigned long tCambioCabeza = 0;     // cuando cambio por ultima vez arriba <-> abajo
+bool abajoAntes = false;
+bool cambiarCancion = false;
+unsigned long tInicioAbajo = 0, tUltimoCambioCancion = 0;
 
 // --- Sonido ---
 unsigned long ultimoSonido = 0;
@@ -224,48 +254,21 @@ unsigned long lineasMalas = 0;
 unsigned long bytesSinLinea = 0;    // bytes recibidos desde la ultima linea valida
 bool avisoBytes = false;
 int rmsUltimo = 0;
-float rmsSuave = 0;
+float rmsSuave = 0;                 // mediana de 0.5 s: es la que se compara con el umbral
+float ventana[N_MEDIANA];
+int ventanaN = 0, ventanaI = 0;
 bool hayDatos = false;
 bool datosAntes = false;
 
-// --- Parametros (iniciales = constantes de arriba; /cfg los cambia) ---
-struct Cfg {
-  float basalS, descBasalS, k, f, tSost;
-  float verIniS, verIniMin; int verIniMax;
-  float verCicloS, verCicloMin; int verCicloMax;
-  float tRever, tResp;
-  int hip;                          // 1 = RMS alto <-> cabeza erguida; 0 = RMS alto <-> cabeza caida
-} cfg = {CAL_BASAL_S, CAL_DESC_BASAL_S, UMBRAL_K_SD, UMBRAL_OFF_FACTOR, T_SOSTENIDO_S,
-         VER_INI_S, VER_INI_MIN_ENTRE_S, VER_INI_MAX, VER_CICLO_S, VER_CICLO_MIN_ENTRE_S, VER_CICLO_MAX,
-         T_REVERIFICAR_S, T_RESPUESTA_S, HIPOTESIS_ALTO_ES_ERGUIDO ? 1 : 0};
-
-// --- Calibracion basal ---
-enum FaseCal { CAL_ESPERA, CAL_BASAL, CAL_LISTA, CAL_RECHAZADA };
-const char *NOMBRE_FASE[] = {"ESPERA", "BASAL", "LISTA", "RECHAZADA"};
-FaseCal faseCal = CAL_ESPERA;
-int bloquesFase = 0;                // bloques recibidos en el registro (reloj de las muestras)
-double bSum = 0, bSum2 = 0, bSumA = 0, bSumB = 0;
-int bN = 0, bNa = 0, bNb = 0;
-float bMin = 1e9, bMax = 0;
-bool bCorte = false;                // se cortaron los datos durante el registro
-// Banderas de calidad
-const uint16_t F_CORTE = 1 << 0, F_NULA = 1 << 1, F_RUIDO = 1 << 2, F_SATURA = 1 << 3, F_PLANA = 1 << 4,
-               F_CV_EXC = 1 << 5, F_CV = 1 << 6, F_DER_EXC = 1 << 7, F_DER = 1 << 8, F_PICOS = 1 << 9, F_POCOS = 1 << 10;
-const uint16_t F_RECHAZO = F_CORTE | F_NULA | F_RUIDO | F_SATURA | F_PLANA | F_CV_EXC | F_DER_EXC | F_POCOS;
-const char *TXT_FLAG[] = {"datos interrumpidos durante el registro", "senal casi nula (sensor o electrodos)",
-                          "RMS basal muy alto (ruido o mal contacto)", "senal saturada", "senal plana",
-                          "variabilidad excesiva", "variabilidad alta", "deriva excesiva", "deriva notable",
-                          "picos aislados (movimiento?)", "muy pocos bloques"};
-// nivel: 0 aceptada, 1 con advertencias, 2 rechazada, 3 aceptada a la fuerza (decision de la fisioterapeuta)
-struct CalBasal { float media, sd, cv, deriva, minimo, maximo; int n; uint16_t flags; uint8_t nivel; } cb = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-// Calibracion aplicada (la que usa la sesion)
+// --- Calibracion ---
+// Acumula solo el RMS basal; no se requiere una referencia de contraccion.
+unsigned long tCal = 0;             // cuando empezo la calibracion
+int nReposo = 0;
+double sumaReposo = 0.0, suma2Reposo = 0.0;
 bool calibrado = false;
 float reposo = 100, sdReposo = 10;
+float umbralK = UMBRAL_K_INICIAL;
 float umbralOn = 300, umbralOff = 200;
-uint8_t umbralOrigen = 0;           // 0 basal, 1 ajustado (aprobado en la pagina), 2 restaurado
-struct UmbralHist { float on, off; uint8_t origen; float tSes; };
-UmbralHist hist[6]; int histN = 0;
-bool controlAuto = CONTROL_AUTOMATICO_INICIAL;   // false = modo supervisado
 
 // --- Deteccion ---
 bool activo = false;
@@ -279,43 +282,10 @@ int nRmsAct = 0;
 float sumaCola = 0;                 // RMS bajo U_off aun sin confirmar (si se relajo, no cuenta)
 int nCola = 0;
 unsigned long tiempoActivoTotal = 0;
-int sesionId = 0;                   // sube con cada sesion nueva (tras calibrar)
-unsigned long msSesion = 0;         // tiempo en SESION (sin pausas)
-unsigned long msSesionIni = 0;      // msSesion al empezar la activacion en curso
-
-// --- Estados sostenidos y verificacion ---
-enum EstadoRms { RMS_NINGUNO = 0, RMS_ALTO = 1, RMS_BAJO = 2 };
-uint8_t estadoRms = RMS_NINGUNO;    // estado con histeresis (ALTO entra en U_ON; BAJO entra en U_OFF)
-uint32_t episodio = 0;              // sube cada vez que cambia el estado
-int bloquesEnEstado = 0;
-bool sostenidoMarcado = false;      // este episodio ya se conto como "sostenido detectado"
-uint32_t nDetectados = 0;
-const int N_VENT = 64;              // ventana de RMS: ultimos 6.4 s (se limpia con cada pausa o corte de datos)
-float vRms[N_VENT]; int vN = 0, vW = 0;
-// Eventos de verificacion
-enum StatusEv { EV_PENDIENTE = 1, EV_CONFIRMADO = 2, EV_DESCARTADO = 3, EV_EXPIRADO = 4 };
-enum Postura { POST_NINGUNA = 0, POST_ERGUIDA = 1, POST_CAIDA = 2, POST_INDETERMINADA = 3 };
-struct Evento {
-  uint32_t id, rev, ep, tok;
-  uint8_t origen, estado, status, postura, calidad, periodo, nSol;
-  int sid;
-  float tIni, dur, media, sd, minimo, maximo, uon, uoff, tSolic;
-};
-const int N_EV = 48;
-Evento evs[N_EV];
-uint32_t nEv = 0, revGlobal = 0;
-int perActual = -1, solPer = 0;     // periodo de verificacion en curso y preguntas automaticas hechas en el
-float tSolUlt = -1e9, finVentUlt = -1e9, tEpUlt = -1e9;
-uint32_t epUltSol = 0, pendId = 0;
-uint32_t nResp[3] = {0, 0, 0};      // confirmaciones E/C por estado RMS (1 = ALTO, 2 = BAJO)
-uint32_t nErr[3] = {0, 0, 0};       // las que no coincidieron con la hipotesis
-uint32_t tokManual = 0, tokUmbral = 0, tokRestaurar = 0;
-volatile uint32_t tUltimaConsulta = 0;   // ultima vez que la pagina pidio /estado
 
 // --- Motores ---
-bool subiendo = false, bajando = false, frenando = false;
+bool frenando = false;
 bool bobinasEstrellas = false, bobinasPlanetas = false;
-long pasosHoming = 0;
 float velPlanetas = 0;
 unsigned long tRampaP = 0;
 float velE = 0;                     // velocidad actual del vaiven
@@ -329,6 +299,12 @@ unsigned long bootCambio = 0;
 
 // --- Luz ---
 float luzR = 0, luzG = 0, luzB = 0;
+float faseColor = 0;                // 0..1, posicion en la rueda de colores
+bool musicaSonando = false;
+int cancion = 1;                    // cancion que esta sonando (1..NUM_CANCIONES)
+unsigned long episodioCancion = 0;  // inicio del "cabeza abajo" que ya cambio la cancion
+unsigned long tMusicaLista = 2300;  // la musica arranca despues de mandar el volumen
+unsigned long ultimoCmdMusica = 0;
 unsigned long ultimaLuz = 0, ultimoEstado = 0;
 
 // --- Pagina web ---
@@ -337,35 +313,62 @@ portMUX_TYPE candado = portMUX_INITIALIZER_UNLOCKED;
 const int N_LOG = 24, LARGO_LOG = 160;
 char logTxt[N_LOG][LARGO_LOG];      // ultimos mensajes (los mismos del monitor serie)
 uint32_t nLog = 0;
-const int N_BLQ = 64;               // ultimos 6.4 s de RMS recibidos
-int32_t blqVal[N_BLQ];
-uint8_t blqFlag[N_BLQ];             // 1 = activacion, 2 = bloque usado en la calibracion
+const int N_BLQ = 64;               // ultimos 6.4 s de bloques recibidos
+int32_t blqRms[N_BLQ];
+float blqMed[N_BLQ];
+uint8_t blqFlag[N_BLQ];             // 1 = sobre el umbral (activacion), 2 = usado en la calibracion
 uint32_t nBlq = 0;
-struct Activacion { int sid, id; float ini, dur; int rms, pct; };
+struct Activacion { int sid, id; float ini, dur; int rms; };
 const int N_ACT = 32;
 Activacion actLista[N_ACT];
 uint32_t nActLista = 0;
 QueueHandle_t colaCmd = NULL;       // comandos de la pagina -> loop
 volatile int8_t avisoWifi = 0;      // 1 = conectado, -1 = se perdio (lo imprime el loop)
 uint32_t idArranque = 0;            // cambia en cada encendido (la pagina lo detecta)
+int sesionId = 0;                   // sube al terminar cada calibracion (sesion nueva)
+unsigned long msSesion = 0;         // tiempo en SESION (sin pausas)
+unsigned long msSesionIni = 0;      // msSesion al empezar la activacion en curso
+int calN = 0;                       // bloques usados en la ultima calibracion
+bool calPocos = false, calInestable = false;
+
+// Imprime en el monitor serie y guarda cada linea para la pagina
+class Registro : public Print {
+ public:
+  size_t write(uint8_t c) override {
+    Serial.write(c);
+    if (c == '\r') return 1;
+    if (c == '\n') { cerrar(); return 1; }
+    if (n < LARGO_LOG - 1) buf[n++] = (char)c;
+    return 1;
+  }
+  size_t write(const uint8_t *b, size_t k) override { for (size_t i = 0; i < k; i++) write(b[i]); return k; }
+ private:
+  char buf[LARGO_LOG];
+  int n = 0;
+  void cerrar() {
+    if (!n) return;                 // las lineas vacias solo van al monitor
+    buf[n] = 0;
+    portENTER_CRITICAL(&candado);
+    memcpy(logTxt[nLog % N_LOG], buf, n + 1);
+    nLog++;
+    portEXIT_CRITICAL(&candado);
+    n = 0;
+  }
+};
+Registro Log;
+
+void guardarBloque(int mv, float med, uint8_t flag) {
+  portENTER_CRITICAL(&candado);
+  blqRms[nBlq % N_BLQ] = mv;
+  blqMed[nBlq % N_BLQ] = med;
+  blqFlag[nBlq % N_BLQ] = flag;
+  nBlq++;
+  portEXIT_CRITICAL(&candado);
+}
 
 // ======================================================================
 //  Utilidades
 // ======================================================================
-// Imprime en el monitor serie y guarda el mensaje para la pagina.
-void msg(const char *fmt, ...) {
-  char t[LARGO_LOG];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(t, sizeof t, fmt, ap);
-  va_end(ap);
-  Serial.println(t);
-  portENTER_CRITICAL(&candado);
-  memcpy(logTxt[nLog % N_LOG], t, LARGO_LOG);
-  nLog++;
-  portEXIT_CRITICAL(&candado);
-}
-
 bool topePresionado() {
   if (digitalRead(PIN_TOPE) == HIGH) return false;
   delayMicroseconds(300);
@@ -376,17 +379,8 @@ bool datosOK() {
   return hayDatos && (millis() - tUltimoDato) < WATCHDOG_MS;
 }
 
-// Estado que se premia: relajado (PREMIO_AL_RELAJAR) o contrayendo (original)
-// En modo SUPERVISADO el umbral aun no controla los actuadores: nunca hay "premio".
-bool premiado() { return controlAuto && (PREMIO_AL_RELAJAR ? !activo : activo); }
-
-// El registro basal esta en curso
-bool midiendo() { return faseCal == CAL_BASAL; }
-
-float altura() {  // 0 = fondo, 1 = tope
-  float a = 1.0f - (float)labs(estrellas.currentPosition()) / RECORRIDO;
-  return constrain(a, 0.0f, 1.0f);
-}
+// CABEZA ABAJO segun el estado del EMG (ver ABAJO_ES_ACTIVIDAD)
+bool cabezaAbajo() { return abajoEsActividad ? activo : !activo; }
 
 // Comando directo al DFPlayer (10 bytes). No espera respuesta, asi los
 // motores nunca se detienen esperando al reproductor.
@@ -417,22 +411,12 @@ void bobinasE(bool on) {
 
 void bobinasP(bool on) {
   if (on == bobinasPlanetas) return;
-  if (on) planetas.enableOutputs(); else planetas.disableOutputs();
+  if (on) planetas->enableOutputs(); else planetas->disableOutputs();
   bobinasPlanetas = on;
-}
-
-// El microswitch marca el tope. La posicion pasa a ~0 conservando la fase de
-// las bobinas (0 a 7 medios pasos del lado de arriba, < 0.2 mm), asi el
-// siguiente paso sigue la secuencia: sin tiron y sin empujar el microswitch.
-void fijarTope() {
-  long fase = estrellas.currentPosition() & 7;
-  long p = (DIR_SUBIR > 0) ? fase : (fase ? fase - 8 : 0);
-  estrellas.setCurrentPosition(POS_TOPE + p);   // tambien detiene el motor ahi mismo
 }
 
 void detenerEstrellasYa() {
   estrellas.setCurrentPosition(estrellas.currentPosition());  // alto inmediato, conserva la posicion
-  subiendo = bajando = false;
   bobinasE(false);
 }
 
@@ -442,34 +426,20 @@ void frenarEstrellas() {
   else estrellas.stop();
 }
 
-float tEfS() { return msSesion / 1000.0f; }   // tiempo EFECTIVO de terapia (la pausa no cuenta)
-
-const char *txtOrigen() { return umbralOrigen == 0 ? "basal (preliminar)" : umbralOrigen == 1 ? "ajustado y aprobado" : "restaurado"; }
-
-// Umbrales de la calibracion basal: U_ON = media + K SD; U_OFF = media + F (U_ON - media)
-void umbralesBasal(float &on, float &off) {
-  on  = reposo + cfg.k * sdReposo;
-  off = reposo + cfg.f * (on - reposo);
-}
-
-// Cambia el umbral vigente y lo guarda en el historial (para poder restaurarlo)
-void fijarUmbral(float on, float off, uint8_t origen) {
-  umbralOn = on; umbralOff = off; umbralOrigen = origen;
-  if (histN == 6) { for (int i = 1; i < 6; i++) hist[i - 1] = hist[i]; histN = 5; }
-  hist[histN++] = {on, off, origen, tEfS()};
+void calcularUmbrales() {
+  umbralOn = reposo + max(umbralK * sdReposo, MARGEN_MIN_MV);
+  umbralOff = reposo + UMBRAL_OFF_FACTOR * (umbralOn - reposo);
 }
 
 void imprimirCalibracion() {
-  msg("---- Calibracion basal ----");
-  msg("RMS basal: media %.1f mV, SD %.1f mV (CV %.2f, deriva %+.0f %%, %d bloques)", cb.media, cb.sd, cb.cv, cb.deriva * 100, cb.n);
-  const char *niv[] = {"ACEPTADA", "ACEPTADA CON ADVERTENCIAS", "RECHAZADA", "ACEPTADA A LA FUERZA"};
-  msg("Calidad: %s", niv[cb.nivel]);
-  for (int i = 0; i < 11; i++) if (cb.flags & (1 << i)) msg("   - %s", TXT_FLAG[i]);
-  msg("U_ON %.1f mV (media + %.1f SD) | U_OFF %.1f mV (media + %.2f x (U_ON - media))", umbralOn, cfg.k, umbralOff, cfg.f);
-  msg("Umbral %s. Modo %s.", txtOrigen(), controlAuto ? "CONTROL AUTOMATICO" : "SUPERVISADO");
-  msg("Activaciones: %d | tiempo activo total: %.1f s | lineas danadas: %lu",
-      nActivaciones, tiempoActivoTotal / 1000.0f, lineasMalas);
-  msg("---------------------");
+  Log.println();
+  Log.println("---- Calibracion ----");
+  Log.printf("Reposo: %.0f mV (SD %.1f)\n", reposo, sdReposo);
+  Log.printf("Umbral de activacion: %.1f mV (media + %.1f SD)\n", umbralOn, umbralK);
+  Log.printf("Umbral de relajacion: %.0f mV\n", umbralOff);
+  Log.printf("Activaciones: %d | tiempo activo total: %.1f s | lineas danadas: %lu\n",
+                nActivaciones, tiempoActivoTotal / 1000.0f, lineasMalas);
+  Log.println("---------------------");
 }
 
 // Termina la activacion en curso. 'fin' es cuando el musculo realmente se
@@ -478,15 +448,13 @@ void imprimirCalibracion() {
 void terminarActivacion(unsigned long fin) {
   if (activo) {
     activo = false;
-    if (PREMIO_AL_RELAJAR) { tInicioPremio = millis(); premio1 = false; }   // empieza a relajar
-    else tFinPremio = millis();                                            // termina el premio
+    tCambioCabeza = millis();          // cambia de cabeza abajo <-> arriba
     unsigned long dur = fin - tInicioActivo;
     tiempoActivoTotal += dur;
     float rmsMedio = nRmsAct ? sumaRmsAct / nRmsAct : 0;
-    int pct = (int)lroundf(100.0f * (rmsMedio - reposo) / max(umbralOn - reposo, 1.0f));   // % del umbral sobre el reposo
-    msg("   Activacion #%d: %.1f s, RMS medio %.0f mV (%d %% de la referencia)",
-        nActivaciones, dur / 1000.0f, rmsMedio, pct);
-    Activacion a = {sesionId, nActivaciones, msSesionIni / 1000.0f, dur / 1000.0f, (int)lroundf(rmsMedio), pct};
+    Log.printf("   Activacion #%d: %.1f s, RMS medio %.0f mV\n",
+                  nActivaciones, dur / 1000.0f, rmsMedio);
+    Activacion a = {sesionId, nActivaciones, msSesionIni / 1000.0f, dur / 1000.0f, (int)lroundf(rmsMedio)};
     portENTER_CRITICAL(&candado);
     actLista[nActLista % N_ACT] = a;
     nActLista++;
@@ -502,382 +470,100 @@ void cerrarActivacion() { cerrarActivacion(millis()); }
 // ======================================================================
 //  Cambios de modo
 // ======================================================================
+void iniciarSesion();
+void iniciarCalibracion();
+
+// Estrellas: la posicion actual es 0 y empiezan a girar (como motor_endstop.ino)
+void empezarAGirarE() {
+  bobinasE(true);
+  estrellas.moveTo((long)sentidoE * MUY_LEJOS);
+  estadoE = E_GIRANDO;
+  endstopArmado = false;             // se arma hasta que el endstop este suelto
+  Log.printf("   Estrellas: girando hacia el lado %s\n", sentidoE > 0 ? "POSITIVO" : "NEGATIVO");
+}
+
+// ARRANQUE (como antes): las estrellas buscan el microswitch; al encontrarlo esa
+// es la posicion 0 y empieza la calibracion (o la sesion, si ya estaba calibrado).
 void iniciarArranque() {
   cerrarActivacion();
   modo = ARRANQUE;
-  modoE = E_HOMING;
-  pasosHoming = 0;
-  subiendo = bajando = frenando = false;
-  premioCima = false;
+  frenando = false;
   pistaPendiente = 0;
-  bobinasP(false);
+  estadoE = E_BUSCANDO;
+  pasosHoming = 0;
+  sentidoE = SENTIDO_INICIAL;
   bobinasE(true);
-  estrellas.setMaxSpeed(V_HOMING > V_VAIVEN_RAPIDO ? V_HOMING : V_VAIVEN_RAPIDO);  // si no, setSpeed lo recorta
-  estrellas.setSpeed(DIR_SUBIR * V_HOMING);
+  estrellas.setMaxSpeed(V_HOMING_E);
+  estrellas.setSpeed(SENTIDO_INICIAL * V_HOMING_E);
+  velE = 0;
   dfVolumenEn = millis() + 2000;     // el DFPlayer pudo reiniciarse (paro): reenvia el volumen
-  msg(">> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).");
+  tMusicaLista = millis() + 2300;    // y despues vuelve a poner la musica
+  musicaSonando = false;
+  Log.println();
+  Log.println(">> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).");
 }
 
-// ---------------------------------------------------------------------
-//  Eventos de verificacion (ring de N_EV). Solo el loop escribe; la red lee con candado.
-// ---------------------------------------------------------------------
-Evento *buscarEv(uint32_t id) {
-  if (id == 0 || id > nEv || id + N_EV <= nEv) return NULL;
-  return &evs[(id - 1) % N_EV];
-}
-// Guarda (o actualiza) un evento y le pone una revision nueva: la pagina pide lo que cambio
-void guardarEv(Evento &e) {
-  portENTER_CRITICAL(&candado);
-  e.rev = ++revGlobal;
-  evs[(e.id - 1) % N_EV] = e;
-  if (e.id > nEv) nEv = e.id;
-  portEXIT_CRITICAL(&candado);
+// Termina el arranque (como la V3): posicion 0 en el microswitch y las estrellas
+// se ALEJAN de el (sentido contrario al de la busqueda); luego sigue su ciclo.
+void terminarArranque() {
+  estrellas.setCurrentPosition(0);
+  sentidoE = -SENTIDO_INICIAL;
+  velE = V_ESTRELLAS_LENTO;
+  estrellas.setMaxSpeed(velE);
+  estrellas.setAcceleration(ACELERACION);
+  empezarAGirarE();                  // espera a soltar el microswitch antes de contar el siguiente
+  if (calibrado) iniciarSesion(); else iniciarCalibracion();
 }
 
-// Ventana de RMS: los ultimos n bloques (todos de este mismo tramo de sesion)
-void ventanaAgregar(float mv) { vRms[vW] = mv; vW = (vW + 1) % N_VENT; if (vN < N_VENT) vN++; }
-void ventanaLimpiar() { vN = 0; vW = 0; }
-int nVentana() { int n = (int)lroundf(cfg.tSost * BLOQUES_POR_S); return constrain(n, 10, N_VENT); }
-struct Ventana { float media, sd, minimo, maximo, deriva; uint8_t calidad; };
-bool statsVentana(int n, Ventana &v) {
-  if (vN < n) return false;
-  double s = 0, s2 = 0, sNuevo = 0, sViejo = 0; float mn = 1e9, mx = 0; uint8_t cal = 0;
-  int mitad = n / 2;
-  for (int i = 0; i < n; i++) {
-    float x = vRms[(vW - 1 - i + N_VENT) % N_VENT];
-    s += x; s2 += (double)x * x;
-    if (i < mitad) sNuevo += x; else if (i >= n - mitad) sViejo += x;
-    if (x < mn) mn = x;
-    if (x > mx) mx = x;
-    if (x >= Q_SATURADO) cal = 1;                  // 1 = ventana dudosa (saturacion)
-  }
-  double m = s / n, var = n > 1 ? (s2 - n * m * m) / (n - 1) : 0;
-  float der = (mitad > 0 && m > 0) ? fabsf((float)((sNuevo - sViejo) / mitad)) / (float)m : 0;   // |mitad nueva - mitad vieja| / media
-  v = {(float)m, sqrtf(max((float)var, 0.0f)), mn, mx, der, cal};
-  return true;
-}
-
-struct Periodo { int idx; float ini, dur, minEntre; int max; };
-Periodo periodoDe(float t) {
-  if (t < cfg.verIniS) return {0, 0, cfg.verIniS, cfg.verIniMin, cfg.verIniMax};
-  int n = (int)((t - cfg.verIniS) / cfg.verCicloS);
-  return {1 + n, cfg.verIniS + n * cfg.verCicloS, cfg.verCicloS, cfg.verCicloMin, cfg.verCicloMax};
-}
-
-void expirarPendiente() {
-  if (!pendId) return;
-  Evento *p = buscarEv(pendId);
-  if (p && p->status == EV_PENDIENTE) { Evento e = *p; e.status = EV_EXPIRADO; guardarEv(e); }
-  pendId = 0;
-}
-
-void reiniciarVerificacion() {
-  expirarPendiente();
-  perActual = -1; solPer = 0;
-  tSolUlt = finVentUlt = tEpUlt = -1e9;
-  epUltSol = 0;
-  for (int i = 0; i < 3; i++) nResp[i] = nErr[i] = 0;
-  nDetectados = 0;
-}
-
-void reiniciarEstadoRms() {
-  estadoRms = RMS_NINGUNO; bloquesEnEstado = 0; sostenidoMarcado = false; ventanaLimpiar();
-}
-
-// Hay un estado sostenido ahora mismo? (histeresis + ventana coherente con el estado)
-bool sostenidoVigente(Ventana &v) {
-  int nv = nVentana();
-  if (estadoRms == RMS_NINGUNO || bloquesEnEstado < nv || !statsVentana(nv, v)) return false;
-  if (v.deriva > VENT_DERIVA_MAX) return false;        // ventana que cruza una transicion: todavia no es estable
-  return estadoRms == RMS_ALTO ? v.media >= umbralOn : v.media < umbralOff;
-}
-
-// Sigue el estado del RMS suavizado con histeresis y cuenta los estados sostenidos.
-// NO genera avisos: solo marca que existe un estado estable candidato a confirmacion.
-void actualizarEstadoRms() {
-  uint8_t nuevo = estadoRms;
-  if (estadoRms == RMS_NINGUNO) nuevo = rmsSuave >= umbralOn ? RMS_ALTO : RMS_BAJO;
-  else if (estadoRms == RMS_BAJO && rmsSuave >= umbralOn) nuevo = RMS_ALTO;
-  else if (estadoRms == RMS_ALTO && rmsSuave < umbralOff) nuevo = RMS_BAJO;
-  if (nuevo != estadoRms) { estadoRms = nuevo; episodio++; bloquesEnEstado = 0; sostenidoMarcado = false; }
-  bloquesEnEstado++;
-  Ventana v;
-  if (!sostenidoMarcado && sostenidoVigente(v)) {
-    sostenidoMarcado = true; nDetectados++;
-    msg("   Estado sostenido %s (RMS medio %.0f mV en %.0f s). Candidato a confirmacion.",
-        estadoRms == RMS_ALTO ? "ALTO" : "BAJO", v.media, cfg.tSost);
-  }
-}
-
-bool paginaViva() { return tUltimaConsulta && (millis() - tUltimaConsulta) < 3000; }
-
-// Arma el evento con la ventana de RMS de AHORA (la del estado que se esta viendo)
-Evento armarEvento(const Ventana &v, uint8_t origen, const Periodo &p) {
-  Evento e;
-  memset(&e, 0, sizeof e);
-  e.id = nEv + 1; e.ep = episodio; e.origen = origen; e.estado = estadoRms;
-  e.calidad = v.calidad; e.periodo = p.idx; e.sid = sesionId;
-  e.tIni = tEfS() - nVentana() / (float)BLOQUES_POR_S; e.dur = nVentana() / (float)BLOQUES_POR_S;
-  e.media = v.media; e.sd = v.sd; e.minimo = v.minimo; e.maximo = v.maximo;
-  e.uon = umbralOn; e.uoff = umbralOff; e.tSolic = tEfS();
-  return e;
-}
-
-// Cuenta la respuesta y marca si coincide con la hipotesis (RMS alto <-> erguida, segun cfg.hip)
-void contarRespuesta(const Evento &e) {
-  if (e.postura != POST_ERGUIDA && e.postura != POST_CAIDA) return;
-  nResp[e.estado]++;
-  bool altoEsErguido = cfg.hip == 1;
-  bool esperadaErguida = (e.estado == RMS_ALTO) == altoEsErguido;
-  if (esperadaErguida != (e.postura == POST_ERGUIDA)) nErr[e.estado]++;
-}
-
-// Planificador de verificaciones: sin bloqueos, con el tiempo efectivo de terapia.
-void planificarVerificacion() {
-  if (modo != SESION) return;
-  float t = tEfS();
-  Periodo p = periodoDe(t);
-  if (p.idx != perActual) {                         // periodo nuevo: solo se reinicia el contador automatico
-    perActual = p.idx; solPer = 0;
-    if (p.idx == 0) msg(">> Verificacion: primeros %.0f min, maximo %d confirmaciones automaticas.", p.dur / 60, p.max);
-    else msg(">> Verificacion: ciclo %d (min %.0f-%.0f), maximo %d confirmaciones automaticas.", p.idx, p.ini / 60, (p.ini + p.dur) / 60, p.max);
-  }
-  if (pendId) {                                     // la pregunta caduca si no se responde a tiempo
-    Evento *pe = buscarEv(pendId);
-    if (!pe || pe->status != EV_PENDIENTE) pendId = 0;
-    else if (t - pe->tSolic > cfg.tResp) {
-      Evento e = *pe; e.status = EV_EXPIRADO; guardarEv(e); pendId = 0;
-      msg("   Pregunta #%lu sin respuesta: expirada.", (unsigned long)e.id);
-    }
-  }
-  if (pendId || !datosOK() || !paginaViva()) return;   // sin pagina no se pregunta (no se gasta el cupo)
-  if (solPer >= p.max) return;
-  if (t < tSolUlt + p.minEntre) return;                // intervalo minimo entre preguntas
-  if (t < p.ini + solPer * p.dur / (p.max + 1)) return; // reparto en el periodo: no todo al inicio
-  Ventana v;
-  if (!sostenidoVigente(v)) return;                    // hace falta un estado sostenido ahora
-  if (tEfS() - nVentana() / (float)BLOQUES_POR_S < finVentUlt) return;   // nunca dos preguntas sobre la misma ventana
-  // Prioridad: estado nuevo > observaciones poco representadas > estados que ya fallaron
-  int pts;
-  if (episodio != epUltSol) pts = 3;                   // episodio nuevo
-  else {                                               // el mismo estado sigue: comprobacion periodica, sin saturar
-    float desde = t - tEpUlt;
-    if (desde < cfg.tRever) return;
-    pts = (int)(desde / cfg.tRever);                   // 1 tras T_REVER, 2 tras el doble...
-  }
-  uint8_t otro = estadoRms == RMS_ALTO ? RMS_BAJO : RMS_ALTO;
-  if (nResp[estadoRms] < nResp[otro]) pts += 2;        // poco representado
-  if (nErr[estadoRms] > 0) pts += 2;                   // ya genero errores
-  if (pts < 2) return;
-  Evento e = armarEvento(v, 0, p);
-  e.status = EV_PENDIENTE; e.nSol = solPer + 1;
-  guardarEv(e);
-  pendId = e.id; solPer++; tSolUlt = t; finVentUlt = t; epUltSol = episodio; tEpUlt = t;
-  msg(">> Verificacion %d/%d (periodo %d): pregunta #%lu, ventana de %.0f s.", solPer, p.max, p.idx, (unsigned long)e.id, cfg.tSost);
-}
-
-// Respuesta de la fisioterapeuta a una pregunta pendiente. Idempotente.
-void responderEvento(uint32_t id, uint8_t postura) {
-  Evento *pe = buscarEv(id);
-  if (!pe || pe->status != EV_PENDIENTE || postura < 1 || postura > 3) return;   // duplicado o desconocido: se ignora
-  Evento e = *pe;
-  e.postura = postura;
-  e.status = postura == POST_INDETERMINADA ? EV_DESCARTADO : EV_CONFIRMADO;
-  guardarEv(e);
-  if (pendId == id) pendId = 0;
-  contarRespuesta(e);
-  msg("   Pregunta #%lu respondida: %s.", (unsigned long)id,
-      postura == POST_ERGUIDA ? "erguida" : postura == POST_CAIDA ? "caida" : "no se puede determinar");
-}
-
-// Confirmacion manual: usa la ventana de RMS de este momento. No gasta el cupo automatico.
-void confirmarManual(uint8_t postura, uint32_t token) {
-  if (token && token == tokManual) return;             // reintento de la pagina
-  if (modo != SESION || postura < 1 || postura > 3) { msg("!! La confirmacion manual necesita la sesion en marcha."); return; }
-  Ventana v;
-  int nv = min(nVentana(), vN);
-  if (estadoRms == RMS_NINGUNO || nv < 10 || !statsVentana(nv, v)) { msg("!! Aun no hay RMS suficiente para una confirmacion manual."); return; }
-  tokManual = token;
-  Periodo p = periodoDe(tEfS());
-  Evento e = armarEvento(v, 1, p);
-  e.dur = nv / (float)BLOQUES_POR_S; e.tIni = tEfS() - e.dur; e.tok = token;
-  e.postura = postura; e.status = postura == POST_INDETERMINADA ? EV_DESCARTADO : EV_CONFIRMADO;
-  guardarEv(e);
-  contarRespuesta(e);
-  finVentUlt = max(finVentUlt, tEfS());
-  msg("   Confirmacion manual #%lu: %s (RMS %.0f mV, estado %s).", (unsigned long)e.id,
-      postura == POST_ERGUIDA ? "erguida" : postura == POST_CAIDA ? "caida" : "no se puede determinar", v.media,
-      estadoRms == RMS_ALTO ? "ALTO" : "BAJO");
-}
-
-// ---------------------------------------------------------------------
-//  Parametros
-// ---------------------------------------------------------------------
-bool ajustarCfg(const char *k, float v, bool aplicar) {
-#define CF(nombre, campo, lo, hi) if (!strcmp(k, nombre)) { if (!(v >= (lo) && v <= (hi))) return false; if (aplicar) campo = (decltype(campo))v; return true; }
-  CF("basal", cfg.basalS, 5, 60)
-  CF("desc", cfg.descBasalS, 0, 5)
-  CF("k", cfg.k, 0.5, 10)
-  CF("f", cfg.f, 0.1, 0.95)
-  CF("tSost", cfg.tSost, 1, 6)
-  CF("v1s", cfg.verIniS, 30, 3600)
-  CF("v1max", cfg.verIniMax, 0, 20)
-  CF("v1min", cfg.verIniMin, 5, 3600)
-  CF("vcs", cfg.verCicloS, 60, 7200)
-  CF("vcmax", cfg.verCicloMax, 0, 20)
-  CF("vcmin", cfg.verCicloMin, 5, 7200)
-  CF("rever", cfg.tRever, 10, 3600)
-  CF("resp", cfg.tResp, 10, 600)
-  CF("hip", cfg.hip, 0, 1)
-#undef CF
-  return false;
-}
-
-// ---------------------------------------------------------------------
-//  Calibracion basal
-// ---------------------------------------------------------------------
-void reiniciarBasal() {
-  bSum = bSum2 = bSumA = bSumB = 0; bN = bNa = bNb = 0; bMin = 1e9; bMax = 0; bCorte = false;
-}
-
-// Deja la calibracion lista para empezar: espera el registro basal.
 void iniciarCalibracion() {
   cerrarActivacion();
-  expirarPendiente();
   modo = CALIBRANDO;
-  faseCal = CAL_ESPERA;
-  bloquesFase = 0;
-  reiniciarBasal();
-  msg(">> CALIBRACION BASAL (%.0f s): solo RMS en reposo; no se piden movimientos ni contracciones.", cfg.basalS);
-  msg(">> Esperando: pon al nino comodo y estable, con la cabeza apoyada, y registra el basal desde la pagina, con BOOT o con la tecla 1.");
+  tCal = millis();
+  nReposo = 0;
+  sumaReposo = suma2Reposo = 0.0;
+  pistaPendiente = 0;
+  Log.println();
+  Log.println(">> CALIBRACION BASAL: cabeza apoyada y estable durante 10 s (luz azul).");
+  Log.println(">> Se descarta el primer segundo; no hagas contracciones voluntarias.");
 }
 
-void iniciarSesion(bool nueva) {
-  if (nueva) {                     // tras calibrar: sesion nueva desde cero
-    sesionId++;
-    nActivaciones = 0;
-    tiempoActivoTotal = 0;
-    msSesion = 0;
-    reiniciarVerificacion();
-  }
+void iniciarSesion() {
   modo = SESION;
-  bajando = false;                 // el vaiven sigue donde iba
   activo = false;
   tSobre = tBajo = 0;
-  tInicioPremio = tFinPremio = millis();   // tras una pausa esperan 1.5 s antes de bajar
-  premio1 = false;
-  rmsSuave = reposo;               // no arrastra la contraccion de la calibracion
-  reiniciarEstadoRms();            // el RMS de antes de la pausa no se mezcla con el de ahora
-  if (nueva) msg(controlAuto ? ">> SESION: control automatico de los actuadores." :
-                 ">> SESION SUPERVISADA: el umbral aun no controla los actuadores (estrellas lentas, luz azul tenue, sin sonido).");
-  else msg(">> SESION: continua.");
+  tCambioCabeza = millis();
+  abajoAntes = cabezaAbajo();              // empezar la sesion no cambia la cancion
+  cambiarCancion = false;
+  Log.println();
+  Log.println(">> SESION: cabeza abajo = estrellas rapidas, luz brillante y colores rapidos.");
 }
 
-// Pone en uso la calibracion basal (aceptada, con advertencias o a la fuerza)
-void aplicarBasal(uint8_t nivel) {
-  cb.nivel = nivel;
-  reposo = cb.media; sdReposo = cb.sd;
-  float on, off; umbralesBasal(on, off);
-  histN = 0;
-  fijarUmbral(on, off, 0);
+void terminarCalibracion() {
+  calN = nReposo;
+  calPocos = nReposo < CAL_MIN_MUESTRAS;
+  calInestable = false;
+  sesionId++;                        // para la pagina: sesion nueva desde cero
+  msSesion = 0;
+  if (nReposo < CAL_MIN_MUESTRAS) {
+    // Casi no llegaron datos: no se cambia nada y se sigue (nunca se queda trabado)
+    Log.printf("!! Calibracion basal con solo %d bloques: se conservan los umbrales anteriores. Repite con c o BOOT.\n", nReposo);
+  } else {
+    double media = sumaReposo / nReposo;
+    double var = suma2Reposo / nReposo - media * media;
+    float sd = sqrtf((float)max(var, 0.0));
+    reposo = (float)media;
+    sdReposo = max(sd, 0.5f);
+    // Calidad: solo AVISA; el atril sigue funcionando (supervisado por la fisioterapeuta)
+    calInestable = media > 0 && (sd / media) > CAL_CV_MAX;
+    if (calInestable) {
+      Log.println("!! RMS basal inestable (variacion > 50 % de la media). Revisa electrodos;");
+      Log.println("!! el atril sigue funcionando. Puedes recalibrar con c o BOOT.");
+    }
+  }
   calibrado = true;
-  faseCal = CAL_LISTA;
+  calcularUmbrales();
   imprimirCalibracion();
-  msg(">> Calibracion LISTA. Inicia la sesion desde la pagina, con BOOT o con la tecla s. El umbral es preliminar.");
-}
-
-void terminarBasal() {
-  int total = (int)lroundf(cfg.basalS * BLOQUES_POR_S), desc = (int)lroundf(cfg.descBasalS * BLOQUES_POR_S);
-  int esperados = max(total - desc, 1);
-  cb.n = bN;
-  cb.media = bN ? bSum / bN : 0;
-  double var = bN > 1 ? (bSum2 - bN * (double)cb.media * cb.media) / (bN - 1) : 0;
-  cb.sd = sqrtf(max((float)var, 0.0f));
-  cb.cv = cb.media > 0 ? cb.sd / cb.media : 0;
-  float mA = bNa ? bSumA / bNa : cb.media, mB = bNb ? bSumB / bNb : cb.media;
-  cb.deriva = cb.media > 0 ? (mB - mA) / cb.media : 0;
-  cb.minimo = bN ? bMin : 0; cb.maximo = bMax;
-  uint16_t f = 0;
-  if (bCorte) f |= F_CORTE;
-  if (bN < 0.8f * esperados) f |= F_POCOS;
-  if (cb.media < Q_MEDIA_MIN) f |= F_NULA;
-  if (cb.media > Q_MEDIA_MAX) f |= F_RUIDO;
-  if (cb.maximo >= Q_SATURADO) f |= F_SATURA;
-  if (bN > 1 && cb.sd < 0.01f) f |= F_PLANA;
-  if (cb.cv > Q_CV_RECHAZO) f |= F_CV_EXC; else if (cb.cv > Q_CV_AVISO) f |= F_CV;
-  if (fabsf(cb.deriva) > Q_DERIVA_RECHAZO) f |= F_DER_EXC; else if (fabsf(cb.deriva) > Q_DERIVA_AVISO) f |= F_DER;
-  if (cb.sd > 0 && cb.maximo > cb.media + Q_PICO_SD * cb.sd) f |= F_PICOS;
-  cb.flags = f;
-  bloquesFase = 0;
-  if (f & F_RECHAZO) {
-    cb.nivel = 2;
-    faseCal = CAL_RECHAZADA;
-    imprimirCalibracion();
-    msg("!! Calibracion RECHAZADA: la senal basal no es suficientemente estable. Revisa electrodos, postura y cables y repite (1).");
-    msg("!! Si la fisioterapeuta decide usarla igual: tecla f (queda marcada como aceptada a la fuerza).");
-    return;
-  }
-  aplicarBasal(f ? 1 : 0);
-}
-
-// Empieza el registro basal. Se puede repetir las veces que haga falta.
-void empezarBasal() {
-  if (modo != CALIBRANDO) { msg("!! Primero comienza la calibracion (c)."); return; }
-  if (midiendo()) { msg("!! Ya se esta registrando el basal. Espera a que termine o cancelalo (x)."); return; }
-  reiniciarBasal();
-  faseCal = CAL_BASAL;
-  bloquesFase = 0;
-  msg(">> REGISTRO BASAL (%.0f s): cabeza apoyada y relajada. No mover al nino. Se descarta el primer %.1f s.", cfg.basalS, cfg.descBasalS);
-}
-
-void cancelarBasal() {
-  if (modo != CALIBRANDO || !midiendo()) return;
-  reiniciarBasal();
-  faseCal = CAL_ESPERA;
-  bloquesFase = 0;
-  msg(">> Registro basal cancelado. Puedes volver a empezarlo. La calibracion anterior (si habia) sigue vigente.");
-}
-
-// Devuelve true si el bloque se uso para la calibracion (no descartado)
-bool calibrarBloque(int mv) {
-  if (faseCal != CAL_BASAL) return false;
-  float env = mv;                     // envolvente = RMS del bloque de 100 ms
-  bool usado = false;
-  bloquesFase++;
-  int total = (int)lroundf(cfg.basalS * BLOQUES_POR_S), desc = (int)lroundf(cfg.descBasalS * BLOQUES_POR_S);
-  if (bloquesFase > desc) {
-    int esperados = max(total - desc, 1), mitad = esperados / 2;
-    bN++; bSum += env; bSum2 += (double)env * env;
-    if (bN <= mitad) { bSumA += env; bNa++; }
-    else if (bN > esperados - mitad) { bSumB += env; bNb++; }
-    if (env < bMin) bMin = env;
-    if (env > bMax) bMax = env;
-    usado = true;
-  }
-  if (bloquesFase >= total) terminarBasal();
-  return usado;
-}
-
-// Aprueba un umbral nuevo propuesto por la pagina (ya aprobado por la fisioterapeuta)
-void aplicarUmbralAprobado(float on, float off, uint32_t token) {
-  if (token && token == tokUmbral) return;             // reintento
-  if (!calibrado || !(off > 0 && on > off && on <= 5000)) { msg("!! Umbral rechazado por el atril (valores no validos)."); return; }
-  tokUmbral = token;
-  float antes = umbralOn;
-  fijarUmbral(on, off, 1);
-  msg(">> Umbral AJUSTADO (aprobado): U_ON %.1f -> %.1f mV, U_OFF %.1f mV.", antes, on, off);
-}
-
-void restaurarUmbral(uint32_t token) {
-  if (token && token == tokRestaurar) return;
-  if (histN < 2) { msg("!! No hay umbral anterior que restaurar."); return; }
-  tokRestaurar = token;
-  float antes = umbralOn;
-  histN--;                                              // descarta el vigente
-  UmbralHist h = hist[histN - 1];
-  histN--;                                              // fijarUmbral lo vuelve a anotar como restaurado
-  fijarUmbral(h.on, h.off, 2);
-  msg(">> Umbral RESTAURADO: U_ON %.1f -> %.1f mV, U_OFF %.1f mV.", antes, umbralOn, umbralOff);
+  iniciarSesion();
 }
 
 void entrarParo() {
@@ -886,111 +572,53 @@ void entrarParo() {
   detenerEstrellasYa();
   bobinasP(false);
   pistaPendiente = 0;
-  msg("!! PARO DE EMERGENCIA. Al soltarlo, presiona BOOT o escribe r para reanudar.");
+  Log.println();
+  Log.println("!! PARO DE EMERGENCIA. Al soltarlo, presiona BOOT o escribe r para reanudar.");
 }
 
 void reanudarTrasParo() {
-  if (paroActivo) { msg("El paro sigue presionado: giralo para soltarlo."); return; }
+  if (paroActivo) { Log.println("El paro sigue presionado: giralo para soltarlo."); return; }
   iniciarArranque();                 // vuelve a buscar el tope antes de moverse (y reenvia el volumen)
-}
-
-// Boton BOOT o tecla n: el siguiente paso que toca
-void siguientePaso() {
-  if (modo == PARO) { reanudarTrasParo(); return; }
-  if (modo == SESION || modo == PAUSA) { iniciarCalibracion(); return; }
-  if (modo != CALIBRANDO || midiendo()) return;
-  if (faseCal == CAL_LISTA) { iniciarSesion(true); return; }
-  empezarBasal();                  // esperando o rechazada: (re)registrar el basal
-}
-
-// Comandos del monitor serie y de la pagina (todos pasan por aqui, en el loop)
-void ejecutarComando(char c) {
-  switch (c) {
-    case 'c':
-      if (modo == ARRANQUE) msg("!! Espera a que las estrellas encuentren el tope.");
-      else if (modo == PARO) msg("!! Primero suelta el paro y reanuda (r).");
-      else iniciarCalibracion();
-      break;
-    case '1': empezarBasal(); break;
-    case 'x': cancelarBasal(); break;
-    case 'f':
-      if (modo == CALIBRANDO && faseCal == CAL_RECHAZADA) { msg("!! Calibracion aceptada A LA FUERZA por decision de la fisioterapeuta."); aplicarBasal(3); }
-      break;
-    case 's':
-      if (modo == CALIBRANDO && faseCal == CAL_LISTA) iniciarSesion(true);
-      else msg("!! La sesion empieza cuando la calibracion este LISTA.");
-      break;
-    case 'n': siguientePaso(); break;
-    case 'p':
-      if (modo == SESION) { cerrarActivacion(); modo = PAUSA; msg(">> PAUSA (p para seguir). El tiempo de terapia se detiene."); }
-      else if (modo == PAUSA) iniciarSesion(false);
-      break;
-    case 'r': if (modo == PARO) reanudarTrasParo(); break;
-    case 'h': if (modo != PARO) iniciarArranque(); break;
-    case 'a':
-      controlAuto = !controlAuto;
-      msg(controlAuto ? ">> CONTROL AUTOMATICO habilitado: el umbral ahora controla los actuadores."
-                      : ">> Modo SUPERVISADO: el umbral ya no controla los actuadores.");
-      break;
-    case 'i': imprimirCalibracion(); break;
-    default: break;
-  }
-}
-
-enum TipoCmd : uint8_t { C_CONF = 1, C_MANUAL, C_UMBRAL, C_RESTAURAR, C_CFG };
-struct CmdWeb { uint8_t tipo; uint8_t p; uint32_t id; uint32_t token; float a, b; char k[8]; };
-QueueHandle_t colaWeb = NULL;       // comandos con datos de la pagina -> loop
-
-void ejecutarWeb(const CmdWeb &c) {
-  switch (c.tipo) {
-    case C_CONF:      responderEvento(c.id, c.p); break;
-    case C_MANUAL:    confirmarManual(c.p, c.token); break;
-    case C_UMBRAL:    aplicarUmbralAprobado(c.a, c.b, c.token); break;
-    case C_RESTAURAR: restaurarUmbral(c.token); break;
-    case C_CFG:
-      if (ajustarCfg(c.k, c.a, true)) {
-        msg(">> Parametro %s = %g", c.k, c.a);
-        // Si el umbral vigente es el basal sin ajustes, se recalcula con los factores nuevos
-        if ((!strcmp(c.k, "k") || !strcmp(c.k, "f")) && calibrado && umbralOrigen == 0) {
-          float on, off; umbralesBasal(on, off); fijarUmbral(on, off, 0);
-          msg(">> U_ON %.1f mV, U_OFF %.1f mV (factores nuevos).", umbralOn, umbralOff);
-        }
-      } else msg("!! Parametro no valido: %s", c.k);
-      break;
-  }
 }
 
 // ======================================================================
 //  Entradas
 // ======================================================================
-void guardarBloque(int mv, uint8_t flag) {
-  portENTER_CRITICAL(&candado);
-  blqVal[nBlq % N_BLQ] = mv;
-  blqFlag[nBlq % N_BLQ] = flag;
-  nBlq++;
-  portEXIT_CRITICAL(&candado);
-}
-
 void procesarRms(int mv) {
   unsigned long ahora = millis();
   rmsUltimo = mv;
-  rmsSuave = hayDatos ? SUAVIZADO * mv + (1 - SUAVIZADO) * rmsSuave : mv;
+  ventana[ventanaI] = mv;                          // mediana movil de 0.5 s
+  ventanaI = (ventanaI + 1) % N_MEDIANA;
+  if (ventanaN < N_MEDIANA) ventanaN++;
+  float tmp[N_MEDIANA] = {0};
+  for (int k = 0; k < ventanaN; k++) tmp[k] = ventana[k];
+  for (int a = 1; a < ventanaN; a++) {             // ordenar (insercion)
+    float x = tmp[a]; int b = a - 1;
+    while (b >= 0 && tmp[b] > x) { tmp[b + 1] = tmp[b]; b--; }
+    tmp[b + 1] = x;
+  }
+  rmsSuave = tmp[ventanaN / 2];
   hayDatos = true;
   tUltimoDato = ahora;
 
   if (modo == CALIBRANDO) {
-    guardarBloque(mv, calibrarBloque(mv) ? 2 : 0);
+    // Se calibra sobre la misma mediana que se compara despues (el primer segundo no cuenta)
+    bool usado = false;
+    if (ahora - tCal >= CAL_DESCARTAR_MS && ventanaN == N_MEDIANA) {
+      sumaReposo += rmsSuave;
+      suma2Reposo += (double)rmsSuave * rmsSuave;
+      nReposo++;
+      usado = true;
+    }
+    guardarBloque(mv, rmsSuave, usado ? 2 : 0);
     return;
   }
-  if (modo != SESION) { guardarBloque(mv, 0); return; }
+  if (modo != SESION) { guardarBloque(mv, rmsSuave, 0); return; }
 
-  nivel = constrain((rmsSuave - reposo) / (2 * max(umbralOn - reposo, 1.0f)), 0.0f, 1.0f);
+  // Nivel relativo al umbral, NO porcentaje de contraccion voluntaria maxima.
+  nivel = constrain((rmsSuave - reposo) / max(umbralOn - reposo, 1.0f), 0.0f, 1.0f);
 
-  // Estados sostenidos con histeresis (no avisan: solo marcan candidatos a confirmacion)
-  ventanaAgregar(mv);
-  actualizarEstadoRms();
-
-  // Activacion de 300 ms (conteo y, con control automatico, actuadores): igual que antes
+  // Histeresis + confirmacion en el tiempo
   if (!activo) {
     if (rmsSuave >= umbralOn) {
       if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; msSesionIni = msSesion; }
@@ -998,8 +626,7 @@ void procesarRms(int mv) {
       if (ahora - tSobre + HOLGURA_MS >= T_CONFIRMAR) {
         activo = true;
         tInicioActivo = tSobre;
-        if (PREMIO_AL_RELAJAR) tFinPremio = ahora;            // contraer termina el premio
-        else { tInicioPremio = tSobre; premio1 = false; }
+        tCambioCabeza = ahora;                             // cambia de cabeza abajo <-> arriba
         nActivaciones++;
         tBajo = 0;
       }
@@ -1014,10 +641,7 @@ void procesarRms(int mv) {
       sumaRmsAct += mv; nRmsAct++;
     }
   }
-
-  // Banderas del bloque para la pagina: 1 ALTO, 4 sostenido, 8 activacion
-  uint8_t fl = (estadoRms == RMS_ALTO ? 1 : 0) | ((bloquesEnEstado >= nVentana() && vN >= nVentana()) ? 4 : 0) | (activo ? 8 : 0);
-  guardarBloque(mv, fl);
+  guardarBloque(mv, rmsSuave, activo ? 1 : 0);
 }
 
 void leerArduino() {
@@ -1047,17 +671,54 @@ void leerArduino() {
   // ~4 s de bytes sin ninguna linea valida: casi siempre es polaridad o baudios
   if (!avisoBytes && bytesSinLinea > 200) {
     avisoBytes = true;
-    msg("!! Llegan bytes del Arduino pero ninguna linea valida.");
-    msg("!! Revisa que ambos esten a 9600 baud, o cambia EMG_INVERTIDO y vuelve a cargar.");
+    Log.println("!! Llegan bytes del Arduino pero ninguna linea valida.");
+    Log.println("!! Revisa que ambos esten a 9600 baud, o cambia EMG_INVERTIDO y vuelve a cargar.");
   }
+}
+
+// Prueba en vivo el siguiente orden de bobinas del lazy susan
+void cambiarOrdenPlanetas() {
+  planetas->disableOutputs();
+  bobinasPlanetas = false;
+  ordenP = (ordenP + 1) % N_ORDENES_P;
+  planetas = &planetasOrden[ordenP];
+  velPlanetas = 0;                   // arranca suave con el orden nuevo
+  Log.printf(">> Lazy susan: combinacion %d (%s). Si ahora gira parejo, pon ORDEN_PLANETAS = %d.\n",
+                ordenP, NOMBRE_ORDEN_P[ordenP], ordenP);
+}
+
+// Comandos del monitor serie y de la pagina (todos pasan por aqui, en el loop)
+void ejecutarComando(char c) {
+    switch (c) {
+      case 'c': if (modo == SESION || modo == PAUSA) iniciarCalibracion(); break;
+      case 'p':
+        if (modo == SESION) { cerrarActivacion(); modo = PAUSA; Log.println(">> PAUSA (p para seguir)"); }
+        else if (modo == PAUSA) {
+          if (calibrado) iniciarSesion();
+          else Log.println("!! Calibracion no valida. Repite con c o BOOT.");
+        }
+        break;
+      case 'r': if (modo == PARO) reanudarTrasParo(); break;
+      case 'h': if (modo != PARO) iniciarArranque(); break;      // vuelve a buscar el microswitch
+      case 'x':                                                  // invierte que estado es "cabeza abajo"
+        abajoEsActividad = !abajoEsActividad;
+        tCambioCabeza = millis();
+        abajoAntes = cabezaAbajo();
+        Log.printf(">> Ahora CABEZA ABAJO = RMS %s el umbral. Si queda bien, pon ABAJO_ES_ACTIVIDAD = %s.\n",
+                      abajoEsActividad ? "SOBRE" : "BAJO", abajoEsActividad ? "true" : "false");
+        break;
+      case '+': if (calibrado) { umbralK = min(umbralK + 0.5f, 8.0f); calcularUmbrales(); imprimirCalibracion(); } break;
+      case '-': if (calibrado) { umbralK = max(umbralK - 0.5f, 1.0f); calcularUmbrales(); imprimirCalibracion(); } break;
+      case 'i': imprimirCalibracion(); break;
+      case 'o': cambiarOrdenPlanetas(); break;
+      default: break;
+    }
 }
 
 void leerComandos() {
   while (Serial.available()) ejecutarComando(Serial.read());
   char c;
   while (colaCmd && xQueueReceive(colaCmd, &c, 0) == pdTRUE) ejecutarComando(c);
-  CmdWeb w;
-  while (colaWeb && xQueueReceive(colaWeb, &w, 0) == pdTRUE) ejecutarWeb(w);
 }
 
 void revisarBoot() {
@@ -1065,7 +726,10 @@ void revisarBoot() {
   if (v != bootAnterior && millis() - bootCambio > 50) {
     bootCambio = millis();
     bootAnterior = v;
-    if (v == LOW) siguientePaso();  // al presionar
+    if (v == LOW) {  // al presionar
+      if (modo == PARO) reanudarTrasParo();
+      else if (modo == SESION || modo == PAUSA) iniciarCalibracion();
+    }
   }
 }
 
@@ -1078,7 +742,7 @@ void revisarParo() {
   if (presionado && !paroActivo) { paroActivo = true; entrarParo(); }
   else if (!presionado && paroActivo) {
     paroActivo = false;
-    msg(">> Paro liberado. Presiona BOOT o escribe r para reanudar.");
+    Log.println(">> Paro liberado. Presiona BOOT o escribe r para reanudar.");
   }
 }
 
@@ -1088,7 +752,7 @@ void revisarParo() {
 void actualizarModo() {
   unsigned long ahora = millis();
 
-  // Tiempo de sesion (sin pausas)
+  // Tiempo de sesion para la pagina (sin pausas)
   static unsigned long tPrevio = 0;
   if (modo == SESION && tPrevio) msSesion += ahora - tPrevio;
   tPrevio = ahora;
@@ -1097,8 +761,8 @@ void actualizarModo() {
   int8_t aw = avisoWifi;
   if (aw) {
     avisoWifi = 0;
-    if (aw > 0) msg(">> WiFi conectado a la red %s. Pagina: http://%s", RED_SSID, WiFi.localIP().toString().c_str());
-    else msg("!! Se perdio la red WiFi %s (el atril sigue funcionando; reintentando).", RED_SSID);
+    if (aw > 0) Log.printf(">> WiFi conectado a la red %s. Pagina: http://%s\n", RED_SSID, WiFi.localIP().toString().c_str());
+    else Log.printf("!! Se perdio la red WiFi %s (el atril sigue funcionando; reintentando).\n", RED_SSID);
   }
 
   // Watchdog: avisa una vez al perder / recuperar los datos
@@ -1107,29 +771,41 @@ void actualizarModo() {
     datosAntes = ok;
     if (!ok) {
       cerrarActivacion(tUltimoDato);                 // no cuenta el tiempo sin senal
-      reiniciarEstadoRms();                          // no se mezclan datos de antes y despues del corte
-      if (modo == CALIBRANDO && faseCal == CAL_BASAL) bCorte = true;   // el registro basal ya no es continuo
-      msg("!! Sin datos del Arduino: estrellas lentas y luz ambar hasta que vuelvan.");
+      ventanaN = 0;                                  // la mediana empieza de nuevo
+      Log.println("!! Sin datos del Arduino: estrellas y planetas quietos hasta que vuelvan.");
     } else {
-      if (!activo) { tInicioPremio = tFinPremio = ahora; premio1 = false; }  // 1.5 s para reconfirmar
-      msg(">> Llegan datos del Arduino.");
+      tCambioCabeza = ahora;             // al volver los datos, el estado empieza de nuevo
+      Log.println(">> Llegan datos del Arduino.");
     }
   }
 
-  // El registro basal avanza con cada bloque recibido (calibrarBloque): sin datos, espera.
-  planificarVerificacion();                      // temporizadores de verificacion (no bloquea)
+  // Calibracion basal: termina a los 10 s por reloj, lleguen o no todos los datos
+  if (modo == CALIBRANDO && ahora - tCal >= CAL_MS) terminarCalibracion();
 
-  // Sonido: estado premiado sostenido 1 s
-  if (modo == SESION && premiado() && ok && !premio1 && ahora - tInicioPremio >= T_PREMIO) {
-    premio1 = true;
-    sonar(1);
+  // Musica: siempre sonando (menos en PARO). Cada vez que SUBE la cabeza, otra cancion.
+  if (modo == SESION && ok) {
+    bool abajo = cabezaAbajo();
+    if (!abajoAntes && abajo) tInicioAbajo = ahora;      // la cabeza acaba de bajar
+    if (abajoAntes && !abajo && ahora - tInicioAbajo >= T_ABAJO_MIN_MS &&
+        ahora - tUltimoCambioCancion >= T_ENTRE_CANCIONES)
+      cambiarCancion = true;                             // la cabeza acaba de subir
+    abajoAntes = abajo;
   }
-
-  // Pista pendiente: suena al cumplirse la pausa, si su motivo sigue vigente
-  if (pistaPendiente) {
-    bool vigente = (modo == SESION) && ok && premiado() && (pistaPendiente == 1 || premioCima);
-    if (!vigente) pistaPendiente = 0;
-    else if (ahora - ultimoSonido >= PAUSA_SONIDO) sonar(pistaPendiente);
+  if (ahora - ultimoCmdMusica >= 300 && (long)(ahora - tMusicaLista) >= 0) {  // tiempo entre comandos
+    if (modo == PARO) {
+      if (musicaSonando) { dfEnviar(0x16, 0); musicaSonando = false; ultimoCmdMusica = ahora; }
+    } else if (!musicaSonando) {
+      dfEnviar(0x08, cancion);                   // reproducir la cancion actual en bucle
+      musicaSonando = true; ultimoCmdMusica = ahora;
+      Log.printf("   >> Musica: cancion %d\n", cancion);
+    } else if (cambiarCancion) {
+      cambiarCancion = false;
+      tUltimoCambioCancion = ahora;
+      cancion = cancion % NUM_CANCIONES + 1;
+      dfEnviar(0x08, cancion);
+      ultimoCmdMusica = ahora;
+      Log.printf("   >> Cabeza arriba: cancion %d\n", cancion);
+    }
   }
 
   // Reenvio del volumen (el DFPlayer pierde la configuracion si se queda sin energia)
@@ -1142,104 +818,85 @@ void actualizarModo() {
   while (Serial1.available()) Serial1.read();
 }
 
-// Vaiven: velocidad segun el estado del musculo
-float velVaiven() {
-  if (modo == SESION && datosOK() && premiado()) return V_VAIVEN_RAPIDO;   // relajado: rapido
-  return V_VAIVEN_LENTO;          // contrayendo, calibrando o sin datos: lento
+// Velocidad de las estrellas: CABEZA ABAJO acelera hasta V_ESTRELLAS_RAPIDO en
+// T_BRILLO_RELAJADO. Cabeza arriba, calibrando o sin datos: lento.
+float velEstrellas() {
+  if (modo == SESION && datosOK() && cabezaAbajo()) {
+    float k = min((float)(millis() - tCambioCabeza) / T_BRILLO_RELAJADO, 1.0f);
+    float v = V_ESTRELLAS_LENTO + (V_ESTRELLAS_RAPIDO - V_ESTRELLAS_LENTO) * k;
+    return 50.0f * (int)(v / 50.0f);   // en escalones de 50 pasos/s
+  }
+  return V_ESTRELLAS_LENTO;
 }
 
-void empezarVaiven() {
-  modoE = E_CONTROL;
-  subiendo = frenando = false;
-  bobinasE(true);
-  velE = V_VAIVEN_LENTO;
-  estrellas.setMaxSpeed(velE);
-  estrellas.setAcceleration(ACELERACION);
-  estrellas.moveTo(POS_FONDO);       // primero bajan, luego van y vienen
-}
-
+// Gira -> pisa el endstop -> regresa a 0 -> gira al otro lado -> pisa el endstop
+// -> regresa a 0 -> ...  (igual que motor_endstop.ino). Nunca se queda detenido.
 void moverEstrellas() {
-  switch (modoE) {
-    case E_HOMING:
-      if (modo == PARO) return;
-      if (!USAR_TOPE) {
-        estrellas.setCurrentPosition(POS_FONDO);
-        msg(">> USAR_TOPE = false: cuento desde el FONDO (las estrellas deben arrancar abajo).");
-        empezarVaiven();
-        if (calibrado) iniciarSesion(false); else iniciarCalibracion();
-      } else if (topePresionado()) {
-        fijarTope();
-        msg(">> Tope encontrado. Las estrellas empiezan a subir y bajar.");
-        empezarVaiven();
-        if (calibrado) iniciarSesion(false); else iniciarCalibracion();
-      } else if (estrellas.runSpeed()) {
-        if (++pasosHoming > RECORRIDO * 13 / 10) {
-          bobinasE(false);
-          modoE = E_SIN_TOPE;
-          msg("!! No encontre el tope. Las estrellas quedan desactivadas (revisa microswitch y DIR_SUBIR,");
-          msg("!! o pon USAR_TOPE = false y enciende con las estrellas abajo).");
-          if (calibrado) iniciarSesion(false); else iniciarCalibracion();
-        }
-      }
-      return;
-    case E_SIN_TOPE:
-      return;
-    case E_CONTROL:
-      break;
+  if (modo == PARO) return;
+
+  // ---- Arranque: buscar el microswitch ----
+  if (estadoE == E_BUSCANDO) {
+    if (topePresionado()) {
+      Log.println(">> Tope encontrado. Las estrellas empiezan a subir y bajar.");
+      terminarArranque();
+    } else if (estrellas.runSpeed() && ++pasosHoming > HOMING_MAX_PASOS) {
+      Log.println("!! No encontre el microswitch: la posicion 0 queda donde estan ahora (revisa microswitch y SENTIDO_INICIAL).");
+      terminarArranque();
+    }
+    return;
   }
 
-  // ---- Vaiven continuo entre el fondo y el tope ----
-  if (modo == PARO) return;
-  if (modo == PAUSA) {
+  if (modo == PAUSA) {                       // en pausa frenan suave y esperan
     if (!frenando) { frenarEstrellas(); frenando = true; }
   } else {
-    if (frenando) { frenando = false; estrellas.moveTo(subiendo ? POS_TOPE : POS_FONDO); }
-    float v = velVaiven();
-    if (v != velE) { velE = v; estrellas.setMaxSpeed(v); }
-    if (estrellas.distanceToGo() == 0) {               // llego a un extremo: cambia de sentido
-      subiendo = !subiendo;
-      estrellas.moveTo(subiendo ? POS_TOPE : POS_FONDO);
+    if (frenando) {                          // al seguir, retoman lo que hacian
+      frenando = false;
+      estrellas.moveTo(estadoE == E_GIRANDO ? (long)sentidoE * MUY_LEJOS : 0);
     }
-  }
+    float v = velEstrellas();
+    if (v != velE) { velE = v; estrellas.setMaxSpeed(v); }
 
-  if (USAR_TOPE) {
-    // Microswitch: tope real. Si se presiona subiendo, resincroniza y da la vuelta.
-    if ((subiendo || estrellas.speed() * DIR_SUBIR > 0) && topePresionado()) fijarTope();
-    // Bajando lejos del tope no puede estar presionado: cableado en NC o atorado.
-    else if (!subiendo && labs(estrellas.currentPosition() - POS_TOPE) > TOPE_SUELTA && topePresionado()) {
-      detenerEstrellasYa();
-      modoE = E_SIN_TOPE;
-      msg("!! El microswitch sigue presionado lejos del tope. Revisa que este en NO (no en NC).");
-      msg("!! Las estrellas quedan desactivadas; usa h al arreglarlo.");
-      return;
+    switch (estadoE) {
+      case E_GIRANDO:
+        // Esperar a que el endstop este suelto antes de aceptar un nuevo picado
+        if (!endstopArmado) {
+          if (digitalRead(PIN_TOPE) == HIGH) endstopArmado = true;
+        } else if (topePresionado()) {
+          // Cada vez que se presiona el microswitch: cambian de sentido de inmediato
+          vueltasEndstop++;
+          Log.println("   Estrellas: microswitch presionado. Cambio de sentido.");
+          sentidoE = -sentidoE;
+          empezarAGirarE();                  // gira hacia el otro lado (espera a que se suelte)
+        }
+        break;
+      case E_REGRESANDO:
+        if (estrellas.distanceToGo() == 0) {
+          sentidoE = -sentidoE;              // ahora hacia el otro lado
+          empezarAGirarE();
+        }
+        break;
+      case E_BUSCANDO:
+        break;
     }
   }
 
   if (estrellas.distanceToGo() != 0) { bobinasE(true); estrellas.run(); }
   else bobinasE(false);
-
-  // Premio al llegar arriba relajado
-  float a = altura();
-  if (!premioCima && premiado() && a >= 0.99f && modo == SESION && datosOK()) {
-    premioCima = true;
-    sonar(2);
-    msg("   *** Estrellas arriba ***");
-  } else if (premioCima && a < 0.80f) {
-    premioCima = false;
-  }
 }
 
-// El lazy susan gira siempre (desde el encendido). Solo para con PARO o la pausa p.
+// El lazy susan gira SIEMPRE desde el encendido (arranque, calibracion, sesion y
+// pausa). No depende del microswitch. Solo lo detiene el PARO.
 void moverPlanetas() {
-  if (modo != PARO && modo != PAUSA) {
+  if (modo != PARO) {
     bobinasP(true);
     unsigned long ahora = millis();
-    if (velPlanetas < V_PLANETAS && ahora - tRampaP >= 20) {   // arranque suave
+    float vObj = ordenP >= 3 ? V_PLANETAS / 2.0f : (float)V_PLANETAS;   // paso completo: mitad de pasos, misma vuelta
+    if (velPlanetas < vObj && ahora - tRampaP >= 20) {   // arranque suave
       tRampaP = ahora;
-      velPlanetas = min(velPlanetas + ACEL_PLANETAS * 0.02f, (float)V_PLANETAS);
-      planetas.setSpeed(velPlanetas);
+      velPlanetas = min(velPlanetas + ACEL_PLANETAS * 0.02f, vObj);
+      planetas->setSpeed(velPlanetas);
     }
-    planetas.runSpeed();
+    planetas->runSpeed();
   } else {
     bobinasP(false);
     velPlanetas = 0;                 // al volver, arranca suave otra vez
@@ -1254,22 +911,24 @@ void actualizarLuz() {
   float r = 0, g = 0, b = 0;
   switch (modo) {
     case ARRANQUE:   r = 15; g = 15; b = 15; break;                 // blanco tenue
-    case CALIBRANDO:
-      if (!midiendo()) { r = 15; g = 15; b = 15; }                  // blanco tenue: espera el registro
-      else b = 70;                                                  // azul: registrando el basal
-      break;
+    case CALIBRANDO: b = 70; break;   // azul durante todo el registro basal
     case PAUSA:      r = 15; g = 15; b = 15; break;
     case PARO:       break;                                         // apagada
     case SESION:
       if (!datosOK())               { r = 40; g = 10; }             // ambar: sin senal
-      else if (premioCima && premiado()) { g = 110; b = 50; }       // verde azulado: arriba
-      else if (premiado() && PREMIO_AL_RELAJAR) {                    // lila que crece al relajar
-        float k = min((float)(ahora - tInicioPremio) / T_BRILLO_RELAJADO, 1.0f);
-        float f = 0.25f + 0.75f * k;
-        r = LILA_R * f; g = LILA_G * f; b = LILA_B * f;
+      else {
+        // k = 0 con actividad; sube de 0 a 1 en los primeros 5 s por debajo del umbral
+        float k = cabezaAbajo() ? min((float)(ahora - tCambioCabeza) / T_BRILLO_RELAJADO, 1.0f) : 0.0f;
+        float periodo = PERIODO_COLOR_LENTO + (PERIODO_COLOR_RAPIDO - PERIODO_COLOR_LENTO) * k;
+        faseColor += 20.0f / periodo;              // cambia de color mas rapido al relajar
+        if (faseColor >= 1.0f) faseColor -= 1.0f;
+        float brillo = BRILLO_MAX * (BRILLO_MIN_FRAC + (1.0f - BRILLO_MIN_FRAC) * k);   // y mas brillante
+        float h = faseColor * 3.0f; int seg = (int)h; float f = h - seg;   // rueda rojo-verde-azul
+        if (seg == 0)      { r = 1 - f; g = f;     b = 0; }
+        else if (seg == 1) { r = 0;     g = 1 - f; b = f; }
+        else               { r = f;     g = 0;     b = 1 - f; }
+        r *= brillo; g *= brillo; b *= brillo;
       }
-      else if (premiado())          { r = 40 + 88 * nivel; g = 15 + 45 * nivel; }  // dorado
-      else                          { b = 25; }                      // azul tenue
       break;
   }
   r = min(r, (float)BRILLO_MAX); g = min(g, (float)BRILLO_MAX); b = min(b, (float)BRILLO_MAX);
@@ -1288,14 +947,12 @@ void imprimirEstado() {
   if (ahora - ultimoEstado < 500) return;
   ultimoEstado = ahora;
   if (modo == SESION) {
-    char est[16];
-    if (modoE == E_SIN_TOPE) snprintf(est, sizeof est, "DESACTIVADAS");
-    else snprintf(est, sizeof est, "%3d %%", (int)(altura() * 100));
-    Serial.printf("[SESION] RMS %4d mV (U_ON %.0f) | nivel %3d %% | %s | estrellas %s | activaciones %d%s\n",
-                  rmsUltimo, umbralOn, (int)(nivel * 100), activo ? "ACTIVO" : "reposo",
-                  est, nActivaciones, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
+    Serial.printf("[SESION] RMS %4d mV, mediana %4.0f (umbral %.0f) | %s (%s umbral) | estrellas %.0f pasos/s | cancion %d%s\n",
+                  rmsUltimo, rmsSuave, umbralOn, cabezaAbajo() ? "CABEZA ABAJO" : "cabeza arriba",
+                  activo ? "sobre" : "bajo", velE, cancion, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else if (modo == CALIBRANDO) {
-    Serial.printf("[CALIBRANDO %s] RMS %4d mV%s\n", NOMBRE_FASE[faseCal],
+    unsigned long t = millis() - tCal;
+    Serial.printf("[CALIBRANDO BASAL, quedan %.1f s] RMS %4d mV%s\n", t < CAL_MS ? (CAL_MS - t) / 1000.0f : 0.0f,
                   rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else {
     Serial.printf("[%s]%s\n", NOMBRE_MODO[modo], datosOK() ? "" : " sin datos del Arduino");
@@ -1307,9 +964,10 @@ void imprimirEstado() {
 //  que cambia el atril lo hace el loop con ejecutarComando().
 // ======================================================================
 WebServer web(80);
-static char js[16384];              // respuesta de /estado
+static char js[8192];               // respuesta de /estado
 static int jl = 0;
 
+void ja(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void ja(const char *fmt, ...) {
   if (jl >= (int)sizeof(js) - 1) return;
   va_list ap;
@@ -1346,94 +1004,50 @@ uint32_t desde(const char *arg, uint32_t total, uint32_t guardados) {
   return (uint32_t)q;
 }
 
-const int EV_POR_RESPUESTA = 10;
-
 void manejarEstado() {
-  static int32_t bv[N_BLQ];
+  static int32_t br[N_BLQ];
+  static float bm[N_BLQ];
   static uint8_t bf[N_BLQ];
   static Activacion av[N_ACT];
   static char lt[N_LOG][LARGO_LOG];
-  static Evento ev[EV_POR_RESPUESTA];
 
-  tUltimaConsulta = millis();                         // la pagina esta viva: ya se pueden hacer preguntas
-
-  // Copia de lo que cambia en el otro nucleo
-  uint32_t nb, na, nl, b0, a0, l0, rev, nev;
+  uint32_t nb, na, nl, b0, a0, l0;
   portENTER_CRITICAL(&candado);
-  nb = nBlq; na = nActLista; nl = nLog; rev = revGlobal; nev = nEv;
+  nb = nBlq; na = nActLista; nl = nLog;
   portEXIT_CRITICAL(&candado);
   b0 = desde("b", nb, N_BLQ);
   a0 = desde("a", na, N_ACT);
   l0 = desde("l", nl, N_LOG);
-  uint32_t r0 = web.hasArg("r") ? (uint32_t)web.arg("r").toInt() : 0;
-  int nEvSal = 0;
-  uint32_t er = rev;
   portENTER_CRITICAL(&candado);
-  for (uint32_t i = b0; i < nb; i++) { bv[i - b0] = blqVal[i % N_BLQ]; bf[i - b0] = blqFlag[i % N_BLQ]; }
+  for (uint32_t i = b0; i < nb; i++) { br[i - b0] = blqRms[i % N_BLQ]; bm[i - b0] = blqMed[i % N_BLQ]; bf[i - b0] = blqFlag[i % N_BLQ]; }
   for (uint32_t i = a0; i < na; i++) av[i - a0] = actLista[i % N_ACT];
   for (uint32_t i = l0; i < nl; i++) memcpy(lt[i - l0], logTxt[i % N_LOG], LARGO_LOG);
-  // Eventos con revision nueva, de la mas antigua a la mas reciente (hasta EV_POR_RESPUESTA por vez)
-  uint32_t ultima = r0;
-  while (nEvSal < EV_POR_RESPUESTA) {
-    int mejor = -1; uint32_t rm = 0xFFFFFFFF;
-    for (int i = 0; i < N_EV; i++) {
-      if (evs[i].id == 0 || evs[i].id > nev || evs[i].rev <= ultima) continue;
-      if (evs[i].rev < rm) { rm = evs[i].rev; mejor = i; }
-    }
-    if (mejor < 0) break;
-    ev[nEvSal++] = evs[mejor];
-    ultima = rm;
-  }
   portEXIT_CRITICAL(&candado);
-  // Si quedaron eventos sin mandar, el cursor se queda en el ultimo mandado
-  bool hayMas = false;
-  for (int i = 0; i < N_EV && !hayMas; i++) hayMas = evs[i].id != 0 && evs[i].id <= nev && evs[i].rev > ultima;
-  if (hayMas) er = ultima;
 
-  float t = tEfS();
-  Periodo per = periodoDe(t);
-  float espera = -1;
-  if (modo == SESION && solPer < per.max)
-    espera = max(max(tSolUlt + per.minEntre - t, per.ini + solPer * per.dur / (per.max + 1) - t), 0.0f);
-  int total = faseCal == CAL_BASAL ? (int)lroundf(cfg.basalS * BLOQUES_POR_S) : 0;
   unsigned long ahora = millis();
   bool act = activo;
-  Ventana vv;
-  bool sost = modo == SESION && sostenidoVigente(vv);
+  unsigned long tc = ahora - tCal;
+  float restante = modo == CALIBRANDO ? (tc < CAL_MS ? (CAL_MS - tc) / 1000.0f : 0.0f) : 0.0f;
 
   jl = 0; js[0] = 0;
-  ja("{\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"fase\":\"%s\"", VERSION_ATRIL, (unsigned long)idArranque, NOMBRE_MODO[modo], NOMBRE_FASE[faseCal]);
-  ja(",\"bloq\":%d,\"total\":%d,\"datos\":%d,\"rms\":%d,\"suave\":%.1f,\"calibrado\":%d,\"uon\":%.1f,\"uoff\":%.1f,\"uorig\":%d,\"ctl\":%d",
-     bloquesFase, total, datosOK() ? 1 : 0, rmsUltimo, rmsSuave, calibrado ? 1 : 0, umbralOn, umbralOff, umbralOrigen, controlAuto ? 1 : 0);
-  ja(",\"activo\":%d,\"nivel\":%d,\"durAct\":%.1f,\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f",
-     act ? 1 : 0, (int)(nivel * 100), act ? (ahora - tInicioActivo) / 1000.0f : 0.0f, sesionId,
-     nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f);
-  ja(",\"alt\":%d,\"estOK\":%d,\"malas\":%lu,\"rssi\":%d",
-     (int)(altura() * 100), modoE != E_SIN_TOPE ? 1 : 0, lineasMalas, (int)WiFi.RSSI());
-  ja(",\"est\":%d,\"bEst\":%.1f,\"sost\":%d,\"ep\":%lu,\"nDet\":%lu",
-     estadoRms, bloquesEnEstado / (float)BLOQUES_POR_S, sost ? 1 : 0, (unsigned long)episodio, (unsigned long)nDetectados);
-  ja(",\"cb\":{\"media\":%.2f,\"sd\":%.2f,\"cv\":%.3f,\"der\":%.3f,\"mn\":%.1f,\"mx\":%.1f,\"n\":%d,\"fl\":%u,\"niv\":%d}",
-     cb.media, cb.sd, cb.cv, cb.deriva, cb.minimo, cb.maximo, cb.n, (unsigned)cb.flags, cb.nivel);
-  ja(",\"ver\":{\"per\":%d,\"max\":%d,\"sol\":%d,\"tPer\":%.1f,\"dur\":%.0f,\"esp\":%.1f,\"pend\":%lu,\"nr\":[%lu,%lu],\"ne\":[%lu,%lu]}",
-     modo == SESION ? per.idx : -1, per.max, solPer, max(t - per.ini, 0.0f), per.dur, espera, (unsigned long)pendId,
-     (unsigned long)nResp[1], (unsigned long)nResp[2], (unsigned long)nErr[1], (unsigned long)nErr[2]);
-  ja(",\"cfg\":{\"basal\":%.1f,\"desc\":%.1f,\"k\":%.2f,\"f\":%.2f,\"tSost\":%.1f,\"v1s\":%.0f,\"v1max\":%d,\"v1min\":%.0f,\"vcs\":%.0f,\"vcmax\":%d,\"vcmin\":%.0f,\"rever\":%.0f,\"resp\":%.0f,\"hip\":%d,\"bps\":%d}",
-     cfg.basalS, cfg.descBasalS, cfg.k, cfg.f, cfg.tSost, cfg.verIniS, cfg.verIniMax, cfg.verIniMin,
-     cfg.verCicloS, cfg.verCicloMax, cfg.verCicloMin, cfg.tRever, cfg.tResp, cfg.hip, BLOQUES_POR_S);
-  ja(",\"hist\":[");
-  for (int i = 0; i < histN; i++) ja(i ? ",[%.1f,%.1f,%d,%.0f]" : "[%.1f,%.1f,%d,%.0f]", hist[i].on, hist[i].off, hist[i].origen, hist[i].tSes);
-  ja("],\"rev\":%lu,\"er\":%lu,\"ev\":[", (unsigned long)rev, (unsigned long)er);
-  for (int i = 0; i < nEvSal; i++) {
-    const Evento &e = ev[i];
-    ja(i ? ",[%lu,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%lu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]" : "[%lu,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%lu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f]",
-       (unsigned long)e.id, (unsigned long)e.rev, (unsigned long)e.ep, e.origen, e.estado, e.status, e.postura, e.sid, e.periodo, e.nSol,
-       e.calidad, (unsigned long)e.tok, e.tIni, e.dur, e.media, e.sd, e.minimo, e.maximo, e.uon, e.uoff);
-  }
-  ja("],\"bn\":%lu,\"b\":[", (unsigned long)nb);
-  for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%d]" : "[%ld,%d]", (long)bv[i], bf[i]);
+  ja("{\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"datos\":%d,\"rms\":%d,\"med\":%.1f",
+     VERSION_ATRIL, (unsigned long)idArranque, NOMBRE_MODO[modo], datosOK() ? 1 : 0, rmsUltimo, rmsSuave);
+  ja(",\"activo\":%d,\"abajo\":%d,\"abajoAct\":%d,\"nivel\":%d,\"durAct\":%.1f",
+     act ? 1 : 0, cabezaAbajo() ? 1 : 0, abajoEsActividad ? 1 : 0, (int)(nivel * 100),
+     act ? (ahora - tInicioActivo) / 1000.0f : 0.0f);
+  ja(",\"cal\":{\"ok\":%d,\"restante\":%.1f,\"total\":%.1f,\"desc\":%.1f,\"n\":%d,\"nMin\":%d,\"reposo\":%.1f,\"sd\":%.2f,\"cv\":%.3f,\"cvMax\":%.2f",
+     calibrado ? 1 : 0, restante, CAL_MS / 1000.0f, CAL_DESCARTAR_MS / 1000.0f, modo == CALIBRANDO ? nReposo : calN,
+     CAL_MIN_MUESTRAS, reposo, sdReposo, reposo > 0 ? sdReposo / reposo : 0.0f, CAL_CV_MAX);
+  ja(",\"k\":%.1f,\"margen\":%.1f,\"koff\":%.2f,\"uon\":%.1f,\"uoff\":%.1f,\"pocos\":%d,\"inestable\":%d}",
+     umbralK, MARGEN_MIN_MV, UMBRAL_OFF_FACTOR, umbralOn, umbralOff, calPocos ? 1 : 0, calInestable ? 1 : 0);
+  ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":%d",
+     sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
+     lineasMalas, (int)WiFi.RSSI());
+  ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
+  for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%.1f,%d]" : "[%ld,%.1f,%d]", (long)br[i], bm[i], bf[i]);
   ja("],\"an\":%lu,\"acts\":[", (unsigned long)na);
   for (uint32_t i = 0; i < na - a0; i++)
-    ja(i ? ",[%d,%d,%.1f,%.1f,%d,%d]" : "[%d,%d,%.1f,%.1f,%d,%d]", av[i].sid, av[i].id, av[i].ini, av[i].dur, av[i].rms, av[i].pct);
+    ja(i ? ",[%d,%d,%.1f,%.1f,%d]" : "[%d,%d,%.1f,%.1f,%d]", av[i].sid, av[i].id, av[i].ini, av[i].dur, av[i].rms);
   ja("],\"ln\":%lu,\"logs\":[", (unsigned long)nl);
   for (uint32_t i = 0; i < nl - l0; i++) { if (i) ja(","); jaTexto(lt[i]); }
   ja("]}");
@@ -1442,75 +1056,17 @@ void manejarEstado() {
   web.send(200, "application/json", String(js));
 }
 
-void responder(int codigo, bool ok, const char *err) {
-  cabeceras();
-  char t[96];
-  if (ok) snprintf(t, sizeof t, "{\"ok\":true}");
-  else snprintf(t, sizeof t, "{\"ok\":false,\"e\":\"%s\"}", err ? err : "error");
-  web.send(codigo, "application/json", t);
-}
-
-bool encolarWeb(const CmdWeb &c) { return colaWeb && xQueueSend(colaWeb, &c, 0) == pdTRUE; }
-
-uint8_t posturaDe(const String &p) {
-  if (p.length() != 1) return 0;
-  char c = p[0];
-  return c == 'E' ? POST_ERGUIDA : c == 'C' ? POST_CAIDA : c == 'D' ? POST_INDETERMINADA : 0;
-}
-
 void manejarCmd() {
+  cabeceras();
   String c = web.arg("c");
-  const char *validos = "c1xfsnprhai";
-  if (c.length() != 1 || !strchr(validos, c[0])) { responder(400, false, "comando"); return; }
+  const char *validos = "cprh+-xio";
+  if (c.length() != 1 || !strchr(validos, c[0])) {
+    web.send(400, "application/json", "{\"ok\":false}");
+    return;
+  }
   char ch = c[0];
   bool ok = colaCmd && xQueueSend(colaCmd, &ch, 0) == pdTRUE;
-  responder(ok ? 200 : 503, ok, "cola llena");
-}
-
-// Postura confirmada para un evento pendiente (idempotente: un reintento no duplica)
-void manejarConf() {
-  uint8_t p = posturaDe(web.arg("p"));
-  long id = web.arg("id").toInt();
-  if (!p || id <= 0) { responder(400, false, "datos"); return; }
-  CmdWeb c = {C_CONF, p, (uint32_t)id, 0, 0, 0, ""};
-  bool ok = encolarWeb(c);
-  responder(ok ? 200 : 503, ok, "cola llena");
-}
-
-void manejarManual() {
-  uint8_t p = posturaDe(web.arg("p"));
-  long n = web.arg("n").toInt();
-  if (!p || n <= 0) { responder(400, false, "datos"); return; }
-  CmdWeb c = {C_MANUAL, p, 0, (uint32_t)n, 0, 0, ""};
-  bool ok = encolarWeb(c);
-  responder(ok ? 200 : 503, ok, "cola llena");
-}
-
-void manejarUmbral() {
-  float on = web.arg("on").toFloat(), off = web.arg("off").toFloat();
-  long n = web.arg("n").toInt();
-  if (!(off > 0 && on > off && on <= 5000) || n <= 0) { responder(400, false, "umbral"); return; }
-  CmdWeb c = {C_UMBRAL, 0, 0, (uint32_t)n, on, off, ""};
-  bool ok = encolarWeb(c);
-  responder(ok ? 200 : 503, ok, "cola llena");
-}
-
-void manejarRestaurar() {
-  long n = web.arg("n").toInt();
-  if (n <= 0) { responder(400, false, "datos"); return; }
-  CmdWeb c = {C_RESTAURAR, 0, 0, (uint32_t)n, 0, 0, ""};
-  bool ok = encolarWeb(c);
-  responder(ok ? 200 : 503, ok, "cola llena");
-}
-
-void manejarCfg() {
-  String k = web.arg("k");
-  float v = web.arg("v").toFloat();
-  if (k.length() == 0 || k.length() > 7 || !ajustarCfg(k.c_str(), v, false)) { responder(400, false, "parametro"); return; }
-  CmdWeb c = {C_CFG, 0, 0, 0, v, 0, ""};
-  strncpy(c.k, k.c_str(), sizeof(c.k) - 1);
-  bool ok = encolarWeb(c);
-  responder(ok ? 200 : 503, ok, "cola llena");
+  web.send(ok ? 200 : 503, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
 void manejarOtro() {
@@ -1522,7 +1078,7 @@ void manejarOtro() {
     return;
   }
   web.send(200, "text/plain", String("ASTRA - atril ESP32 v") + VERSION_ATRIL + "\nModo: " + NOMBRE_MODO[modo] +
-                              "\nLa pagina usa /estado y /cmd, /conf, /manual, /umbral, /restaurar, /cfg\n");
+                              "\nLa pagina usa /estado y /cmd?c=...\n");
 }
 
 void tareaRed(void *) {
@@ -1533,11 +1089,6 @@ void tareaRed(void *) {
   WiFi.begin(RED_SSID, RED_CLAVE);
   web.on("/estado", HTTP_GET, manejarEstado);
   web.on("/cmd", HTTP_GET, manejarCmd);
-  web.on("/conf", HTTP_GET, manejarConf);
-  web.on("/manual", HTTP_GET, manejarManual);
-  web.on("/umbral", HTTP_GET, manejarUmbral);
-  web.on("/restaurar", HTTP_GET, manejarRestaurar);
-  web.on("/cfg", HTTP_GET, manejarCfg);
   web.onNotFound(manejarOtro);
   web.begin();
   bool conectado = false;
@@ -1559,13 +1110,13 @@ void tareaRed(void *) {
 void setup() {
   // Bobinas apagadas desde el primer instante
   estrellas.enableOutputs(); estrellas.disableOutputs();
-  planetas.enableOutputs();  planetas.disableOutputs();
+  for (int k = 0; k < N_ORDENES_P; k++) { planetasOrden[k].enableOutputs(); planetasOrden[k].disableOutputs(); }
 
   Serial.setTxBufferSize(1024);
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.printf("=== ASTRA - atril v%s ===\n", VERSION_ATRIL);
+  Serial.println("=== ASTRA - atril v5.1 (con pagina web) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
@@ -1574,9 +1125,9 @@ void setup() {
   pinMode(PIN_BOOT, INPUT_PULLUP);
   pinMode(PIN_PARO, INPUT);
 
-  estrellas.setMaxSpeed(V_VAIVEN_RAPIDO);
+  estrellas.setMaxSpeed(V_ESTRELLAS_LENTO);
   estrellas.setAcceleration(ACELERACION);
-  planetas.setMaxSpeed(V_PLANETAS * 2);
+  for (int k = 0; k < N_ORDENES_P; k++) planetasOrden[k].setMaxSpeed(V_PLANETAS * 2);
 
   Serial2.begin(9600, SERIAL_8N1, EMG_RX, EMG_TX, EMG_INVERTIDO);   // enlace con el Arduino
 
@@ -1585,7 +1136,6 @@ void setup() {
 
   idArranque = (uint32_t)random(1, 2000000000);
   colaCmd = xQueueCreate(16, sizeof(char));
-  colaWeb = xQueueCreate(16, sizeof(CmdWeb));
   if (USAR_WIFI) xTaskCreatePinnedToCore(tareaRed, "red", 8192, NULL, 1, NULL, 0);  // nucleo 0
 
   if (USAR_PARO && digitalRead(PIN_PARO) == LOW) {

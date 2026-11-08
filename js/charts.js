@@ -16,7 +16,7 @@
   }
 
   /* Señal EMG cruda del Arduino (filtrada) en tiempo real: buffer circular, mín/máx por columna de píxeles.
-   * flag por muestra: 1 = registro basal, 2 = estado ALTO sostenido, 3 = estado BAJO sostenido. */
+   * flag por muestra: 2 = activación (o ARRIBA en calibración), 1 = fase de calibración midiendo. */
   class LiveChart {
     constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.setWindow(15); }
     setWindow(s) {
@@ -52,7 +52,7 @@
 
       for (let c = 0; c < cols; c++) {
         if (!fl[c]) continue;
-        ctx.fillStyle = fl[c] === 2 ? css('--green-bg') : fl[c] === 3 ? css('--blue-bg') : css('--amber-bg');   // 1 basal, 2 ALTO sostenido, 3 BAJO sostenido
+        ctx.fillStyle = fl[c] === 2 ? css('--green-bg') : css('--amber-bg');
         ctx.fillRect(L + c, T, 1, H);
       }
       axes(ctx, L, T, W, H, this.win, [-1, -0.5, 0, 0.5, 1].map(f => [Y(f * this.ymax), (f * this.ymax).toFixed(this.ymax < 10 ? 2 : 0)]), 'mV');
@@ -75,12 +75,12 @@
     }
   }
 
-  /* RMS que recibe el atril (un valor cada 100 ms) con sus umbrales.
-   * flag por bloque: 1 = estado ALTO, 2 = usado en el basal, 4 = estado sostenido, 8 = activación. */
+  /* RMS que recibe el atril (un valor cada 100 ms) y su mediana de 0.5 s (la que se compara con los umbrales).
+   * flag por bloque: 1 = sobre el umbral (activación), 2 = bloque usado por la calibración basal. */
   class RmsChart {
     constructor(canvas) { this.c = canvas; this.ymax = 50; this.lines = {}; this.setWindow(15); }
-    setWindow(s) { this.win = s; this.N = Math.round(s * 10); this.v = new Float32Array(this.N).fill(NaN); this.f = new Uint8Array(this.N); this.w = 0; }
-    push(v, flag) { this.v[this.w] = v; this.f[this.w] = flag; if (++this.w >= this.N) this.w = 0; }
+    setWindow(s) { this.win = s; this.N = Math.round(s * 10); this.v = new Float32Array(this.N).fill(NaN); this.m = new Float32Array(this.N).fill(NaN); this.f = new Uint8Array(this.N); this.w = 0; }
+    push(v, flag, med) { this.v[this.w] = v; this.m[this.w] = med === undefined ? NaN : med; this.f[this.w] = flag; if (++this.w >= this.N) this.w = 0; }
     draw() {
       const { ctx, w, h } = fit(this.c);
       if (!w || !h) return;
@@ -95,8 +95,7 @@
       for (let i = 0; i < N; i++) {
         const f = this.f[(this.w + i) % N];
         if (!f) continue;
-        // 2 = bloque usado en la calibración basal; 4 = estado sostenido (1 = ALTO, si no BAJO)
-        ctx.fillStyle = (f & 2) ? css('--amber-bg') : (f & 4) ? ((f & 1) ? css('--green-bg') : css('--blue-bg')) : (f & 1) ? 'rgba(21,128,61,.05)' : 'transparent';
+        ctx.fillStyle = f === 1 ? css('--green-bg') : css('--blue-bg');
         ctx.fillRect(L + i * W / N, T, bw + 0.5, H);
       }
       axes(ctx, L, T, W, H, this.win, [0, 0.25, 0.5, 0.75, 1].map(f => [Y(f * this.ymax), Math.round(f * this.ymax)]), 'mV');
@@ -108,14 +107,19 @@
       dash(this.lines.reposo, css('--muted'), [2, 3]);
       dash(this.lines.uoff, css('--amber'), [3, 3]);
       dash(this.lines.uon, css('--amber'), [8, 4]);
-      ctx.strokeStyle = css('--primary'); ctx.lineWidth = 2.2; ctx.beginPath();
-      let pen = false;
-      for (let i = 0; i < N; i++) {
-        const v = this.v[(this.w + i) % N];
-        if (!isFinite(v)) { pen = false; continue; }
-        pen ? ctx.lineTo(X(i), Y(v)) : ctx.moveTo(X(i), Y(v)); pen = true;
-      }
-      ctx.stroke(); ctx.lineWidth = 1;
+      const linea = (arr, color, width) => {
+        ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
+        let pen = false;
+        for (let i = 0; i < N; i++) {
+          const v = arr[(this.w + i) % N];
+          if (!isFinite(v)) { pen = false; continue; }
+          pen ? ctx.lineTo(X(i), Y(v)) : ctx.moveTo(X(i), Y(v)); pen = true;
+        }
+        ctx.stroke();
+      };
+      linea(this.v, css('--signal'), 1.2);       // RMS de cada bloque
+      linea(this.m, css('--primary'), 2.4);      // mediana de 0.5 s
+      ctx.lineWidth = 1;
     }
   }
 
