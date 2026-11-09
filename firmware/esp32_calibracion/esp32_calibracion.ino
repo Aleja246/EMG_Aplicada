@@ -1,6 +1,6 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v5.1 (con pagina web)
+//  ASTRA - Firmware del atril (ESP32) v6 (sonido + pagina web)
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (diagnostico_emg_enlace.ino) manda por el
@@ -25,8 +25,11 @@
 //      - Lazy susan: gira siempre desde el encendido; solo el PARO lo detiene.
 //      - Luz: CABEZA ABAJO = brillo maximo y cambia de color rapido (vuelta en
 //        4 s). CABEZA ARRIBA = tenue (15 %) y casi quieta (vuelta en 40 s).
-//      - Musica: siempre sonando desde el encendido; cada vez que SUBE la
-//        cabeza pasa a la siguiente cancion (1..NUM_CANCIONES).
+//      - Musica: siempre sonando desde el encendido, desde la carpeta /01 de la
+//        microSD con DOS listas de 3 pistas: CABEZA ABAJO (001-003) y CABEZA
+//        ARRIBA (004-006). Al cambiar la cabeza cambia de lista (siguiente pista);
+//        al terminar una pista sigue la siguiente de la misma lista. Cada vez que
+//        SUBE la cabeza suena el aviso /ADVERT/0001.mp3 y luego sigue la pista.
 //   4. Seguridad: sin datos validos por 500 ms las estrellas pasan a lento y
 //      la luz a ambar. PARO (IO34, con USAR_PARO) y la pausa p detienen todo.
 //
@@ -38,19 +41,22 @@
 //  Boton BOOT de la placa: recalibrar (o reanudar tras el paro).
 //
 //  Placa: "ESP32 Dev Module". Biblioteca: AccelStepper (el DFPlayer se maneja
-//  con comandos directos, no necesita su biblioteca). WiFi y WebServer vienen
-//  con el paquete de placas ESP32.
+//  con comandos directos, no necesita su biblioteca). WiFi, WebServer y
+//  Preferences vienen con el paquete de placas ESP32.
 //
-//  v5.1 = v5 + PAGINA WEB (la deteccion, la calibracion, los motores, la luz
-//  y la musica NO cambian):
+//  v6 = v5 con sonido + PAGINA WEB (la deteccion, la calibracion, los motores,
+//  la luz y la logica de la musica NO cambian):
 //   - Se une a la red WiFi "ASTRA" que crea el Arduino (arduino_emg.ino v4)
 //     con la IP fija 192.168.4.200 y atiende a la pagina:
-//       /estado         -> estado en vivo, calibracion, RMS y mediana de cada
-//                          bloque, activaciones y mensajes del monitor serie
-//       /cmd?c=<letra>  -> los mismos comandos del monitor serie
-//   - La red corre en el nucleo 0; motores, luz y deteccion siguen en el
-//     nucleo 1: la pagina nunca frena a los motores. Sin WiFi o sin pagina
-//     el atril funciona igual que v5.
+//       /estado              -> estado en vivo, calibracion, RMS y mediana de
+//                               cada bloque, activaciones, musica y mensajes
+//       /cmd?c=<letra>       -> los mismos comandos del monitor serie
+//       /musica?l=abajo|arriba&p=1,2,3 -> las 3 pistas de una lista
+//   - Las listas elegidas en la pagina se guardan en la memoria del ESP32
+//     (Preferences): al volver a encender siguen igual, con o sin pagina.
+//     Si la lista que cambias es la que suena, empieza ya con la nueva.
+//   - La red corre en el nucleo 0; motores, luz, musica y deteccion siguen en
+//     el nucleo 1: la pagina nunca los frena. Sin WiFi el atril funciona igual.
 //   - Para la pagina se numera cada sesion (sube al terminar cada
 //     calibracion) y se mide su tiempo sin contar pausas.
 //   - Los mensajes (Log.print...) salen por el monitor serie Y a la pagina.
@@ -100,6 +106,7 @@
 #include <AccelStepper.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <Preferences.h>
 #include <stdarg.h>
 
 // ------------------------- Pines (esquematico) -------------------------
@@ -181,12 +188,24 @@ const int PASO_LUZ   = 2;          // por cada 20 ms -> 0 a 128 en ~1.3 s
 const int VOLUMEN    = 15;         // 0 a 30
 const unsigned long PAUSA_SONIDO = 3000;  // ms minimos entre sonidos
 // Musica: SIEMPRE sonando desde el encendido (arranque, calibracion y sesion).
-// Cada vez que se detecta que baja la cabeza pasa a la SIGUIENTE cancion (1, 2,
-// 3 ... NUM_CANCIONES y vuelve a 1). Solo se detiene con el PARO. Copia las
-// canciones a la microSD en orden (0001.mp3, 0002.mp3, ...).
-const int NUM_CANCIONES = 3;
+// Solo se detiene con el PARO. MicroSD (FAT32):
+//   /01/001.mp3 ... /01/006.mp3   canciones
+//   /ADVERT/0001.mp3               aviso "subio la cabeza"
+// Hay DOS listas de 3 pistas (numero de archivo dentro de /01):
+//   CABEZA ABAJO  -> pistasAbajo   (por defecto 001, 002, 003)
+//   CABEZA ARRIBA -> pistasArriba  (por defecto 004, 005, 006)
+// Al cambiar la cabeza de posicion, pasa a la SIGUIENTE pista de la otra lista.
+// Cuando una pista termina, sigue la siguiente de la misma lista.
+// Cada vez que SUBE la cabeza suena /ADVERT/0001.mp3 encima de la musica y, al
+// terminar, el DFPlayer continua la pista que estaba sonando.
+// PAGINA WEB: la pagina elige las 3 pistas de cada lista (/musica); el atril
+// llama a configurarPistas() y las guarda en su memoria (ver aplicarMusica()).
+const int CARPETA_MUSICA   = 1;     // carpeta /01
+const int PISTAS_POR_LISTA = 3;
+const int PISTA_AVISO      = 1;     // /ADVERT/0001.mp3
+const unsigned long AVISO_MAX_MS = 10000;   // duracion maxima del aviso (si el DFPlayer no avisa el final)
 const unsigned long T_ABAJO_MIN_MS  = 1000;  // la cabeza debe haber estado abajo al menos esto
-const unsigned long T_ENTRE_CANCIONES = 5000; // y pasar esto desde el ultimo cambio (evita rebotes)
+const unsigned long T_ENTRE_CANCIONES = 5000; // tiempo minimo entre cambios de lista (evita rebotes)
 // Luz relajado: cambia de color cada vez mas rapido y mas brillante.
 const float PERIODO_COLOR_LENTO  = 40000;  // ms por vuelta de colores con la CABEZA ARRIBA (casi quieta)
 const float PERIODO_COLOR_RAPIDO = 4000;   // ms por vuelta con la CABEZA ABAJO (no bajar de ~3000)
@@ -219,7 +238,7 @@ const char *RED_CLAVE = "astra2026";
 const IPAddress IP_ATRIL(192, 168, 4, 200);
 const IPAddress IP_PUERTA(192, 168, 4, 1);    // el Arduino
 const IPAddress MASCARA(255, 255, 255, 0);
-const char *VERSION_ATRIL = "5.1";
+const char *VERSION_ATRIL = "6";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -235,7 +254,7 @@ long pasosHoming = 0;
 bool abajoEsActividad = ABAJO_ES_ACTIVIDAD;
 unsigned long tCambioCabeza = 0;     // cuando cambio por ultima vez arriba <-> abajo
 bool abajoAntes = false;
-bool cambiarCancion = false;
+bool cambiarCancion = false;         // la cabeza acaba de SUBIR: falta tocar el aviso ADVERT
 unsigned long tInicioAbajo = 0, tUltimoCambioCancion = 0;
 
 // --- Sonido ---
@@ -301,7 +320,17 @@ unsigned long bootCambio = 0;
 float luzR = 0, luzG = 0, luzB = 0;
 float faseColor = 0;                // 0..1, posicion en la rueda de colores
 bool musicaSonando = false;
-int cancion = 1;                    // cancion que esta sonando (1..NUM_CANCIONES)
+int cancion = 4;                    // archivo de /01 que esta sonando (001..255)
+// Listas de musica (las podra cambiar la pagina web con configurarPistas)
+int pistasAbajo[PISTAS_POR_LISTA]  = {1, 2, 3};   // /01/001, 002, 003 con la CABEZA ABAJO
+int pistasArriba[PISTAS_POR_LISTA] = {4, 5, 6};   // /01/004, 005, 006 con la CABEZA ARRIBA
+int idxAbajo = -1, idxArriba = -1;  // posicion en cada lista (-1 = aun no suena)
+bool listaAbajoSonando = false;     // que lista esta sonando
+bool pistaTerminada = false;        // el DFPlayer aviso que termino la pista
+bool avisoSonando = false;          // esta sonando /ADVERT/0001.mp3
+unsigned long tAviso = 0, tUltimoFin = 0;
+uint8_t dfBuf[10];                  // respuesta del DFPlayer (10 bytes)
+int dfN = 0;
 unsigned long episodioCancion = 0;  // inicio del "cabeza abajo" que ya cambio la cancion
 unsigned long tMusicaLista = 2300;  // la musica arranca despues de mandar el volumen
 unsigned long ultimoCmdMusica = 0;
@@ -323,6 +352,10 @@ const int N_ACT = 32;
 Activacion actLista[N_ACT];
 uint32_t nActLista = 0;
 QueueHandle_t colaCmd = NULL;       // comandos de la pagina -> loop
+struct PedidoMusica { uint8_t abajo; uint8_t p[3]; };
+QueueHandle_t colaMusica = NULL;    // listas de musica de la pagina -> loop
+bool reiniciarLista = false;        // la lista que suena cambio: empezar ya con la nueva
+Preferences prefs;
 volatile int8_t avisoWifi = 0;      // 1 = conectado, -1 = se perdio (lo imprime el loop)
 uint32_t idArranque = 0;            // cambia en cada encendido (la pagina lo detecta)
 int sesionId = 0;                   // sube al terminar cada calibracion (sesion nueva)
@@ -401,6 +434,81 @@ void sonar(int pista) {
   dfEnviar(0x03, pista);
   ultimoSonido = millis();
   pistaPendiente = 0;
+}
+
+// ---------------- Configuracion de las listas de musica ----------------
+// Para la PAGINA WEB: cambia las 3 pistas de una lista (numero de archivo en /01,
+// de 1 a 255). abajo = true -> lista de CABEZA ABAJO; false -> CABEZA ARRIBA.
+// El cambio se oye en la siguiente pista de esa lista. Devuelve false si algun
+// numero no es valido (y no cambia nada).
+bool configurarPistas(bool abajo, int p1, int p2, int p3) {
+  int nuevas[PISTAS_POR_LISTA] = {p1, p2, p3};
+  for (int k = 0; k < PISTAS_POR_LISTA; k++) if (nuevas[k] < 1 || nuevas[k] > 255) return false;
+  int *lista = abajo ? pistasAbajo : pistasArriba;
+  for (int k = 0; k < PISTAS_POR_LISTA; k++) lista[k] = nuevas[k];
+  Log.printf(">> Lista CABEZA %s: %03d, %03d, %03d\n", abajo ? "ABAJO" : "ARRIBA", p1, p2, p3);
+  return true;
+}
+
+// Listas guardadas en la memoria del ESP32 (las eligio la pagina)
+void cargarListas() {
+  uint8_t a[PISTAS_POR_LISTA], b[PISTAS_POR_LISTA];
+  prefs.begin("astra", false);
+  size_t na = prefs.getBytes("abajo", a, sizeof a), nb = prefs.getBytes("arriba", b, sizeof b);
+  prefs.end();
+  if (na == sizeof a && a[0] && a[1] && a[2]) for (int k = 0; k < PISTAS_POR_LISTA; k++) pistasAbajo[k] = a[k];
+  if (nb == sizeof b && b[0] && b[1] && b[2]) for (int k = 0; k < PISTAS_POR_LISTA; k++) pistasArriba[k] = b[k];
+}
+
+void guardarLista(bool abajo) {
+  uint8_t v[PISTAS_POR_LISTA];
+  for (int k = 0; k < PISTAS_POR_LISTA; k++) v[k] = (uint8_t)(abajo ? pistasAbajo : pistasArriba)[k];
+  prefs.begin("astra", false);
+  prefs.putBytes(abajo ? "abajo" : "arriba", v, sizeof v);
+  prefs.end();
+}
+
+// Pedido de la pagina: cambia, guarda y, si esa lista es la que suena, empieza ya con ella
+void aplicarMusica(const PedidoMusica &m) {
+  if (!configurarPistas(m.abajo, m.p[0], m.p[1], m.p[2])) return;
+  guardarLista(m.abajo);
+  if (musicaSonando && (bool)m.abajo == listaAbajoSonando) reiniciarLista = true;
+}
+
+// Toca una pista de la lista de cabeza abajo / arriba (carpeta /01).
+// avanzar = true: la siguiente de la lista; false: la que tocaba (o la primera).
+void tocarLista(bool abajo, bool avanzar) {
+  int &idx = abajo ? idxAbajo : idxArriba;
+  if (avanzar || idx < 0) idx = (idx + 1) % PISTAS_POR_LISTA;
+  cancion = (abajo ? pistasAbajo : pistasArriba)[idx];
+  listaAbajoSonando = abajo;
+  dfEnviar(0x0F, (CARPETA_MUSICA << 8) | cancion);   // carpeta + archivo
+  musicaSonando = true;
+  pistaTerminada = false;
+  avisoSonando = false;
+  ultimoCmdMusica = millis();
+  Log.printf("   >> Musica (cabeza %s): /%02d/%03d.mp3\n", abajo ? "ABAJO" : "arriba", CARPETA_MUSICA, cancion);
+}
+
+// Lee las respuestas del DFPlayer: solo interesa "termino una pista" (0x3D).
+void leerDFPlayer() {
+  while (Serial1.available()) {
+    uint8_t b = Serial1.read();
+    if (dfN == 0 && b != 0x7E) continue;           // espera el inicio de trama
+    dfBuf[dfN++] = b;
+    if (dfN < 10) continue;
+    dfN = 0;
+    if (dfBuf[9] != 0xEF || dfBuf[3] != 0x3D) continue;
+    unsigned long ahora = millis();
+    if (ahora - tUltimoFin < 1000) continue;       // el DFPlayer suele mandar el aviso 2 veces
+    tUltimoFin = ahora;
+    if (avisoSonando) {                            // termino el ADVERT: la cancion sigue sola
+      avisoSonando = false;
+      Log.println("   >> Fin del aviso: sigue la cancion");
+    } else {
+      pistaTerminada = true;                       // termino la cancion: toca la siguiente
+    }
+  }
 }
 
 void bobinasE(bool on) {
@@ -719,6 +827,8 @@ void leerComandos() {
   while (Serial.available()) ejecutarComando(Serial.read());
   char c;
   while (colaCmd && xQueueReceive(colaCmd, &c, 0) == pdTRUE) ejecutarComando(c);
+  PedidoMusica m;
+  while (colaMusica && xQueueReceive(colaMusica, &m, 0) == pdTRUE) aplicarMusica(m);
 }
 
 void revisarBoot() {
@@ -782,29 +892,40 @@ void actualizarModo() {
   // Calibracion basal: termina a los 10 s por reloj, lleguen o no todos los datos
   if (modo == CALIBRANDO && ahora - tCal >= CAL_MS) terminarCalibracion();
 
-  // Musica: siempre sonando (menos en PARO). Cada vez que SUBE la cabeza, otra cancion.
+  // Musica: siempre sonando (menos en PARO). Lista de cabeza abajo / arriba y
+  // aviso ADVERT cada vez que SUBE la cabeza.
   if (modo == SESION && ok) {
     bool abajo = cabezaAbajo();
-    if (!abajoAntes && abajo) tInicioAbajo = ahora;      // la cabeza acaba de bajar
-    if (abajoAntes && !abajo && ahora - tInicioAbajo >= T_ABAJO_MIN_MS &&
-        ahora - tUltimoCambioCancion >= T_ENTRE_CANCIONES)
-      cambiarCancion = true;                             // la cabeza acaba de subir
+    if (!abajoAntes && abajo) { tInicioAbajo = ahora; cambiarCancion = false; }   // la cabeza acaba de bajar
+    if (abajoAntes && !abajo && ahora - tInicioAbajo >= T_ABAJO_MIN_MS)
+      cambiarCancion = true;                             // la cabeza acaba de subir: aviso
     abajoAntes = abajo;
   }
+  if (avisoSonando && ahora - tAviso >= AVISO_MAX_MS) avisoSonando = false;
   if (ahora - ultimoCmdMusica >= 300 && (long)(ahora - tMusicaLista) >= 0) {  // tiempo entre comandos
+    bool quiereAbajo = (modo == SESION && ok && cabezaAbajo());
     if (modo == PARO) {
       if (musicaSonando) { dfEnviar(0x16, 0); musicaSonando = false; ultimoCmdMusica = ahora; }
+      cambiarCancion = avisoSonando = pistaTerminada = false;
+      reiniciarLista = false;
     } else if (!musicaSonando) {
-      dfEnviar(0x08, cancion);                   // reproducir la cancion actual en bucle
-      musicaSonando = true; ultimoCmdMusica = ahora;
-      Log.printf("   >> Musica: cancion %d\n", cancion);
-    } else if (cambiarCancion) {
-      cambiarCancion = false;
+      tocarLista(quiereAbajo, false);            // la pista actual de la lista
+    } else if (modo == SESION && ok && quiereAbajo != listaAbajoSonando &&
+               (ahora - tUltimoCambioCancion >= T_ENTRE_CANCIONES || cambiarCancion)) {
+      // (si la cabeza SUBIO de verdad, cambia de lista de inmediato y despues el aviso)
       tUltimoCambioCancion = ahora;
-      cancion = cancion % NUM_CANCIONES + 1;
-      dfEnviar(0x08, cancion);
-      ultimoCmdMusica = ahora;
-      Log.printf("   >> Cabeza arriba: cancion %d\n", cancion);
+      tocarLista(quiereAbajo, true);             // cambio de cabeza: siguiente pista de la otra lista
+    } else if (reiniciarLista && !avisoSonando) {
+      reiniciarLista = false;                    // la pagina cambio la lista que suena: empieza con la nueva
+      (listaAbajoSonando ? idxAbajo : idxArriba) = -1;
+      tocarLista(listaAbajoSonando, false);
+    } else if (pistaTerminada) {
+      tocarLista(listaAbajoSonando, true);       // termino la pista: siguiente de la misma lista
+    } else if (cambiarCancion && ahora - ultimoCmdMusica >= 600) {
+      cambiarCancion = false;
+      dfEnviar(0x13, PISTA_AVISO);               // /ADVERT/0001.mp3 (luego continua la pista)
+      avisoSonando = true; tAviso = ahora; ultimoCmdMusica = ahora;
+      Log.println("   >> Cabeza arriba: aviso /ADVERT/0001.mp3");
     }
   }
 
@@ -814,8 +935,8 @@ void actualizarModo() {
     dfEnviar(0x06, VOLUMEN);
   }
 
-  // Descarta lo que manda el DFPlayer (avisos de fin de pista, etc.)
-  while (Serial1.available()) Serial1.read();
+  // Respuestas del DFPlayer (fin de pista / fin del aviso)
+  leerDFPlayer();
 }
 
 // Velocidad de las estrellas: CABEZA ABAJO acelera hasta V_ESTRELLAS_RAPIDO en
@@ -960,8 +1081,8 @@ void imprimirEstado() {
 }
 
 // ======================================================================
-//  Pagina web (nucleo 0). Solo lee el estado y encola comandos: todo lo
-//  que cambia el atril lo hace el loop con ejecutarComando().
+//  Pagina web (nucleo 0). Solo lee el estado y encola pedidos: todo lo
+//  que cambia el atril lo hace el loop (ejecutarComando / aplicarMusica).
 // ======================================================================
 WebServer web(80);
 static char js[8192];               // respuesta de /estado
@@ -1043,6 +1164,9 @@ void manejarEstado() {
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":%d",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
      lineasMalas, (int)WiFi.RSSI());
+  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d],\"arriba\":[%d,%d,%d],\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d}",
+     CARPETA_MUSICA, pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasArriba[0], pistasArriba[1], pistasArriba[2],
+     musicaSonando ? 1 : 0, listaAbajoSonando ? "abajo" : "arriba", cancion, avisoSonando ? 1 : 0, PISTA_AVISO);
   ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
   for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%.1f,%d]" : "[%ld,%.1f,%d]", (long)br[i], bm[i], bf[i]);
   ja("],\"an\":%lu,\"acts\":[", (unsigned long)na);
@@ -1069,6 +1193,19 @@ void manejarCmd() {
   web.send(ok ? 200 : 503, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
+// /musica?l=abajo&p=1,2,3  (numeros de archivo en /01, de 1 a 255)
+void manejarMusica() {
+  cabeceras();
+  String l = web.arg("l"), ps = web.arg("p");
+  int a = 0, b = 0, c = 0;
+  bool ok = (l == "abajo" || l == "arriba") && sscanf(ps.c_str(), "%d,%d,%d", &a, &b, &c) == 3 &&
+            a >= 1 && a <= 255 && b >= 1 && b <= 255 && c >= 1 && c <= 255;
+  if (!ok) { web.send(400, "application/json", "{\"ok\":false}"); return; }
+  PedidoMusica m = {(uint8_t)(l == "abajo" ? 1 : 0), {(uint8_t)a, (uint8_t)b, (uint8_t)c}};
+  ok = colaMusica && xQueueSend(colaMusica, &m, 0) == pdTRUE;
+  web.send(ok ? 200 : 503, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 void manejarOtro() {
   cabeceras();
   if (web.method() == HTTP_OPTIONS) {             // permiso previo del navegador
@@ -1078,7 +1215,7 @@ void manejarOtro() {
     return;
   }
   web.send(200, "text/plain", String("ASTRA - atril ESP32 v") + VERSION_ATRIL + "\nModo: " + NOMBRE_MODO[modo] +
-                              "\nLa pagina usa /estado y /cmd?c=...\n");
+                              "\nLa pagina usa /estado, /cmd?c=... y /musica?l=...&p=...\n");
 }
 
 void tareaRed(void *) {
@@ -1089,6 +1226,7 @@ void tareaRed(void *) {
   WiFi.begin(RED_SSID, RED_CLAVE);
   web.on("/estado", HTTP_GET, manejarEstado);
   web.on("/cmd", HTTP_GET, manejarCmd);
+  web.on("/musica", HTTP_GET, manejarMusica);
   web.onNotFound(manejarOtro);
   web.begin();
   bool conectado = false;
@@ -1116,7 +1254,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v5.1 (con pagina web) ===");
+  Serial.println("=== ASTRA - atril v6 (sonido + pagina web) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
@@ -1134,8 +1272,12 @@ void setup() {
   Serial1.begin(9600, SERIAL_8N1, DF_RX, DF_TX);     // DFPlayer
   // El volumen se manda 2 s despues (iniciarArranque), sin detener el arranque
 
+  cargarListas();                                     // las listas que eligio la pagina
+  Serial.printf(">> Musica: cabeza ABAJO %03d %03d %03d | cabeza ARRIBA %03d %03d %03d\n",
+                pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasArriba[0], pistasArriba[1], pistasArriba[2]);
   idArranque = (uint32_t)random(1, 2000000000);
   colaCmd = xQueueCreate(16, sizeof(char));
+  colaMusica = xQueueCreate(4, sizeof(PedidoMusica));
   if (USAR_WIFI) xTaskCreatePinnedToCore(tareaRed, "red", 8192, NULL, 1, NULL, 0);  // nucleo 0
 
   if (USAR_PARO && digitalRead(PIN_PARO) == LOW) {

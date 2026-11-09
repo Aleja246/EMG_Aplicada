@@ -1,7 +1,8 @@
-/* Conexión con el atril (ESP32, esp32_calibracion.ino v5.1).
+/* Conexión con el atril (ESP32, esp32_calibracion.ino v6).
  * El atril calibra (RMS basal automático de 10 s) y detecta; la página solo muestra su estado y le manda comandos:
  *   GET http://<ip del atril>/estado?b=&a=&l=   -> estado + bloques (RMS y mediana), activaciones y mensajes nuevos
  *   GET http://<ip del atril>/cmd?c=<letra>     -> c p r h + - x i o (los mismos del monitor serie)
+ *   GET http://<ip del atril>/musica?l=abajo|arriba&p=1,2,3 -> las 3 pistas (carpeta /01) de una lista
  * AtrilSim reproduce la misma lógica del firmware para probar sin hardware.
  */
 (function () {
@@ -23,6 +24,7 @@
     }
     estado(q) { return this._get('/estado?b=' + q.b + '&a=' + q.a + '&l=' + q.l, 2500); }
     cmd(c) { return this._get('/cmd?c=' + encodeURIComponent(c), 2500); }
+    musica(lista, p) { return this._get('/musica?l=' + lista + '&p=' + p.join(','), 2500); }
     stop() { }
   }
 
@@ -60,11 +62,14 @@
     async cmd(c) {
       try { await this.be.cmd(c); return true; } catch (e) { return false; }
     }
+    async musica(lista, p) {
+      try { await this.be.musica(lista, p); return true; } catch (e) { return false; }
+    }
     stop() { this.run = false; this.be.stop(); this._set('disconnected'); }
   }
 
   /* ===================================================================
-   * Atril simulado: misma lógica que esp32_calibracion.ino v5.1.
+   * Atril simulado: misma lógica que esp32_calibracion.ino v6.
    * Recibe un RMS (mV) cada 100 ms con feedBlock(), como el ESP32 por el opto.
    * =================================================================== */
   const C = {
@@ -85,7 +90,9 @@
       this.activo = false; this.tSobre = 0; this.tBajo = 0; this.tIni = 0; this.nivel = 0; this.abajoAct = true;
       this.sumaAct = 0; this.nRmsAct = 0; this.sumaCola = 0; this.nCola = 0;
       this.nActiv = 0; this.tActMs = 0; this.sid = 0; this.msSes = 0; this.msSesIni = 0;
-      this.tCambio = 0; this.abajoAntes = false; this.tIniAbajo = 0; this.tUltCancion = -1e9; this.cancion = 1; this.orden = 0;
+      this.tCambio = 0; this.abajoAntes = false; this.tIniAbajo = 0; this.tUltCancion = -1e9; this.cancion = 4; this.orden = 0;
+      this.mus = { abajo: [1, 2, 3], arriba: [4, 5, 6], idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
+        tAviso: 0, tPista: 0, subio: false, reiniciar: false, tLista: performance.now() + 2300, tCmd: 0 };
       this.tPrev = performance.now();
       this._msg('=== ASTRA - atril v5.1 (simulado) ===');
       this._msg('>> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).');
@@ -210,15 +217,44 @@
         if (this.calibrado) this._iniciarSesion(); else this._iniciarCalibracion();
       }
       if (this.modo === 'CALIBRANDO' && ahora - this.tCal >= C.CAL_MS) this._terminarCalibracion();
-      if (this.modo === 'SESION' && ok) {             // musica: al SUBIR la cabeza, otra cancion
+      this._musica(ahora, ok);
+    }
+    // Igual que la musica del firmware v6: dos listas (cabeza abajo / arriba) y el aviso al subir la cabeza.
+    // Una pista simulada dura 40 s; el aviso, 3 s.
+    _tocar(abajo, avanzar) {
+      const m = this.mus, l = abajo ? 'abajo' : 'arriba';
+      if (avanzar || m.idx[l] < 0) m.idx[l] = (m.idx[l] + 1) % 3;
+      this.cancion = m[l][m.idx[l]]; m.lista = l; m.sonando = true; m.aviso = false; m.tPista = this._ms(); m.tCmd = this._ms();
+      this._msg('   >> Musica (cabeza ' + (abajo ? 'ABAJO' : 'arriba') + '): /01/' + String(this.cancion).padStart(3, '0') + '.mp3');
+    }
+    _musica(ahora, ok) {
+      const m = this.mus;
+      if (this.modo === 'SESION' && ok) {
         const abajo = this._abajo();
-        if (!this.abajoAntes && abajo) this.tIniAbajo = ahora;
-        if (this.abajoAntes && !abajo && ahora - this.tIniAbajo >= C.ABAJO_MIN && ahora - this.tUltCancion >= C.ENTRE_CANCIONES) {
-          this.tUltCancion = ahora; this.cancion = this.cancion % C.N_CANCIONES + 1;
-          this._msg('   >> Cabeza arriba: cancion ' + this.cancion);
-        }
+        if (!this.abajoAntes && abajo) { this.tIniAbajo = ahora; m.subio = false; }
+        if (this.abajoAntes && !abajo && ahora - this.tIniAbajo >= C.ABAJO_MIN) m.subio = true;
         this.abajoAntes = abajo;
       }
+      if (m.aviso && ahora - m.tAviso > 3000) { m.aviso = false; m.tPista = ahora; this._msg('   >> Fin del aviso: sigue la cancion'); }
+      if (ahora - m.tCmd < 300 || ahora < m.tLista) return;
+      const quiereAbajo = this.modo === 'SESION' && ok && this._abajo();
+      if (this.modo === 'PARO') { m.sonando = m.aviso = m.subio = m.reiniciar = false; return; }
+      if (!m.sonando) this._tocar(quiereAbajo, false);
+      else if (this.modo === 'SESION' && ok && quiereAbajo !== (m.lista === 'abajo') && (ahora - this.tUltCancion >= C.ENTRE_CANCIONES || m.subio)) {
+        this.tUltCancion = ahora; this._tocar(quiereAbajo, true);
+      } else if (m.reiniciar && !m.aviso) { m.reiniciar = false; m.idx[m.lista] = -1; this._tocar(m.lista === 'abajo', false); }
+      else if (!m.aviso && ahora - m.tPista > 40000) this._tocar(m.lista === 'abajo', true);
+      else if (m.subio && ahora - m.tCmd >= 600) {
+        m.subio = false; m.aviso = true; m.tAviso = ahora; m.tCmd = ahora;
+        this._msg('   >> Cabeza arriba: aviso /ADVERT/0001.mp3');
+      }
+    }
+    musica(lista, p) {
+      if ((lista !== 'abajo' && lista !== 'arriba') || p.length !== 3 || p.some(v => !(v >= 1 && v <= 255))) return Promise.reject(new Error('HTTP 400'));
+      this.mus[lista] = p.slice();
+      this._msg('>> Lista CABEZA ' + lista.toUpperCase() + ': ' + p.map(v => String(v).padStart(3, '0')).join(', '));
+      if (this.mus.sonando && this.mus.lista === lista) this.mus.reiniciar = true;
+      return Promise.resolve({ ok: true });
     }
     _velE() {
       if (this.modo === 'SESION' && this._datosOK() && this._abajo()) {
@@ -233,7 +269,7 @@
       const pick = (arr, n, from) => { const ini = Math.max(from, n - arr.length, 0); return arr.slice(arr.length - (n - Math.min(ini, n))); };
       const r1 = v => Math.round(v * 10) / 10, ahora = this._ms(), tc = ahora - this.tCal;
       return Promise.resolve({
-        v: '5.1-sim', boot: this.boot, modo: this.modo, datos: this._datosOK() ? 1 : 0, rms: this.rms, med: r1(this.med),
+        v: '6-sim', boot: this.boot, modo: this.modo, datos: this._datosOK() ? 1 : 0, rms: this.rms, med: r1(this.med),
         activo: this.activo ? 1 : 0, abajo: this._abajo() ? 1 : 0, abajoAct: this.abajoAct ? 1 : 0, nivel: Math.round(this.nivel * 100),
         durAct: this.activo ? r1((ahora - this.tIni) / 1000) : 0,
         cal: { ok: this.calibrado ? 1 : 0, restante: this.modo === 'CALIBRANDO' ? r1(Math.max(0, C.CAL_MS - tc) / 1000) : 0, total: C.CAL_MS / 1000, desc: C.DESC_MS / 1000,
@@ -242,6 +278,8 @@
           uon: r1(this.uon), uoff: r1(this.uoff), pocos: this.pocos ? 1 : 0, inestable: this.inestable ? 1 : 0 },
         sid: this.sid, nAct: this.nActiv, tAct: r1(this.tActMs / 1000), tSes: r1(this.msSes / 1000), velE: this._velE(),
         cancion: this.cancion, orden: this.orden, malas: 0, rssi: -40,
+        musica: { carpeta: 1, abajo: this.mus.abajo.slice(), arriba: this.mus.arriba.slice(), sonando: this.mus.sonando ? 1 : 0,
+          lista: this.mus.lista, pista: this.cancion, aviso: this.mus.aviso ? 1 : 0, avisoPista: 1 },
         bn: this.nBlq, b: pick(this.blq, this.nBlq, q.b),
         an: this.nAct, acts: pick(this.acts, this.nAct, q.a),
         ln: this.nLog, logs: pick(this.logs, this.nLog, q.l)

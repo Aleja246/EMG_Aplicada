@@ -236,6 +236,7 @@
     const c = s.cal, umb = c.ok && s.modo !== 'CALIBRANDO';
     rmsChart.lines = { reposo: c.ok ? c.reposo : 0, uon: umb ? c.uon : 0, uoff: umb ? c.uoff : 0 };
     for (const t of s.logs) addLog(t);
+    syncMusica(s);
     if (rec) recordUpdate(s);
     // Terminó la calibración basal y empezó la sesión: se registra al paciente que está en pantalla
     if (!rec && view === 'session' && patient && prev && prev.modo === 'CALIBRANDO' && s.modo === 'SESION') startRecording(s);
@@ -243,11 +244,64 @@
     if (view === 'session') renderCal();
   }
 
+  /* ---------- música del atril: qué canción suena con la cabeza abajo / arriba ---------- */
+  const MUS_OPC = {
+    abajo: [['1,2,3', 'Las tres en orden: 001 → 002 → 003'], ['1,1,1', 'Solo la 001'], ['2,2,2', 'Solo la 002'], ['3,3,3', 'Solo la 003']],
+    arriba: [['4,5,6', 'Las tres en orden: 004 → 005 → 006'], ['4,4,4', 'Solo la 004'], ['5,5,5', 'Solo la 005'], ['6,6,6', 'Solo la 006']]
+  };
+  const pista3 = n => String(n).padStart(3, '0');
+  const musEnviado = { abajo: 0, arriba: 0 };
+  function initMusica() {
+    for (const l of ['abajo', 'arriba']) {
+      const sel = $('mus-' + l);
+      sel.innerHTML = MUS_OPC[l].map(() => '<option></option>').join('');
+      sel.querySelectorAll('option').forEach((o, i) => { o.value = MUS_OPC[l][i][0]; o.textContent = MUS_OPC[l][i][1]; });
+      sel.addEventListener('change', () => { S['mus_' + l] = sel.value; E.Store.saveSettings(S); enviarMusica(l, sel.value, true); });
+    }
+  }
+  function enviarMusica(l, v, avisar) {
+    if (!atril || atrilConn.status !== 'connected') { if (avisar) toast('Se mandará al atril en cuanto esté conectado.'); return; }
+    musEnviado[l] = performance.now();
+    atril.musica(l, v.split(',').map(Number)).then(ok => {
+      if (avisar) toast(ok ? 'Música de la cabeza ' + l + ' guardada en el atril.' : 'El atril no recibió la lista de música.');
+    });
+  }
+  // Si el atril tiene otra lista (se reinició o lo cambiaron), le vuelve a mandar la elegida en la página
+  function syncMusica(s) {
+    if (!s.musica) return;
+    for (const l of ['abajo', 'arriba']) {
+      const quiero = S['mus_' + l];
+      if (quiero && quiero !== s.musica[l].join(',') && performance.now() - musEnviado[l] > 4000) enviarMusica(l, quiero, false);
+    }
+  }
+  function renderMusica() {
+    const m = st && st.musica, on = !!m && atrilConn.status === 'connected';
+    for (const l of ['abajo', 'arriba']) {
+      const sel = $('mus-' + l);
+      sel.disabled = !on;
+      const v = S['mus_' + l] || (m ? m[l].join(',') : MUS_OPC[l][0][0]);
+      if (![...sel.options].some(o => o.value === v)) {
+        const o = document.createElement('option'); o.value = v; o.textContent = 'Personalizada: ' + v.split(',').map(pista3).join(', '); sel.appendChild(o);
+      }
+      if (document.activeElement !== sel) sel.value = v;
+    }
+    $('mus-now').className = 'badge' + (on && m.sonando ? ' ok' : '');
+    $('mus-now').textContent = !on ? 'sin conexión' : !m.sonando ? 'en silencio' :
+      (m.aviso ? 'aviso /ADVERT/' + String(m.avisoPista).padStart(4, '0') + ' · ' : '') + 'sonando /01/' + pista3(m.pista) + '.mp3 (cabeza ' + m.lista + ')';
+    let est = '';
+    if (on) {
+      const igual = ['abajo', 'arriba'].every(l => !S['mus_' + l] || S['mus_' + l] === m[l].join(','));
+      est = igual ? 'En el atril (guardado en su memoria): cabeza abajo ' + m.abajo.map(pista3).join(', ') + ' · cabeza arriba ' + m.arriba.map(pista3).join(', ') + '.'
+        : 'Mandando la elección al atril…';
+    } else if (st && !m) est = 'Este firmware del atril no permite elegir la música (carga esp32_calibracion.ino v6).';
+    $('mus-estado').textContent = est;
+  }
+
   /* ---------- registro de la sesión (con lo que da el atril) ---------- */
   const keyOf = (s, sid) => s.boot + ':' + (sid === undefined ? s.sid : sid);
   function snapshotCal(s) {
     const c = s.cal;
-    return { origen: 'atril v5', tipo: 'basal', reposo: c.reposo, sd: c.sd, cv: c.cv, bloques: c.n, k: c.k, margen: c.margen, koff: c.koff,
+    return { origen: 'atril v6', tipo: 'basal', reposo: c.reposo, sd: c.sd, cv: c.cv, bloques: c.n, k: c.k, margen: c.margen, koff: c.koff,
       uon: c.uon, uoff: c.uoff, pocos: !!c.pocos, inestable: !!c.inestable, abajoEsActividad: !!s.abajoAct, fecha: new Date().toISOString() };
   }
   function startRecording(s) {
@@ -450,6 +504,7 @@
       $('readouts').textContent = ''; $('gauge-fill').style.width = '0'; $('gauge-val').textContent = '—';
     }
     renderTable(acts, live);
+    renderMusica();
     if (logDirty && $('log-card').open) {
       logDirty = false;
       const el = $('log'), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
@@ -474,9 +529,10 @@
   function buildRecord() {
     const t = recTime(), acts = rec.acts, tot = acts.reduce((a, s) => a + s.durS, 0);
     return {
-      patientId: patient.id, fecha: rec.start, duracionS: t, origen: 'atril v5',
+      patientId: patient.id, fecha: rec.start, duracionS: t, origen: 'atril v6',
       electrodo: $('m-electrodo').value.trim(), posicion: $('m-posicion').value.trim(), fisio: $('m-fisio').value.trim(), notas: $('m-notas').value.trim(),
       calibracion: rec.cal, umbralMV: rec.cal.uon, recalibraciones: rec.recal,
+      musica: st && st.musica ? { abajo: st.musica.abajo, arriba: st.musica.arriba } : null,
       resumen: { activaciones: acts.length, tiempoActivoS: tot, pctActivo: t > 0 ? 100 * tot / t : 0, maxContrS: Math.max(0, ...acts.map(a => a.durS)),
         medContrS: acts.length ? tot / acts.length : 0, rmsMedio: acts.length ? acts.reduce((a, s) => a + s.rms, 0) / acts.length : null,
         activacionEs: 'cabeza ' + (rec.cal.abajoEsActividad ? 'abajo' : 'arriba') },
@@ -590,6 +646,7 @@
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
   rmsChart = new E.RmsChart($('rms'));
+  initMusica();
   progChart = new E.ProgressChart($('prog'), $('prog-tip'));
   rebuildDsp();
   $('win-sel').value = String(S.winS);
