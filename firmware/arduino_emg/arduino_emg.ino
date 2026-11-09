@@ -1,6 +1,6 @@
 /*
   =====================================================================
-   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg.ino  v4
+   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg.ino  v4.1
    Mide la senal de Nova, manda el RMS al ESP32 por el opto (cada 100 ms)
    y la senal CRUDA a la pagina web por WiFi.
   ---------------------------------------------------------------------
@@ -37,6 +37,15 @@
    Al contraer, SinArm debe subir claramente.
 
    Regla de diseno: el Arduino solo mide y envia; nunca controla un actuador.
+
+   Cambios v4.1 respecto a v4:
+     - El Serial Plotter vuelve a graficar: v4 solo escribia si
+       Serial.availableForWrite() decia que habia lugar, y en el UNO R4 eso
+       no sirve (devuelve 0). Ahora escribe si hay una computadora abierta.
+     - http://192.168.4.1 muestra un diagnostico: ultima muestra del ADC,
+       minimo y maximo del ultimo bloque (en cuentas y voltios), si la senal
+       esta saturada, el ultimo RMS mandado al ESP32 y la frecuencia de
+       muestreo medida.
 
    Cambios v4 respecto a v2 (mismo procesamiento y mismo envio al ESP32):
      - El muestreo de 1 kHz corre en una interrupcion de temporizador
@@ -86,7 +95,7 @@ const char RED_SSID[]      = "ASTRA";
 const char RED_CLAVE[]     = "astra2026";      // minimo 8 caracteres
 const IPAddress IP_ARDUINO(192, 168, 4, 1);    // "IP del Arduino" en los Ajustes de la pagina
 const bool USB_PARA_PAGINA = false;            // true: paquetes crudos por USB en vez del Serial Plotter
-const char VERSION_EMG[]   = "4";
+const char VERSION_EMG[]   = "4.1";
 
 // ------------------------- Notch biquad (forma directa II transpuesta) --
 struct Notch {
@@ -118,6 +127,13 @@ volatile bool colaOpto[N_COLA];
 volatile uint32_t colaEsc = 0, colaLei = 0;
 volatile uint32_t bloquesPerdidos = 0;
 
+// ---- Diagnostico (lo muestra http://192.168.4.1) ----
+volatile uint16_t ultimoAdc = 0;
+volatile uint16_t minBloque = 0, maxBloque = 0;   // del ultimo bloque completo
+uint16_t minAcum = 65535, maxAcum = 0;            // del bloque en curso (solo la interrupcion)
+volatile float ultimoRmsMv = 0;
+uint32_t tInicioMuestreo = 0;
+
 // ---- Paquetes para la pagina ----
 const int N_PAQ = 20;                         // muestras por paquete (20 ms)
 const int LARGO_PAQ = 4 + 2 * N_PAQ + 1;      // 45 bytes
@@ -140,6 +156,9 @@ void alMuestrear(timer_callback_args_t *) {
   if (PIN_MUESTREO >= 0) digitalWrite(PIN_MUESTREO, HIGH);
 
   int cuentaAdc = analogRead(PIN_EMG);
+  ultimoAdc = (uint16_t)cuentaAdc;
+  if (cuentaAdc < minAcum) minAcum = cuentaAdc;
+  if (cuentaAdc > maxAcum) maxAcum = cuentaAdc;
   crudo[nCrudo & (N_CRUDO - 1)] = (uint16_t)cuentaAdc;
   nCrudo = nCrudo + 1;
 
@@ -156,6 +175,7 @@ void alMuestrear(timer_callback_args_t *) {
   s_arm   += (double)ya * ya;
 
   if (++cuenta >= N_BLOQUE) {
+    minBloque = minAcum; maxBloque = maxAcum; minAcum = 65535; maxAcum = 0;
     if (bloquesHechos <= BLOQUES_ASENTAR) bloquesHechos++;
     if (colaEsc - colaLei < N_COLA) {
       uint32_t i = colaEsc % N_COLA;
@@ -163,6 +183,7 @@ void alMuestrear(timer_callback_args_t *) {
       cola60[i]    = sqrt(s_60 / N_BLOQUE);
       colaArm[i]   = sqrt(s_arm / N_BLOQUE);
       colaOpto[i]  = bloquesHechos > BLOQUES_ASENTAR;
+      ultimoRmsMv  = colaArm[i] * 1000.0f;
       colaEsc = colaEsc + 1;
     } else {
       bloquesPerdidos = bloquesPerdidos + 1;   // el loop lleva > 6.4 s sin vaciar la cola
@@ -225,7 +246,7 @@ void vaciarCola() {
       n += ponerVoltios(u + n, sizeof(u) - n, "SinArm", rmsArm);
       u[n++] = '\r';
       u[n++] = '\n';
-      if (Serial.availableForWrite() >= n) Serial.write((const uint8_t *)u, n);
+      Serial.write((const uint8_t *)u, n);     // ~40 bytes cada 100 ms: el muestreo no se entera (va en la interrupcion)
     }
   }
 }
@@ -268,7 +289,7 @@ uint32_t inicioAlineado() {
 
 void mandarCrudoUsb() {
   if (!Serial) { sigUsb = inicioAlineado(); return; }
-  while (Serial.availableForWrite() >= LARGO_PAQ) {
+  for (int k = 0; k < 4; k++) {                 // hasta 4 paquetes (80 ms) por vuelta
     int len = armarPaquetes(sigUsb, bufUsb, 1);
     if (!len) break;
     Serial.write(bufUsb, len);
@@ -352,10 +373,19 @@ void atenderPeticion(WiFiClient &c) {
     sigWifi = inicioAlineado();
     tVivo = millis();
   } else if (!strncmp(l, "GET ", 4)) {
-    char t[256];
-    snprintf(t, sizeof t, "ASTRA - Arduino EMG v%s\nMuestreo: %d Hz\nMuestras: %lu\nBloques perdidos: %lu\n"
-             "Pagina conectada: %s\nLa senal cruda sale en /stream\n",
-             VERSION_EMG, (int)FS, (unsigned long)nCrudo, (unsigned long)bloquesPerdidos, transmitiendo ? "si" : "no");
+    char t[640];
+    uint16_t mn = minBloque, mx = maxBloque, ua = ultimoAdc;
+    float seg = (millis() - tInicioMuestreo) / 1000.0f;
+    const char *estado = (mn <= ADC_MAX * 0.01f || mx >= ADC_MAX * 0.99f) ? "SATURADA (pegada a 0 V o a 5 V): revisa electrodos, referencia y cable de Nova"
+                       : (mx - mn < 3) ? "PLANA (no cambia): Nova sin alimentacion o cable de senal suelto" : "bien (centro ~2.5 V)";
+    snprintf(t, sizeof t, "ASTRA - Arduino EMG v%s\nMuestreo: %d Hz (medido: %.1f Hz)\nMuestras: %lu\nBloques perdidos: %lu\n"
+             "Pagina conectada: %s\nLa senal cruda sale en /stream\n\n"
+             "Diagnostico de la senal (A0):\n  ultima muestra: %u cuentas = %.3f V\n"
+             "  ultimo bloque (100 ms): min %u (%.3f V), max %u (%.3f V)\n  senal: %s\n"
+             "  ultimo RMS al ESP32: %.0f mV\n(recarga la pagina para actualizar)\n",
+             VERSION_EMG, (int)FS, seg > 0 ? nCrudo / seg : 0.0f, (unsigned long)nCrudo, (unsigned long)bloquesPerdidos,
+             transmitiendo ? "si" : "no", ua, ua * V_REF / ADC_MAX, mn, mn * V_REF / ADC_MAX, mx, mx * V_REF / ADC_MAX, estado,
+             (float)ultimoRmsMv);
     responderTexto(c, "200 OK", t);
   } else {
     responderTexto(c, "400 Bad Request", "");
@@ -398,6 +428,7 @@ void setup() {
   for (int i = 0; i < 16; i++) s += analogRead(PIN_EMG) * V_REF / ADC_MAX;
   dc = s / 16.0f;
 
+  tInicioMuestreo = millis();
   if (!iniciarTemporizador()) {
     // Sin temporizador no hay muestreo fiable: lo avisa y parpadea el LED
     pinMode(LED_BUILTIN, OUTPUT);

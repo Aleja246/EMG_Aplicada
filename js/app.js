@@ -369,6 +369,9 @@
         const q = quality.evaluate();
         if (q) {
           qLast = q;
+          const v = c => (c * S.vref / S.adcMax / 1000).toFixed(2);
+          $('emg-note').textContent = 'Señal cruda en A0 (último ½ s): de ' + v(q.min) + ' V a ' + v(q.max) + ' V, centro ' + v(q.mean) +
+            ' V (lo normal: centro ~2.5 V, lejos de 0 V y de 5 V). La gráfica la filtra (pasa altas 20 Hz y red 60 Hz con armónicos) solo para verla.';
           qCount.sat = q.saturated ? qCount.sat + 1 : 0;
           qCount.flat = q.flat && !q.saturated ? qCount.flat + 1 : 0;
           qCount.noisy = q.noisy60 ? qCount.noisy + 1 : 0;
@@ -654,7 +657,10 @@
   let tick = 0;
   setInterval(() => {
     const now = performance.now();
-    if (now - rx.lastT >= 1000) { rx.fs = (rx.samples - rx.lastCount) * 1000 / (now - rx.lastT); rx.lastCount = rx.samples; rx.lastT = now; }
+    if (now - rx.lastT >= 1000) {   // por WiFi las muestras llegan en tandas: se promedia ~4 s
+      const inst = (rx.samples - rx.lastCount) * 1000 / (now - rx.lastT);
+      rx.fs = rx.fs ? 0.75 * rx.fs + 0.25 * inst : inst; rx.lastCount = rx.samples; rx.lastT = now;
+    }
     renderConn();
     if (view === 'session') renderSession();
     if (++tick % 2 === 0) evalAlarms(now);

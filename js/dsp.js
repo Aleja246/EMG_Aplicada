@@ -108,9 +108,10 @@
   // Calidad de señal / conexión: se evalúa cada ~500 ms
   class SignalQuality {
     constructor(adcMax) { this.adcMax = adcMax; this.reset(); }
-    reset() { this.n = 0; this.sum = 0; this.sumsq = 0; this.sat = 0; this.hpE = 0; this.nE = 0; }
+    reset() { this.n = 0; this.sum = 0; this.sumsq = 0; this.sat = 0; this.hpE = 0; this.nE = 0; this.min = Infinity; this.max = -Infinity; }
     feed(raw, hp, xn) {
       this.n++; this.sum += raw; this.sumsq += raw * raw;
+      if (raw < this.min) this.min = raw; if (raw > this.max) this.max = raw;
       if (raw <= this.adcMax * 0.01 || raw >= this.adcMax * 0.99) this.sat++;
       this.hpE += hp * hp; this.nE += xn * xn;
     }
@@ -121,7 +122,7 @@
       const satFrac = this.sat / this.n;
       const ratio60 = this.hpE > 0 ? 1 - this.nE / this.hpE : 0; // energía que quitaron los notch
       const r = {
-        sd, satFrac, ratio60,
+        sd, satFrac, ratio60, mean, min: this.min, max: this.max,
         saturated: satFrac > 0.2,
         flat: sd < 1.5,                       // cuentas ADC
         noisy60: ratio60 > 0.7 && sd >= 1.5
