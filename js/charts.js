@@ -123,6 +123,30 @@
     }
   }
 
+  /* Señal guardada de una sesión (RMS y mediana cada 100 ms) con sus umbrales y las activaciones sombreadas. */
+  function dibujarSesion(canvas, datos, umbrales) {
+    const { ctx, w, h } = fit(canvas);
+    if (!w || !h) return;
+    const L = 52, R = 10, T = 8, B = 24, W = w - L - R, H = h - T - B;
+    ctx.clearRect(0, 0, w, h);
+    if (!datos.length) return;
+    const t0 = datos[0].t, t1 = Math.max(t0 + 1, datos[datos.length - 1].t);
+    let ymax = Math.max(20, umbrales.uon || 0, ...datos.map(d => d.rms)) * 1.1;
+    const X = t => L + (t - t0) / (t1 - t0) * W, Y = v => T + H - (v / ymax) * H;
+    ctx.fillStyle = css('--green-bg');
+    for (let i = 0; i < datos.length; i++) if (datos[i].act) ctx.fillRect(X(datos[i].t), T, Math.max(1, W / datos.length + 0.5), H);
+    ctx.strokeStyle = css('--grid'); ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (const f of [0, 0.25, 0.5, 0.75, 1]) { const y = Y(f * ymax); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + W, y); ctx.stroke(); ctx.fillText(Math.round(f * ymax), L - 6, y); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    const paso = [10, 30, 60, 120, 300, 600].find(p => (t1 - t0) / p <= 8) || 600;
+    for (let s = Math.ceil(t0 / paso) * paso; s <= t1; s += paso) ctx.fillText(Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0'), X(s), T + H + 6);
+    const linea = (k, color, ancho) => { ctx.strokeStyle = color; ctx.lineWidth = ancho; ctx.beginPath(); datos.forEach((d, i) => i ? ctx.lineTo(X(d.t), Y(d[k])) : ctx.moveTo(X(d.t), Y(d[k]))); ctx.stroke(); };
+    linea('rms', css('--signal'), 1); linea('med', css('--primary'), 2);
+    ctx.setLineDash([8, 4]); ctx.strokeStyle = css('--amber'); ctx.lineWidth = 1.5;
+    for (const v of [umbrales.uon, umbrales.uoff]) if (v > 0) { ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(L + W, Y(v)); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.lineWidth = 1;
+  }
+
   /* Progreso entre sesiones: puntos + línea de tendencia (regresión lineal). */
   class ProgressChart {
     constructor(canvas, tip) {
@@ -171,5 +195,5 @@
     }
   }
 
-  EMG.LiveChart = LiveChart; EMG.RmsChart = RmsChart; EMG.ProgressChart = ProgressChart;
+  EMG.LiveChart = LiveChart; EMG.RmsChart = RmsChart; EMG.ProgressChart = ProgressChart; EMG.dibujarSesion = dibujarSesion;
 })();

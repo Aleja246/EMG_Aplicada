@@ -11,7 +11,34 @@
   }
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
+  /* Dos modos con la misma interfaz:
+   *  - SERVIDOR (la página se abrió desde servidor/servidor.js): pacientes y sesiones se guardan en la
+   *    laptop (servidor/datos/). Se cargan una vez al abrir y cada cambio se manda a /api/... al momento.
+   *  - NAVEGADOR (index.html abierto como archivo): como antes, en localStorage. */
+  const remoto = { activo: false, pacientes: [], sesiones: [] };
+  async function pedir(metodo, url, cuerpo) {
+    const r = await fetch(url, { method: metodo, headers: cuerpo ? { 'Content-Type': 'application/json' } : undefined,
+      body: cuerpo ? JSON.stringify(cuerpo) : undefined, cache: 'no-store' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
+    return j;
+  }
+  function avisarError(e) { if (Store.onError) Store.onError('No se pudo guardar en el servidor: ' + e.message); }
+
   const Store = {
+    onError: null,
+    get remoto() { return remoto.activo; },
+    /** Usa el servidor si la página vino de él. Devuelve true si quedó en modo servidor. */
+    async conectar() {
+      if (!/^https?:$/.test(location.protocol)) return false;
+      try {
+        const d = await pedir('GET', '/api/datos');
+        remoto.pacientes = d.pacientes || []; remoto.sesiones = d.sesiones || []; remoto.activo = true;
+      } catch (e) { remoto.activo = false; }
+      return remoto.activo;
+    },
+    // Lo que quedó guardado en este navegador antes de usar el servidor (para subirlo)
+    datosLocales() { return { patients: load('emg.patients', []), sessions: load('emg.sessions', []) }; },
     settings() {
       const saved = load('emg.settings', {});
       if (saved.cfgVer === EMG.DEFAULTS.cfgVer) return Object.assign({}, EMG.DEFAULTS, saved);
@@ -21,30 +48,57 @@
       return Object.assign({}, EMG.DEFAULTS, keep);
     },
     saveSettings(s) { return save('emg.settings', s); },
-    patients() { return load('emg.patients', []); },
-    sessions() { return load('emg.sessions', []); },
+    patients() { return remoto.activo ? remoto.pacientes.slice() : load('emg.patients', []); },
+    sessions() { return remoto.activo ? remoto.sesiones.slice() : load('emg.sessions', []); },
     sessionsFor(pid) {
       return Store.sessions().filter(s => s.patientId === pid).sort((a, b) => a.fecha.localeCompare(b.fecha));
     },
     savePatient(p) {
+      if (!p.id) { p.id = uid(); p.creado = new Date().toISOString(); }
+      if (remoto.activo) {
+        const i = remoto.pacientes.findIndex(x => x.id === p.id); if (i >= 0) remoto.pacientes[i] = p; else remoto.pacientes.push(p);
+        pedir('POST', '/api/pacientes', p).catch(avisarError);
+        return p;
+      }
       const list = Store.patients();
-      if (!p.id) { p.id = uid(); p.creado = new Date().toISOString(); list.push(p); }
-      else { const i = list.findIndex(x => x.id === p.id); if (i >= 0) list[i] = p; else list.push(p); }
+      const i = list.findIndex(x => x.id === p.id); if (i >= 0) list[i] = p; else list.push(p);
       return save('emg.patients', list) ? p : null;
     },
-    saveSession(s) {
-      const list = Store.sessions();
-      s.id = s.id || uid(); list.push(s);
-      return save('emg.sessions', list) ? s : null;
+    /** senal (opcional): [[tiempo_s, rms_mV, mediana_mV, activacion], ...] — en modo servidor se guarda como CSV */
+    saveSession(s, senal) {
+      s.id = s.id || uid();
+      if (remoto.activo) {
+        remoto.sesiones.push(s);
+        return pedir('POST', '/api/sesiones', { sesion: s, senal: senal || [] })
+          .then(r => { Object.assign(s, r.sesion); return s; })
+          .catch(e => { remoto.sesiones = remoto.sesiones.filter(x => x.id !== s.id); throw e; });
+      }
+      const list = Store.sessions(); list.push(s);
+      return save('emg.sessions', list) ? Promise.resolve(s) : Promise.reject(new Error('el navegador no tiene espacio'));
     },
-    deleteSession(id) { save('emg.sessions', Store.sessions().filter(s => s.id !== id)); },
+    deleteSession(id) {
+      if (remoto.activo) { remoto.sesiones = remoto.sesiones.filter(s => s.id !== id); pedir('DELETE', '/api/sesiones/' + id).catch(avisarError); return; }
+      save('emg.sessions', Store.sessions().filter(s => s.id !== id));
+    },
+    /** Señal guardada de una sesión (solo modo servidor): [{t, rms, med, act}] */
+    async senal(id) {
+      if (!remoto.activo) throw new Error('La señal de cada sesión se guarda cuando usas la página desde el servidor');
+      const r = await fetch('/api/sesiones/' + id + '/senal', { cache: 'no-store' });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+      return (await r.text()).trim().split(/\r?\n/).slice(1).map(l => { const [t, rms, med, act] = l.split(',').map(Number); return { t, rms, med, act }; });
+    },
     backup() {
       return JSON.stringify({ version: 1, exportado: new Date().toISOString(),
         patients: Store.patients(), sessions: Store.sessions() }, null, 1);
     },
-    restore(text) {
-      const d = JSON.parse(text);
+    async restore(text) {
+      const d = typeof text === 'string' ? JSON.parse(text) : text;
       if (!Array.isArray(d.patients) || !Array.isArray(d.sessions)) throw new Error('Archivo no válido');
+      if (remoto.activo) {
+        const r = await pedir('POST', '/api/restaurar', d);
+        await Store.conectar();
+        return { patients: r.pacientes, sessions: r.sesiones };
+      }
       const P = Store.patients(), S = Store.sessions();
       d.patients.forEach(p => { if (!P.some(x => x.id === p.id)) P.push(p); });
       d.sessions.forEach(s => { if (!S.some(x => x.id === s.id)) S.push(s); });

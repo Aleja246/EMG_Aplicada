@@ -1,6 +1,6 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v6 (sonido + pagina web)
+//  ASTRA - Firmware del atril (ESP32) v7 (sonido + servidor de la pagina)
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (diagnostico_emg_enlace.ino) manda por el
@@ -41,17 +41,19 @@
 //  Boton BOOT de la placa: recalibrar (o reanudar tras el paro).
 //
 //  Placa: "ESP32 Dev Module". Biblioteca: AccelStepper (el DFPlayer se maneja
-//  con comandos directos, no necesita su biblioteca). WiFi, WebServer y
-//  Preferences vienen con el paquete de placas ESP32.
+//  con comandos directos, no necesita su biblioteca). WiFi y Preferences
+//  vienen con el paquete de placas ESP32.
 //
-//  v6 = v5 con sonido + PAGINA WEB (la deteccion, la calibracion, los motores,
-//  la luz y la logica de la musica NO cambian):
-//   - Se une a la red WiFi "ASTRA" que crea el Arduino (arduino_emg.ino v4)
-//     con la IP fija 192.168.4.200 y atiende a la pagina:
-//       /estado              -> estado en vivo, calibracion, RMS y mediana de
-//                               cada bloque, activaciones, musica y mensajes
-//       /cmd?c=<letra>       -> los mismos comandos del monitor serie
-//       /musica?l=abajo|arriba&p=1,2,3 -> las 3 pistas de una lista
+//  v7 = v5 con sonido + SERVIDOR DE LA PAGINA (la deteccion, la calibracion,
+//  los motores, la luz y la logica de la musica NO cambian):
+//   - Se une a la red WiFi del consultorio (RED_SSID / RED_CLAVE), encuentra
+//     solo al servidor de la pagina (servidor/servidor.js en la laptop avisa
+//     por UDP en el puerto 9999) y se conecta por TCP al puerto 9002.
+//   - Cada 200 ms le manda una linea JSON con su estado: modo, calibracion,
+//     RMS y mediana de cada bloque nuevo, activaciones nuevas, musica y los
+//     mensajes nuevos del monitor serie. El servidor lo pasa a la pagina.
+//   - Recibe lineas del servidor:  "C x"            = tecla x del monitor serie
+//                                  "M abajo 1,2,3"  = pistas de una lista
 //   - Las listas elegidas en la pagina se guardan en la memoria del ESP32
 //     (Preferences): al volver a encender siguen igual, con o sin pagina.
 //     Si la lista que cambias es la que suena, empieza ya con la nueva.
@@ -105,7 +107,7 @@
 
 #include <AccelStepper.h>
 #include <WiFi.h>
-#include <WebServer.h>
+#include <WiFiUdp.h>
 #include <Preferences.h>
 #include <stdarg.h>
 
@@ -228,17 +230,18 @@ const bool USAR_PARO = false;      // pon true cuando el divisor del paro (R6, R
 const bool EMG_INVERTIDO = false;  // pon true si el opto invierte (aviso "!! Llegan bytes ...")
 const unsigned long CORTE_LINEA_MS = 50;  // una linea con un hueco mayor a esto se descarta
 
-// ------------------------- WiFi (pagina web) --------------------------
-// El Arduino UNO R4 WiFi crea la red; el atril se une con una IP fija.
-// RED_SSID / RED_CLAVE iguales que en arduino_emg.ino; IP_ATRIL igual que
-// "IP del atril" en los Ajustes de la pagina.
+// ------------------------- WiFi y servidor de la pagina ----------------
+// La misma red WiFi que la laptop y el Arduino (la del consultorio, o la
+// "zona con cobertura" de la laptop). Igual que en arduino_emg.ino.
 const bool USAR_WIFI = true;
-const char *RED_SSID  = "ASTRA";
-const char *RED_CLAVE = "astra2026";
-const IPAddress IP_ATRIL(192, 168, 4, 200);
-const IPAddress IP_PUERTA(192, 168, 4, 1);    // el Arduino
-const IPAddress MASCARA(255, 255, 255, 0);
-const char *VERSION_ATRIL = "6";
+const char *RED_SSID  = "ASTRA";          // <-- nombre de la red WiFi
+const char *RED_CLAVE = "astra2026";      // <-- su clave
+// El servidor se encuentra solo (aviso UDP). Si la red no deja pasar ese
+// aviso, escribe aqui la IP de la laptop (la muestra el servidor al abrir).
+const char *SERVIDOR_IP = "";             // p. ej. "192.168.1.50"; vacio = buscarlo solo
+const uint16_t PUERTO_SERVIDOR = 9002;
+const uint16_t PUERTO_AVISO    = 9999;
+const char *VERSION_ATRIL = "7";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -356,7 +359,8 @@ struct PedidoMusica { uint8_t abajo; uint8_t p[3]; };
 QueueHandle_t colaMusica = NULL;    // listas de musica de la pagina -> loop
 bool reiniciarLista = false;        // la lista que suena cambio: empezar ya con la nueva
 Preferences prefs;
-volatile int8_t avisoWifi = 0;      // 1 = conectado, -1 = se perdio (lo imprime el loop)
+volatile int8_t avisoWifi = 0;      // 1/-1 red, 2/-2 servidor (lo imprime el loop)
+IPAddress ipServidor;
 uint32_t idArranque = 0;            // cambia en cada encendido (la pagina lo detecta)
 int sesionId = 0;                   // sube al terminar cada calibracion (sesion nueva)
 unsigned long msSesion = 0;         // tiempo en SESION (sin pausas)
@@ -871,7 +875,9 @@ void actualizarModo() {
   int8_t aw = avisoWifi;
   if (aw) {
     avisoWifi = 0;
-    if (aw > 0) Log.printf(">> WiFi conectado a la red %s. Pagina: http://%s\n", RED_SSID, WiFi.localIP().toString().c_str());
+    if (aw == 1) Log.printf(">> WiFi conectado a la red %s (IP del atril: %s). Buscando el servidor de la pagina...\n", RED_SSID, WiFi.localIP().toString().c_str());
+    else if (aw == 2) Log.printf(">> Conectado al servidor de la pagina (%s).\n", ipServidor.toString().c_str());
+    else if (aw == -2) Log.println("!! Se cerro la conexion con el servidor de la pagina (reintentando).");
     else Log.printf("!! Se perdio la red WiFi %s (el atril sigue funcionando; reintentando).\n", RED_SSID);
   }
 
@@ -1081,11 +1087,10 @@ void imprimirEstado() {
 }
 
 // ======================================================================
-//  Pagina web (nucleo 0). Solo lee el estado y encola pedidos: todo lo
-//  que cambia el atril lo hace el loop (ejecutarComando / aplicarMusica).
+//  Servidor de la pagina (nucleo 0). Solo lee el estado y encola pedidos:
+//  todo lo que cambia el atril lo hace el loop (ejecutarComando / aplicarMusica).
 // ======================================================================
-WebServer web(80);
-static char js[8192];               // respuesta de /estado
+static char js[8192];               // una linea JSON para el servidor
 static int jl = 0;
 
 void ja(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -1110,22 +1115,16 @@ void jaTexto(const char *t) {
   ja("\"");
 }
 
-void cabeceras() {
-  web.sendHeader("Access-Control-Allow-Origin", "*");
-  web.sendHeader("Access-Control-Allow-Private-Network", "true");
-  web.sendHeader("Cache-Control", "no-store");
-}
-
-// Primer indice a mandar: lo que pide la pagina, dentro de lo que se guarda
-uint32_t desde(const char *arg, uint32_t total, uint32_t guardados) {
-  long q = web.hasArg(arg) ? web.arg(arg).toInt() : 0;
+// Primer indice a mandar: lo pendiente, dentro de lo que se guarda
+uint32_t desde(uint32_t pedido, uint32_t total, uint32_t guardados) {
   uint32_t ini = total > guardados ? total - guardados : 0;
-  if (q < (long)ini) q = ini;
-  if (q > (long)total) q = total;
-  return (uint32_t)q;
+  if (pedido < ini) pedido = ini;
+  if (pedido > total) pedido = total;
+  return pedido;
 }
 
-void manejarEstado() {
+// Arma en js el estado + lo nuevo desde los indices sb, sa, sl (y los avanza)
+void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
   static int32_t br[N_BLQ];
   static float bm[N_BLQ];
   static uint8_t bf[N_BLQ];
@@ -1136,14 +1135,15 @@ void manejarEstado() {
   portENTER_CRITICAL(&candado);
   nb = nBlq; na = nActLista; nl = nLog;
   portEXIT_CRITICAL(&candado);
-  b0 = desde("b", nb, N_BLQ);
-  a0 = desde("a", na, N_ACT);
-  l0 = desde("l", nl, N_LOG);
+  b0 = desde(sb, nb, N_BLQ);
+  a0 = desde(sa, na, N_ACT);
+  l0 = desde(sl, nl, N_LOG);
   portENTER_CRITICAL(&candado);
   for (uint32_t i = b0; i < nb; i++) { br[i - b0] = blqRms[i % N_BLQ]; bm[i - b0] = blqMed[i % N_BLQ]; bf[i - b0] = blqFlag[i % N_BLQ]; }
   for (uint32_t i = a0; i < na; i++) av[i - a0] = actLista[i % N_ACT];
   for (uint32_t i = l0; i < nl; i++) memcpy(lt[i - l0], logTxt[i % N_LOG], LARGO_LOG);
   portEXIT_CRITICAL(&candado);
+  sb = nb; sa = na; sl = nl;
 
   unsigned long ahora = millis();
   bool act = activo;
@@ -1174,73 +1174,79 @@ void manejarEstado() {
     ja(i ? ",[%d,%d,%.1f,%.1f,%d]" : "[%d,%d,%.1f,%.1f,%d]", av[i].sid, av[i].id, av[i].ini, av[i].dur, av[i].rms);
   ja("],\"ln\":%lu,\"logs\":[", (unsigned long)nl);
   for (uint32_t i = 0; i < nl - l0; i++) { if (i) ja(","); jaTexto(lt[i]); }
-  ja("]}");
-
-  cabeceras();
-  web.send(200, "application/json", String(js));
+  ja("]}\n");
 }
 
-void manejarCmd() {
-  cabeceras();
-  String c = web.arg("c");
-  const char *validos = "cprh+-xio";
-  if (c.length() != 1 || !strchr(validos, c[0])) {
-    web.send(400, "application/json", "{\"ok\":false}");
-    return;
+// Una linea del servidor: "C x" (tecla del monitor serie) o "M abajo 1,2,3" (lista de musica)
+void lineaDelServidor(const char *l) {
+  if (l[0] == 'C' && l[1] == ' ' && l[2] && !l[3] && strchr("cprh+-xio", l[2])) {
+    char ch = l[2];
+    if (colaCmd) xQueueSend(colaCmd, &ch, 0);
+  } else if (l[0] == 'M' && l[1] == ' ') {
+    char lista[8]; int a = 0, b = 0, c = 0;
+    if (sscanf(l + 2, "%7s %d,%d,%d", lista, &a, &b, &c) == 4 && (!strcmp(lista, "abajo") || !strcmp(lista, "arriba")) &&
+        a >= 1 && a <= 255 && b >= 1 && b <= 255 && c >= 1 && c <= 255) {
+      PedidoMusica m = {(uint8_t)(!strcmp(lista, "abajo") ? 1 : 0), {(uint8_t)a, (uint8_t)b, (uint8_t)c}};
+      if (colaMusica) xQueueSend(colaMusica, &m, 0);
+    }
   }
-  char ch = c[0];
-  bool ok = colaCmd && xQueueSend(colaCmd, &ch, 0) == pdTRUE;
-  web.send(ok ? 200 : 503, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
-}
-
-// /musica?l=abajo&p=1,2,3  (numeros de archivo en /01, de 1 a 255)
-void manejarMusica() {
-  cabeceras();
-  String l = web.arg("l"), ps = web.arg("p");
-  int a = 0, b = 0, c = 0;
-  bool ok = (l == "abajo" || l == "arriba") && sscanf(ps.c_str(), "%d,%d,%d", &a, &b, &c) == 3 &&
-            a >= 1 && a <= 255 && b >= 1 && b <= 255 && c >= 1 && c <= 255;
-  if (!ok) { web.send(400, "application/json", "{\"ok\":false}"); return; }
-  PedidoMusica m = {(uint8_t)(l == "abajo" ? 1 : 0), {(uint8_t)a, (uint8_t)b, (uint8_t)c}};
-  ok = colaMusica && xQueueSend(colaMusica, &m, 0) == pdTRUE;
-  web.send(ok ? 200 : 503, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
-}
-
-void manejarOtro() {
-  cabeceras();
-  if (web.method() == HTTP_OPTIONS) {             // permiso previo del navegador
-    web.sendHeader("Access-Control-Allow-Methods", "GET");
-    web.sendHeader("Access-Control-Allow-Headers", "*");
-    web.send(204);
-    return;
-  }
-  web.send(200, "text/plain", String("ASTRA - atril ESP32 v") + VERSION_ATRIL + "\nModo: " + NOMBRE_MODO[modo] +
-                              "\nLa pagina usa /estado, /cmd?c=... y /musica?l=...&p=...\n");
 }
 
 void tareaRed(void *) {
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);              // respuesta rapida a la pagina
-  WiFi.config(IP_ATRIL, IP_PUERTA, MASCARA);
+  WiFi.setSleep(false);              // respuesta rapida
   WiFi.setAutoReconnect(true);
   WiFi.begin(RED_SSID, RED_CLAVE);
-  web.on("/estado", HTTP_GET, manejarEstado);
-  web.on("/cmd", HTTP_GET, manejarCmd);
-  web.on("/musica", HTTP_GET, manejarMusica);
-  web.onNotFound(manejarOtro);
-  web.begin();
-  bool conectado = false;
-  unsigned long tIntento = millis();
+  WiFiUDP udp;
+  WiFiClient cli;
+  bool red = false, conectado = false, hayServidor = false;
+  unsigned long tIntentoRed = millis(), tAviso = 0, tIntento = 0, tEnvio = 0;
+  uint32_t sb = 0, sa = 0, sl = 0;
+  char lin[96]; int nlin = 0;
   for (;;) {
-    bool c = WiFi.status() == WL_CONNECTED;
-    if (c != conectado) { conectado = c; avisoWifi = c ? 1 : -1; tIntento = millis(); }
-    if (!c && millis() - tIntento > 15000) {     // sin red por 15 s: vuelve a intentar
-      tIntento = millis();
+    unsigned long ahora = millis();
+    bool r = WiFi.status() == WL_CONNECTED;
+    if (r != red) {
+      red = r; avisoWifi = r ? 1 : -1; tIntentoRed = ahora;
+      if (r) {
+        udp.begin(PUERTO_AVISO);
+        if (SERVIDOR_IP[0] && ipServidor.fromString(SERVIDOR_IP)) { hayServidor = true; tAviso = ahora; }
+      }
+    }
+    if (!r && ahora - tIntentoRed > 15000) {     // sin red por 15 s: vuelve a intentar
+      tIntentoRed = ahora;
       WiFi.disconnect();
       WiFi.begin(RED_SSID, RED_CLAVE);
     }
-    web.handleClient();
-    vTaskDelay(2);
+    // Aviso del servidor: "ASTRA-SERVIDOR 9001 9002"
+    if (r && udp.parsePacket() > 0) {
+      char t[48]; int k = udp.read(t, sizeof(t) - 1); if (k < 0) k = 0; t[k] = 0;
+      if (!strncmp(t, "ASTRA-SERVIDOR", 14)) { ipServidor = udp.remoteIP(); hayServidor = true; tAviso = ahora; }
+    }
+    // Conexion TCP con el servidor
+    if (conectado && !cli.connected()) { conectado = false; cli.stop(); avisoWifi = -2; }
+    if (!conectado && r && hayServidor && ahora - tIntento >= 3000 && (SERVIDOR_IP[0] || ahora - tAviso < 5000)) {
+      tIntento = ahora;
+      if (cli.connect(ipServidor, PUERTO_SERVIDOR, 2000)) {
+        cli.setNoDelay(true);
+        conectado = true; avisoWifi = 2;
+        sb = sa = sl = 0;                        // le manda lo que tenga guardado (el servidor quita lo repetido)
+        nlin = 0;
+      }
+    }
+    if (conectado) {
+      while (cli.available()) {                 // ordenes del servidor, una por linea
+        char ch = cli.read();
+        if (ch == '\n') { lin[nlin] = 0; lineaDelServidor(lin); nlin = 0; }
+        else if (ch != '\r' && nlin < (int)sizeof(lin) - 1) lin[nlin++] = ch;
+      }
+      if (ahora - tEnvio >= 200) {               // el estado sale 5 veces por segundo
+        tEnvio = ahora;
+        armarEstado(sb, sa, sl);
+        if (cli.write((const uint8_t *)js, jl) != (size_t)jl) { conectado = false; cli.stop(); avisoWifi = -2; }
+      }
+    }
+    vTaskDelay(5);
   }
 }
 
@@ -1254,7 +1260,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v6 (sonido + pagina web) ===");
+  Serial.println("=== ASTRA - atril v7 (sonido + servidor de la pagina) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);

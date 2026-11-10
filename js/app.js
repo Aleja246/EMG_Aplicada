@@ -72,7 +72,8 @@
 
   function renderHome() {
     const p = E.Store.patients().length, s = E.Store.sessions().length;
-    $('home-stats').textContent = p + ' paciente(s) registrado(s) · ' + s + ' sesión(es) guardada(s)';
+    $('home-stats').textContent = p + ' paciente(s) registrado(s) · ' + s + ' sesión(es) guardada(s)' +
+      (E.Store.remoto ? ' · guardados en el servidor (esta laptop)' : ' · guardados solo en este navegador');
   }
 
   /* ---------- registro ---------- */
@@ -151,7 +152,7 @@
   }
 
   async function disconnectAll() {
-    const e = emg, a = atril; emg = null; atril = null; sim = null; st = null;
+    const e = emg, a = atril; emg = null; atril = null; sim = null; st = null; link = null; srv = null;
     if (a) a.stop();
     if (e) { if (e.stop) e.stop(); else await e.disconnect(); }
     emgConn = { status: 'disconnected', msg: '' }; atrilConn = { status: 'disconnected', msg: '' };
@@ -163,14 +164,41 @@
     }
     await disconnectAll();
     rebuildDsp();
-    atril = new E.AtrilLink(new E.AtrilHttp(S.ipAtril), onEstado, onAtrilStatus);
+    // Un solo WebSocket con el servidor de la página: trae la señal del Arduino y el estado del atril
+    link = new E.ServidorLink(servidorHost(), {
+      onSamples: arr => { if (!S.emgUsb) onSamples(arr); },
+      onEstado,
+      onServidor,
+      onStatus: (s, msg) => {
+        if (s === 'connecting' || s === 'open') {
+          if (atrilConn.status !== 'connecting') onAtrilStatus('connecting');
+          if (!S.emgUsb && emgConn.status !== 'connecting') onEmgStatus('connecting');
+        } else if (s === 'error') {
+          srv = null;
+          onAtrilStatus('error', msg);
+          if (!S.emgUsb) onEmgStatus('error', msg);
+        }
+      }
+    });
+    atril = link.atril;
     if (S.emgUsb) {
       emg = new E.SerialSource(onSamples, onEmgStatus);
       try { await emg.connect(); }
       catch (e) { emg = null; onEmgStatus('disconnected'); if (e.name !== 'NotFoundError') toast('No se pudo abrir el puerto: ' + (e.message || e.name) + '. ¿Está abierto el Monitor Serie de Arduino?'); }
-    } else {
-      emg = new E.WifiSource(onSamples, onEmgStatus, S.ipArduino);
-      emg.connect();
+    } else emg = link.emg;
+  }
+  // Dónde está el servidor: el mismo que sirvió la página, o el de Ajustes si se abrió como archivo
+  const servidorHost = () => (/^https?:$/.test(location.protocol) ? location.host : (S.servidor || 'localhost:8080'));
+  let link = null, srv = null;          // srv = último aviso del servidor (quién está conectado)
+  function onServidor(info) {
+    srv = info;
+    const a = info.atril.conectado;
+    if (a && atrilConn.status !== 'connected') onAtrilStatus('connected');
+    if (!a && atrilConn.msg !== 'atril') { onAtrilStatus('error', 'atril'); }
+    if (!S.emgUsb) {
+      const d = info.arduino.conectado;
+      if (d && emgConn.status !== 'connected') onEmgStatus('connected');
+      if (!d && emgConn.msg !== 'arduino') onEmgStatus('error', 'arduino');
     }
   }
   function startSim() {
@@ -197,7 +225,7 @@
   }
 
   function renderConn() {
-    const kindName = k => ({ wifi: 'WiFi', usb: 'USB', sim: 'simulación' }[k] || '');
+    const kindName = k => ({ wifi: 'WiFi', usb: 'USB', sim: 'simulación', servidor: 'WiFi' }[k] || '');
     // EMG
     let chip = $('emg-chip'), t = $('emg-text'), c = emgConn.status;
     chip.className = 'chip';
@@ -208,7 +236,10 @@
     } else if (c === 'connecting') { chip.classList.add('warn'); t.textContent = 'EMG: conectando…'; }
     else if (c === 'error') { chip.classList.add('bad'); t.textContent = 'EMG: ' + (emgConn.msg || 'error'); }
     else t.textContent = 'EMG: sin conexión';
-    chip.title = 'Señal EMG cruda del Arduino' + (S.emgUsb ? ' (USB)' : ' en http://' + S.ipArduino + '/stream');
+    const dg = srv && srv.arduino.diag;
+    if (c === 'error' && emgConn.msg === 'arduino') t.textContent = 'EMG: Arduino sin conectar';
+    chip.title = 'Señal EMG cruda del Arduino' + (S.emgUsb ? ' (USB)' : srv && srv.arduino.conectado ? ' (por el servidor, desde ' + srv.arduino.ip + ')' : ' (por el servidor ' + servidorHost() + ')') +
+      (dg ? ' · en el Arduino: ' + dg.fs + ' Hz, señal de ' + (dg.min * 5 / 16383).toFixed(2) + ' a ' + (dg.max * 5 / 16383).toFixed(2) + ' V' : '');
     // Atril
     chip = $('atril-chip'); t = $('atril-text'); c = atrilConn.status;
     chip.className = 'chip';
@@ -218,7 +249,8 @@
     } else if (c === 'connecting' || c === 'connected') { chip.classList.add('warn'); t.textContent = 'Atril: conectando…'; }
     else if (c === 'error') { chip.classList.add('bad'); t.textContent = 'Atril: sin respuesta'; }
     else t.textContent = 'Atril: sin conexión';
-    chip.title = 'Atril (ESP32) en http://' + S.ipAtril + (atrilConn.msg ? ' — ' + atrilConn.msg : '');
+    if (c === 'error' && atrilConn.msg === 'atril') t.textContent = 'Atril: ESP32 sin conectar';
+    chip.title = 'Atril (ESP32)' + (srv && srv.atril.conectado ? ' conectado al servidor desde ' + srv.atril.ip : ' — servidor ' + servidorHost());
     // Botones
     $('btn-connect').textContent = realOn() ? 'Desconectar' : 'Conectar ASTRA';
     $('btn-sim').textContent = sim ? 'Detener simulación' : 'Simulación';
@@ -352,7 +384,9 @@
     const A = {}, inSes = view === 'session';
     // Atril
     const ac = atrilConn.status;
-    if (ac === 'error') A.atril = ['crit', 'El atril (ESP32) no responde en ' + S.ipAtril + ': ' + atrilConn.msg + '. ¿Está encendido y la laptop conectada a la red WiFi «ASTRA»?'];
+    if (ac === 'error') A.atril = atrilConn.msg === 'atril'
+      ? ['crit', 'El atril (ESP32) no está conectado al servidor. ¿Está encendido y en la misma red WiFi que esta laptop? (monitor serie del ESP32: «Conectado al servidor de la pagina»)']
+      : ['crit', 'No hay conexión con el servidor de la página (' + servidorHost() + '). ¿Está abierta la ventana del servidor (iniciar-servidor)?'];
     else if (ac === 'disconnected' && inSes) A.atril = ['crit', 'Atril sin conexión. Pulsa «Conectar ASTRA» (o «Simulación» para probar).'];
     if (st) {
       if (st.modo === 'PARO') A.paro = ['crit', 'PARO DE EMERGENCIA en el atril.'];
@@ -360,7 +394,8 @@
     }
     // Señal EMG (solo la gráfica)
     const c = emgConn.status;
-    if (c === 'error' && inSes) A.emg = ['warn', 'Señal EMG del Arduino: ' + emgConn.msg + '. Solo afecta a la gráfica; el atril sigue funcionando. Reintentando…'];
+    if (c === 'error' && inSes && emgConn.msg === 'arduino') A.emg = ['warn', 'El Arduino no está conectado al servidor (¿encendido y en la misma red WiFi?). Solo afecta a la gráfica; el atril sigue funcionando.'];
+    else if (c === 'error' && inSes) A.emg = ['warn', 'Señal EMG del Arduino: ' + emgConn.msg + '. Reintentando…'];
     else if (c === 'disconnected' && inSes && atril) A.emg = ['warn', 'La señal EMG del Arduino no está conectada (solo afecta a la gráfica).'];
     if (c === 'connected') {
       const silent = now - rx.lastData;
@@ -559,7 +594,8 @@
   $('btn-finish').addEventListener('click', async () => {
     if (!rec || !confirm('¿Finalizar la terapia y guardar la sesión en el historial? El atril queda en pausa.')) return;
     const r = buildRecord();
-    if (!E.Store.saveSession(r)) { toast('No se pudo guardar en el navegador. Descarga el CSV.'); return; }
+    try { await E.Store.saveSession(r, rec.rms); }
+    catch (e) { toast('No se pudo guardar la sesión (' + e.message + '). Descarga el CSV antes de salir.'); return; }
     if (st && st.modo === 'SESION') sendCmd('p');
     if (S.sheetsUrl) {
       try {
@@ -594,13 +630,35 @@
       const r = s.resumen, tr = document.createElement('tr');
       [fmtDateTime(s.fecha), clock(s.duracionS), r.activaciones, f1(r.tiempoActivoS), Math.round(r.pctActivo), f1(r.maxContrS), r.rmsMedio == null ? '—' : Math.round(r.rmsMedio)]
         .forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
-      const td = document.createElement('td'), b = document.createElement('button'), d = document.createElement('button');
+      const td = document.createElement('td'), b = document.createElement('button'), d = document.createElement('button'), g = document.createElement('button');
       b.className = 'btn small ghost'; b.textContent = 'CSV'; b.addEventListener('click', () => activationsCSV(s, p));
+      g.className = 'btn small ghost'; g.textContent = 'Señal'; g.title = 'Ver la señal de esta sesión';
+      g.disabled = !(E.Store.remoto && s.conSenal); if (!E.Store.remoto) g.title = 'Disponible al usar la página desde el servidor';
+      g.addEventListener('click', () => verSenalSesion(s));
       d.className = 'btn small ghost'; d.textContent = '🗑'; d.title = 'Eliminar sesión';
       d.addEventListener('click', () => { if (confirm('¿Eliminar esta sesión del historial?')) { E.Store.deleteSession(s.id); renderHistory(); } });
-      td.append(b, ' ', d); tr.appendChild(td); tb.appendChild(tr);
+      td.append(g, ' ', b, ' ', d); tr.appendChild(td); tb.appendChild(tr);
     });
+    $('h-notas').value = p.notasFisio || ''; $('h-notas-ok').textContent = '';
+    $('ses-card').hidden = true;
   }
+  async function verSenalSesion(s) {
+    $('ses-card').hidden = false; $('ses-titulo').textContent = 'Señal de la sesión del ' + fmtDateTime(s.fecha);
+    $('ses-txt').textContent = 'Cargando…';
+    try {
+      const datos = await E.Store.senal(s.id), c = s.calibracion || {};
+      $('ses-txt').textContent = 'RMS que recibió el atril (gris) y su mediana de 0.5 s (verde oscuro), con U_on y U_off (líneas punteadas). ' +
+        'Sombreado: activaciones. ' + (s.resumen ? s.resumen.activaciones + ' activaciones, ' + f1(s.resumen.tiempoActivoS) + ' s en total.' : '');
+      requestAnimationFrame(() => E.dibujarSesion($('ses-senal'), datos, { uon: c.uon, uoff: c.uoff }));
+      $('ses-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (e) { $('ses-txt').textContent = 'No se pudo cargar la señal: ' + e.message; }
+  }
+  $('ses-cerrar').addEventListener('click', () => { $('ses-card').hidden = true; });
+  $('btn-h-notas').addEventListener('click', () => {
+    if (!patient) return;
+    patient.notasFisio = $('h-notas').value; E.Store.savePatient(patient);
+    $('h-notas-ok').textContent = 'Guardado ✓';
+  });
   $('h-metric').addEventListener('change', renderHistory);
   $('btn-hist-csv').addEventListener('click', () => {
     const ses = E.Store.sessionsFor(patient.id);
@@ -610,8 +668,8 @@
 
   /* ---------- ajustes ---------- */
   const FIELDS = [
-    ['ipArduino', 'IP del Arduino (red WiFi «ASTRA»)', 'text'], ['ipAtril', 'IP del atril (ESP32)', 'text'],
-    ['emgUsb', 'Señal EMG por USB (Web Serial) en vez de WiFi', 'checkbox'],
+    ['servidor', 'Servidor de la página (solo si abres index.html como archivo)', 'text'],
+    ['emgUsb', 'Señal EMG por USB (Web Serial) en vez de por el servidor', 'checkbox'],
     ['fs', 'Frecuencia de muestreo (Hz) — igual que FS del Arduino'], ['adcMax', 'Máximo del ADC (14 bits = 16383)'], ['vref', 'Referencia ADC (mV)'],
     ['gain', 'Ganancia (1 = mV a la salida de Nova)'], ['hpHz', 'Pasa altas para ver la señal (Hz)'], ['notchHz', 'Frecuencia de la red (Hz)'], ['nArm', 'Notch: n.º de armónicos (7, como el Arduino)'],
     ['sheetsUrl', 'URL de Google Sheets (Apps Script)', 'text'], ['sheetsName', 'Enviar nombre del paciente a Sheets', 'checkbox'], ['sound', 'Sonido en alarmas críticas', 'checkbox']
@@ -633,7 +691,7 @@
       else if (type === 'text') next[k] = el.value.trim();
       else { const v = parseFloat(el.value); if (!isFinite(v) || v <= 0) { toast('Valor no válido en: ' + k); return; } next[k] = v; }
     }
-    const reconnect = next.ipArduino !== S.ipArduino || next.ipAtril !== S.ipAtril || next.emgUsb !== S.emgUsb;
+    const reconnect = next.servidor !== S.servidor || next.emgUsb !== S.emgUsb;
     S = next; E.Store.saveSettings(S); rebuildDsp(); chart.setWindow(S.winS);
     $('dlg-settings').close();
     toast(reconnect && realOn() ? 'Ajustes guardados. Vuelve a pulsar «Conectar ASTRA» para usar la nueva conexión.' : 'Ajustes guardados');
@@ -641,7 +699,7 @@
   $('btn-backup').addEventListener('click', () => E.download('backup-emg-' + new Date().toISOString().slice(0, 10) + '.json', E.Store.backup(), 'application/json'));
   $('btn-restore').addEventListener('click', () => $('file-restore').click());
   $('file-restore').addEventListener('change', async e => {
-    try { const r = E.Store.restore(await e.target.files[0].text()); toast('Importados: ' + r.patients + ' pacientes, ' + r.sessions + ' sesiones'); renderHome(); }
+    try { const r = await E.Store.restore(await e.target.files[0].text()); toast('Importados: ' + r.patients + ' pacientes, ' + r.sessions + ' sesiones'); renderHome(); }
     catch (err) { toast('No se pudo importar: ' + err.message); }
     e.target.value = '';
   });
@@ -667,5 +725,20 @@
   }, 250);
   window.addEventListener('resize', () => { if (view === 'history') progChart.draw(); });
   window.addEventListener('beforeunload', e => { if (rec) { e.preventDefault(); e.returnValue = ''; } });
+  E.Store.onError = toast;
   show('home');
+  // Si la página vino del servidor: pacientes y sesiones desde la laptop, y conexión en vivo automática
+  E.Store.conectar().then(remoto => {
+    if (!remoto) return;
+    const loc = E.Store.datosLocales();
+    $('btn-subir').hidden = !(loc.patients.length || loc.sessions.length);
+    if (view === 'home') renderHome(); else if (view === 'search') renderSearch();
+    if (!S.emgUsb) connectAstra();
+  });
+  $('btn-subir').addEventListener('click', async () => {
+    const loc = E.Store.datosLocales();
+    if (!confirm('¿Subir al servidor ' + loc.patients.length + ' paciente(s) y ' + loc.sessions.length + ' sesión(es) guardados en este navegador? Los que ya estén en el servidor no se duplican.')) return;
+    try { const r = await E.Store.restore(loc); toast('Subidos: ' + r.patients + ' pacientes, ' + r.sessions + ' sesiones'); renderHome(); }
+    catch (e) { toast('No se pudo subir: ' + e.message); }
+  });
 })();

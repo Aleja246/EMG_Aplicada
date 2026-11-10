@@ -305,6 +305,17 @@
         <tbody id="h-body"></tbody>
       </table></div>
     </div>
+    <div class="card" id="ses-card" hidden>
+      <div class="row-between"><h3 id="ses-titulo">Señal de la sesión</h3><button class="btn small ghost" id="ses-cerrar" type="button">Cerrar</button></div>
+      <p class="muted small-text" id="ses-txt"></p>
+      <canvas id="ses-senal" class="rms"></canvas>
+    </div>
+    <div class="card">
+      <h3><label for="h-notas">Notas de la fisioterapeuta</label></h3>
+      <p class="muted small-text">Se guardan con este paciente.</p>
+      <textarea id="h-notas" rows="4"></textarea>
+      <div class="form-actions left"><button class="btn small" id="btn-h-notas" type="button">Guardar notas</button> <span class="muted small-text" id="h-notas-ok"></span></div>
+    </div>
   </section>
 </main>
 
@@ -319,6 +330,7 @@
       <button class="btn ghost" type="button" id="btn-backup">Descargar respaldo (JSON)</button>
       <button class="btn ghost" type="button" id="btn-restore">Importar respaldo…</button>
       <input type="file" id="file-restore" accept=".json" hidden>
+      <button class="btn ghost" type="button" id="btn-subir" hidden>Subir al servidor los datos guardados en este navegador</button>
     </div>
     <div class="form-actions">
       <button class="btn ghost" value="cancel" type="submit">Cancelar</button>

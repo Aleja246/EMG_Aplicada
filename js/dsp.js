@@ -10,9 +10,8 @@
 
   EMG.DEFAULTS = {
     cfgVer: 2,       // sube cuando cambian los valores por defecto (descarta ajustes viejos de la v1)
-    ipArduino: '192.168.4.1',   // red WiFi "ASTRA" que crea el Arduino
-    ipAtril: '192.168.4.200',   // IP fija del ESP32 del atril
-    emgUsb: false,   // true: la señal EMG llega por USB (Web Serial) en vez de WiFi
+    servidor: 'localhost:8080', // servidor/servidor.js (solo se usa si abres index.html como archivo)
+    emgUsb: false,   // true: la señal EMG llega por USB (Web Serial) en vez de por el servidor
     fs: 1000,        // Hz, igual que FS en arduino_emg.ino
     adcMax: 16383,   // 14 bits
     vref: 5000,      // mV, igual que V_REF en arduino_emg.ino

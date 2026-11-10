@@ -287,6 +287,56 @@
     }
   }
 
+  /* ===================================================================
+   * Servidor de la página (servidor/servidor.js): UN WebSocket /ws trae
+   *   - binario: paquetes 0xAA 0x55 de la señal cruda del Arduino
+   *   - {type:'atril', st}: estado del ESP32 (lo mismo que antes daba /estado)
+   *   - {type:'servidor', arduino, atril}: quién está conectado
+   * y lleva las órdenes: {type:'cmd', c} y {type:'musica', l, p}.
+   * Se presenta a la app como dos fuentes: emg (señal) y atril (estado).
+   * =================================================================== */
+  class ServidorLink {
+    constructor(host, h) {
+      this.host = host; this.h = h; this.run = true; this.ws = null; this.boot = null; this.info = null;
+      this.parser = new EMG.PacketParser(arr => h.onSamples(arr));
+      const link = this;
+      this.emg = { kind: 'servidor', get lost() { return link.parser.lost; }, stop() { link.stop(); } };
+      this.atril = { kind: 'servidor', cmd: c => link._enviar({ type: 'cmd', c }), musica: (l, p) => link._enviar({ type: 'musica', l, p }), stop() { link.stop(); } };
+      this._conectar();
+    }
+    _conectar() {
+      if (!this.run) return;
+      this.h.onStatus('connecting');
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      let ws;
+      try { ws = this.ws = new WebSocket(proto + '://' + this.host + '/ws?role=monitor'); }
+      catch (e) { this.h.onStatus('error', 'dirección del servidor no válida'); return; }
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = () => { this.parser.reset(); this.h.onStatus('open'); };
+      ws.onmessage = ev => {
+        if (typeof ev.data !== 'string') { this.parser.push(new Uint8Array(ev.data)); return; }
+        let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (m.type === 'servidor') { this.info = m; this.h.onServidor(m); }
+        else if (m.type === 'atril' && m.st) {
+          if (this.boot !== null && m.st.boot !== this.boot) m.st.reinicio = true;
+          this.boot = m.st.boot;
+          try { this.h.onEstado(m.st); } catch (e) { console.error('Error al mostrar el estado del atril:', e); }
+        }
+      };
+      ws.onclose = () => {
+        if (!this.run) return;
+        this.h.onStatus('error', 'sin conexión con el servidor de la página (' + this.host + ')');
+        setTimeout(() => this._conectar(), 1500);
+      };
+    }
+    async _enviar(obj) {
+      if (!this.ws || this.ws.readyState !== 1) return false;
+      this.ws.send(JSON.stringify(obj)); return true;
+    }
+    stop() { if (!this.run) return; this.run = false; try { this.ws && this.ws.close(); } catch (e) { /* ya cerrado */ } this.h.onStatus('disconnected'); }
+  }
+
+  EMG.ServidorLink = ServidorLink;
   EMG.AtrilHttp = AtrilHttp;
   EMG.AtrilLink = AtrilLink;
   EMG.AtrilSim = AtrilSim;

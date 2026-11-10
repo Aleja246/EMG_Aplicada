@@ -1,8 +1,8 @@
 /*
   =====================================================================
-   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg.ino  v4.1
+   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg.ino  v5
    Mide la senal de Nova, manda el RMS al ESP32 por el opto (cada 100 ms)
-   y la senal CRUDA a la pagina web por WiFi.
+   y la senal CRUDA al servidor de la pagina por WiFi.
   ---------------------------------------------------------------------
    Lee A0 (JP3 puenteado) 1000 veces por segundo y, cada 100 ms, calcula
    tres RMS (en voltios, a la salida EMG_Out):
@@ -14,19 +14,20 @@
      - Opto (Serial1, pin D1, 9600 baud): solo SinArm en milivoltios, una
        linea de texto por bloque ("640\n"). Es lo que lee el ESP32.
        Mismo procesamiento y mismo formato que v2.
-     - WiFi: el Arduino crea la red "ASTRA" (clave RED_CLAVE) y atiende en
-       http://192.168.4.1 :
-         /        -> texto con el estado (sirve para probar desde el navegador)
-         /stream  -> muestras CRUDAS del ADC (1000 por segundo), sin fin,
-                     en paquetes binarios de 20 muestras (20 ms):
-                       0xAA 0x55 | seq | n | n x uint16 little-endian | checksum
-                     checksum = XOR de seq, n y los bytes de las muestras;
-                     seq = numero de paquete (0..255): la pagina ve los huecos.
-       La pagina filtra (pasa altas, 60 Hz y armonicos) y dibuja la senal.
-       El ESP32 del atril se une a esta misma red.
+     - WiFi: el Arduino se une a la red WiFi del consultorio (o a la zona
+       con cobertura de la laptop) = RED_SSID / RED_CLAVE, encuentra solo al
+       SERVIDOR de la pagina (servidor/servidor.js en la laptop: avisa por
+       UDP en el puerto 9999) y le manda por TCP (puerto 9001) las muestras
+       CRUDAS del ADC (1000 por segundo) en paquetes de 20 muestras (20 ms):
+         0xAA 0x55 | seq | n | n x uint16 little-endian | checksum
+         checksum = XOR de seq, n y los bytes; seq = numero de paquete.
+       Cada segundo agrega un paquete de diagnostico (0xAA 0x57 | n | texto
+       JSON | checksum): min/max de la senal, frecuencia medida, ultimo RMS.
+       El servidor la reparte a las paginas abiertas (WebSocket).
+       Sin red o sin servidor el Arduino sigue igual: mide y manda al ESP32.
      - USB (Serial, 250000 baud), segun USB_PARA_PAGINA:
          false -> "Bruto:x,Sin60:y,SinArm:z" para el Serial Plotter (como v2).
-         true  -> los mismos paquetes crudos de /stream (pagina por Web Serial).
+         true  -> los mismos paquetes crudos (pagina por Web Serial, sin servidor).
        Solo se escribe si hay una computadora abierta en el puerto, y nunca
        se espera: si no cabe, se descarta.
 
@@ -37,6 +38,16 @@
    Al contraer, SinArm debe subir claramente.
 
    Regla de diseno: el Arduino solo mide y envia; nunca controla un actuador.
+
+   Cambios v5 respecto a v4.1 (mismo muestreo, mismo procesamiento, mismo
+   envio al ESP32 y mismo Serial Plotter):
+     - Ya NO crea su propia red: se une a la red del consultorio y manda la
+       senal al servidor de la pagina (nadie tiene que conectarse a la red
+       del Arduino). El modulo WiFi se reconecta solo si se cae la red.
+     - La cola de bloques RMS sube a 12.8 s, para que conectarse a la red
+       (algunos segundos al encender) nunca haga perder lineas del opto.
+     - El diagnostico (min/max, frecuencia, ultimo RMS) va al servidor y se
+       ve en la pagina; en el monitor serie salen los avisos de conexion.
 
    Cambios v4.1 respecto a v4:
      - El Serial Plotter vuelve a graficar: v4 solo escribia si
@@ -88,14 +99,19 @@ const unsigned long BAUD_OPTO = 9600;
 const int BLOQUES_ASENTAR     = 5;     // primeros 5 bloques (0.5 s) no van al ESP32
 const int PIN_MUESTREO        = -1;    // pon p. ej. 7 para ver cada muestra en el osciloscopio
 
-// ------------------------- WiFi y pagina -------------------------------
-// RED_SSID / RED_CLAVE deben ser iguales en esp32_calibracion.ino.
+// ------------------------- WiFi y servidor de la pagina ----------------
+// La red WiFi a la que se une (la misma que la laptop y el ESP32). Escribe
+// aqui la red del consultorio, o la "zona con cobertura" de la laptop.
 const bool USAR_WIFI       = true;
-const char RED_SSID[]      = "ASTRA";
-const char RED_CLAVE[]     = "astra2026";      // minimo 8 caracteres
-const IPAddress IP_ARDUINO(192, 168, 4, 1);    // "IP del Arduino" en los Ajustes de la pagina
+const char RED_SSID[]      = "ASTRA";          // <-- nombre de la red WiFi
+const char RED_CLAVE[]     = "astra2026";      // <-- su clave
+// El servidor se encuentra solo (aviso UDP). Si la red no deja pasar ese
+// aviso, escribe aqui la IP de la laptop (la muestra el servidor al abrir).
+const char SERVIDOR_IP[]   = "";               // p. ej. "192.168.1.50"; vacio = buscarlo solo
+const uint16_t PUERTO_SERVIDOR = 9001;
+const uint16_t PUERTO_AVISO    = 9999;
 const bool USB_PARA_PAGINA = false;            // true: paquetes crudos por USB en vez del Serial Plotter
-const char VERSION_EMG[]   = "4.1";
+const char VERSION_EMG[]   = "5";
 
 // ------------------------- Notch biquad (forma directa II transpuesta) --
 struct Notch {
@@ -120,14 +136,14 @@ const uint32_t N_CRUDO = 2048;      // 2 s de reserva (potencia de 2)
 volatile uint16_t crudo[N_CRUDO];
 volatile uint32_t nCrudo = 0;       // muestras escritas desde el arranque
 
-// ---- Cola de bloques RMS (6.4 s): la interrupcion escribe, el loop lee ----
-const uint32_t N_COLA = 64;
+// ---- Cola de bloques RMS (12.8 s): la interrupcion escribe, el loop lee ----
+const uint32_t N_COLA = 128;
 volatile float colaBruto[N_COLA], cola60[N_COLA], colaArm[N_COLA];
 volatile bool colaOpto[N_COLA];
 volatile uint32_t colaEsc = 0, colaLei = 0;
 volatile uint32_t bloquesPerdidos = 0;
 
-// ---- Diagnostico (lo muestra http://192.168.4.1) ----
+// ---- Diagnostico (va al servidor cada segundo y se ve en la pagina) ----
 volatile uint16_t ultimoAdc = 0;
 volatile uint16_t minBloque = 0, maxBloque = 0;   // del ultimo bloque completo
 uint16_t minAcum = 65535, maxAcum = 0;            // del bloque en curso (solo la interrupcion)
@@ -143,11 +159,15 @@ uint8_t bufUsb[LARGO_PAQ];
 
 FspTimer temporizador;
 bool wifiListo = false;
-WiFiServer servidor(80);
-WiFiClient flujo;
+WiFiUDP udp;                                  // escucha el aviso del servidor
+WiFiClient flujo;                             // conexion TCP con el servidor
 bool transmitiendo = false;
+IPAddress ipServidor;
+bool hayServidor = false;
+uint32_t tAviso = 0;                          // ultimo aviso UDP recibido
 uint32_t sigWifi = 0, sigUsb = 0;             // siguiente muestra a mandar
-uint32_t tRevisar = 0, tEnvio = 0, tVivo = 0;
+uint32_t tRevisar = 0, tEnvio = 0, tDiag = 0, tIntento = 0, tRed = 0;
+bool redAntes = false;
 
 // ======================================================================
 //  Muestreo (interrupcion a FS). Mismo procesamiento que v2.
@@ -297,116 +317,93 @@ void mandarCrudoUsb() {
 }
 
 // ======================================================================
-//  WiFi: punto de acceso + servidor web
+//  WiFi: se une a la red, encuentra al servidor y le manda la senal
 // ======================================================================
+void mensaje(const char *t) { if (!USB_PARA_PAGINA) Serial.println(t); }
+
 void iniciarWifi() {
-  if (WiFi.status() == WL_NO_MODULE) {
-    if (!USB_PARA_PAGINA) Serial.println("!! No responde el modulo WiFi del R4.");
-    return;
-  }
-  WiFi.config(IP_ARDUINO);
-  if (WiFi.beginAP(RED_SSID, RED_CLAVE) != WL_AP_LISTENING) {
-    if (!USB_PARA_PAGINA) Serial.println("!! No se pudo crear la red WiFi.");
-    return;
-  }
-  servidor.begin();
+  if (WiFi.status() == WL_NO_MODULE) { mensaje("!! No responde el modulo WiFi del R4."); return; }
+  mensaje(">> Conectando a la red WiFi...");
+  WiFi.begin(RED_SSID, RED_CLAVE);             // tarda unos segundos (la cola guarda los bloques del opto)
   wifiListo = true;
-  if (!USB_PARA_PAGINA) {
-    Serial.print(">> Red WiFi ");
-    Serial.print(RED_SSID);
-    Serial.print(" lista. Senal en http://");
-    Serial.print(IP_ARDUINO);
-    Serial.println("/stream");
-  }
+  tRed = millis();
 }
 
 void cerrarFlujo() {
   flujo.stop();
+  if (transmitiendo) mensaje("!! Se cerro la conexion con el servidor de la pagina.");
   transmitiendo = false;
 }
 
-const char CORS[] =
-  "Access-Control-Allow-Origin: *\r\n"
-  "Access-Control-Allow-Private-Network: true\r\n"
-  "Cache-Control: no-store\r\n"
-  "Connection: close\r\n";
-
-void responderTexto(WiFiClient &c, const char *estado, const char *texto) {
-  char h[384];
-  int n = snprintf(h, sizeof h, "HTTP/1.1 %s\r\nContent-Type: text/plain; charset=utf-8\r\n%sContent-Length: %d\r\n\r\n",
-                   estado, CORS, (int)strlen(texto));
-  c.write((const uint8_t *)h, n);
-  if (*texto) c.write((const uint8_t *)texto, strlen(texto));
-  c.stop();
-}
-
-// Lee la primera linea de la peticion ("GET /stream HTTP/1.1") y responde
-void atenderPeticion(WiFiClient &c) {
-  char l[96];
-  int n = 0;
-  uint32_t t0 = millis();
-  while (millis() - t0 < 400 && n < (int)sizeof(l) - 1) {
-    if (!c.available()) { if (!c.connected()) break; continue; }
-    int ch = c.read();
-    if (ch < 0) continue;
-    if (ch == '\n') break;
-    if (ch != '\r') l[n++] = (char)ch;
-  }
-  l[n] = 0;
-  uint8_t resto[64];                            // el resto de la peticion (cabeceras) no se usa
-  for (uint32_t t1 = millis(); c.available() && millis() - t1 < 100; ) c.read(resto, sizeof resto);
-
-  if (!strncmp(l, "OPTIONS ", 8)) {             // permiso previo del navegador
-    char h[320];
-    int k = snprintf(h, sizeof h, "HTTP/1.1 204 No Content\r\n%sAccess-Control-Allow-Methods: GET\r\n"
-                     "Access-Control-Allow-Headers: *\r\nContent-Length: 0\r\n\r\n", CORS);
-    c.write((const uint8_t *)h, k);
-    c.stop();
-  } else if (!strncmp(l, "GET /stream", 11)) {
-    if (transmitiendo) cerrarFlujo();           // solo una pagina a la vez: la nueva reemplaza
-    char h[320];
-    int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
-                     "X-Content-Type-Options: nosniff\r\n%s\r\n", CORS);
-    c.write((const uint8_t *)h, k);
-    flujo = c;
-    transmitiendo = true;
-    sigWifi = inicioAlineado();
-    tVivo = millis();
-  } else if (!strncmp(l, "GET ", 4)) {
-    char t[640];
-    uint16_t mn = minBloque, mx = maxBloque, ua = ultimoAdc;
-    float seg = (millis() - tInicioMuestreo) / 1000.0f;
-    const char *estado = (mn <= ADC_MAX * 0.01f || mx >= ADC_MAX * 0.99f) ? "SATURADA (pegada a 0 V o a 5 V): revisa electrodos, referencia y cable de Nova"
-                       : (mx - mn < 3) ? "PLANA (no cambia): Nova sin alimentacion o cable de senal suelto" : "bien (centro ~2.5 V)";
-    snprintf(t, sizeof t, "ASTRA - Arduino EMG v%s\nMuestreo: %d Hz (medido: %.1f Hz)\nMuestras: %lu\nBloques perdidos: %lu\n"
-             "Pagina conectada: %s\nLa senal cruda sale en /stream\n\n"
-             "Diagnostico de la senal (A0):\n  ultima muestra: %u cuentas = %.3f V\n"
-             "  ultimo bloque (100 ms): min %u (%.3f V), max %u (%.3f V)\n  senal: %s\n"
-             "  ultimo RMS al ESP32: %.0f mV\n(recarga la pagina para actualizar)\n",
-             VERSION_EMG, (int)FS, seg > 0 ? nCrudo / seg : 0.0f, (unsigned long)nCrudo, (unsigned long)bloquesPerdidos,
-             transmitiendo ? "si" : "no", ua, ua * V_REF / ADC_MAX, mn, mn * V_REF / ADC_MAX, mx, mx * V_REF / ADC_MAX, estado,
-             (float)ultimoRmsMv);
-    responderTexto(c, "200 OK", t);
-  } else {
-    responderTexto(c, "400 Bad Request", "");
-  }
+// Paquete de diagnostico: AA 57 | n | texto JSON | checksum (XOR del texto)
+void mandarDiagnostico() {
+  char t[200];
+  uint16_t mn = minBloque, mx = maxBloque, ua = ultimoAdc;
+  float seg = (millis() - tInicioMuestreo) / 1000.0f;
+  int n = snprintf(t, sizeof t, "{\"v\":\"%s\",\"adc\":%u,\"min\":%u,\"max\":%u,\"fs\":%.1f,\"rms\":%.0f,\"perdidos\":%lu}",
+                   VERSION_EMG, ua, mn, mx, seg > 0 ? nCrudo / seg : 0.0f, (float)ultimoRmsMv, (unsigned long)bloquesPerdidos);
+  if (n <= 0 || n > 250) return;
+  uint8_t p[256 + 4];
+  p[0] = 0xAA; p[1] = 0x57; p[2] = (uint8_t)n;
+  uint8_t chk = 0;
+  for (int i = 0; i < n; i++) { p[3 + i] = t[i]; chk ^= (uint8_t)t[i]; }
+  p[3 + n] = chk;
+  if (flujo.write(p, n + 4) != (size_t)(n + 4)) cerrarFlujo();
 }
 
 void atenderWifi() {
   uint32_t ahora = millis();
-  if (ahora - tRevisar >= 100) {                // nuevas peticiones, 10 veces por segundo
+
+  // Red: el modulo se reconecta solo; aqui solo se avisa el cambio
+  if (ahora - tRevisar >= 500) {
     tRevisar = ahora;
-    WiFiClient nuevo = servidor.available();
-    if (nuevo && !(transmitiendo && nuevo == flujo)) atenderPeticion(nuevo);
+    bool red = WiFi.status() == WL_CONNECTED;
+    if (red != redAntes) {
+      redAntes = red;
+      if (red) {
+        udp.begin(PUERTO_AVISO);
+        if (!USB_PARA_PAGINA) { Serial.print(">> WiFi conectado a "); Serial.print(RED_SSID); Serial.print(". IP del Arduino: "); Serial.println(WiFi.localIP()); }
+        if (SERVIDOR_IP[0] && ipServidor.fromString(SERVIDOR_IP)) { hayServidor = true; tAviso = ahora; }
+      } else { mensaje("!! Sin red WiFi (el Arduino sigue midiendo y mandando al ESP32)."); cerrarFlujo(); }
+    }
+    // Sin red desde el encendido: vuelve a intentar cada minuto (tarda unos segundos)
+    if (!red && ahora - tRed > 60000) { tRed = ahora; WiFi.begin(RED_SSID, RED_CLAVE); }
+    // Aviso del servidor por UDP: "ASTRA-SERVIDOR 9001 9002"
+    if (red) {
+      int n = udp.parsePacket();
+      if (n > 0) {
+        char t[48]; int k = udp.read((unsigned char *)t, sizeof(t) - 1); if (k < 0) k = 0; t[k] = 0;
+        if (!strncmp(t, "ASTRA-SERVIDOR", 14)) {
+          IPAddress ip = udp.remoteIP();
+          if (!hayServidor || ip != ipServidor) {
+            if (!USB_PARA_PAGINA) { Serial.print(">> Servidor de la pagina encontrado en "); Serial.println(ip); }
+          }
+          ipServidor = ip; hayServidor = true; tAviso = ahora;
+        }
+      }
+    }
   }
+
+  // Conexion TCP con el servidor (solo si se sabe donde esta)
+  if (!transmitiendo && hayServidor && redAntes && ahora - tIntento >= 3000 &&
+      (SERVIDOR_IP[0] || ahora - tAviso < 5000)) {
+    tIntento = ahora;
+    if (flujo.connect(ipServidor, PUERTO_SERVIDOR)) {
+      transmitiendo = true;
+      sigWifi = inicioAlineado();               // empieza desde "ahora"
+      tDiag = 0;
+      mensaje(">> Conectado al servidor: la senal ya sale a la pagina.");
+    }
+  }
+
   if (transmitiendo && ahora - tEnvio >= 40) {  // la senal sale en tandas de ~40 ms
     tEnvio = ahora;
     int len = armarPaquetes(sigWifi, bufWifi, MAX_PAQ_WIFI);
-    if (len && flujo.write(bufWifi, len) != (size_t)len) cerrarFlujo();   // la pagina se fue
+    if (len && flujo.write(bufWifi, len) != (size_t)len) cerrarFlujo();   // el servidor se fue
   }
-  if (transmitiendo && ahora - tVivo >= 1000) {
-    tVivo = ahora;
-    if (!flujo.connected()) cerrarFlujo();
+  if (transmitiendo && ahora - tDiag >= 1000) {
+    tDiag = ahora;
+    if (!flujo.connected()) cerrarFlujo(); else mandarDiagnostico();
   }
 }
 
@@ -439,7 +436,7 @@ void setup() {
     }
   }
 
-  // El muestreo ya corre; crear la red tarda unos segundos (la cola guarda los bloques)
+  // El muestreo ya corre; unirse a la red tarda unos segundos (la cola guarda los bloques)
   if (USAR_WIFI) iniciarWifi();
 }
 

@@ -4,3 +4,6 @@
 backup-*.json
 .DS_Store
 node_modules/
+
+# Datos de pacientes del servidor (nunca a GitHub)
+servidor/datos/
