@@ -8,10 +8,9 @@ El **atril (ESP32) crea la red WiFi «ASTRA» y sirve la página** en **http://1
 red y el celular (Android o iPhone) también: no hace falta laptop, Node.js ni internet. Los pacientes y las sesiones
 se guardan en el navegador del celular (IndexedDB) y se exportan a Excel o a un respaldo.
 
-- **Guía completa** (instalación en Windows, celular, datos, respaldos, diagnóstico, seguridad y pruebas):
+- **Guía completa** (instalación en Windows, LittleFS, celular, datos, respaldos, diagnóstico, seguridad y pruebas):
   [`docs/ASTRA_SIN_LAPTOP.md`](docs/ASTRA_SIN_LAPTOP.md)
-- Atril: `firmware/esp32_atril_ap/` (sketch + `pagina_web.h` con la página dentro del firmware + `credenciales_ejemplo.h`;
-  la carpeta `data/` es solo para LittleFS, opcional). **Carga siempre la carpeta completa.**
+- Atril: `firmware/esp32_atril_ap/` (sketch + carpeta `data/` para LittleFS + `credenciales_ejemplo.h`)
 - Sensor: `firmware/arduino_emg_ap/` (tu v5 con solo 10 renglones de red distintos + `credenciales_ejemplo.h`)
 - La versión con laptop (`servidor/servidor.js`) sigue en la rama `claude/gracious-newton-89dse9`.
 
@@ -45,10 +44,9 @@ Cómo funciona todo y el paso a paso: [`docs/CONEXION_ASTRA.md`](docs/CONEXION_A
 | `js/app.js` | Lógica de la interfaz |
 | `firmware/arduino_emg/` | Arduino R4 WiFi v5: RMS al ESP32 por el opto (igual que v2) + señal cruda al servidor por WiFi |
 | `firmware/esp32_calibracion/` | Atril ESP32 v7.1: tu código con sonido sin cambios + conexión con el servidor, órdenes de la página, elección de canciones y volumen |
-| `firmware/esp32_atril_ap/` | **Atril v8.3 sin laptop**: red ASTRA, página dentro del firmware (`pagina_web.h`; `data/` para LittleFS es opcional), WebSocket, señal del Arduino por WiFi |
+| `firmware/esp32_atril_ap/` | **Atril v8 sin laptop**: red ASTRA, página desde LittleFS (`data/`), WebSocket, señal del Arduino por WiFi |
 | `firmware/arduino_emg_ap/` | **Arduino sin laptop**: se une a la red del atril (192.168.4.1) |
-| `herramientas/preparar_littlefs.py` | Si cambias la página: genera `pagina_web.h` y `data/` (comprime y revisa que no use internet). La versión está en `js/version.js` |
-| `js/version.js` | Versión de la página (la página avisa si el atril sirve otra versión) |
+| `herramientas/preparar_littlefs.py` | Vuelve a preparar `data/` si cambias la página (comprime y revisa que no use internet) |
 | `herramientas/firmware/` | Tu firmware original del atril y los scripts que generan el v7.1 y el v8 a partir de él |
 | `apps-script/Code.gs` | (Opcional) receptor para Google Sheets |
 | `arduino/emg_stream/`, `DIGITALIZARR.ino` | Versiones anteriores (2 kHz por USB; código base original) |

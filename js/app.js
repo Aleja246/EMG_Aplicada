@@ -38,8 +38,7 @@
   let rec = null;        // sesión en curso
   let fin = null;        // sesión terminada, esperando que la guarden
   const rx = { lastData: 0, samples: 0, lastCount: 0, lastT: performance.now(), fs: 0, apartadas: 0 };
-  let senalVivo = true;
-  let actChart = null, vista = 'act';    // gráfica: 'act' = activación (como el Serial Plotter) o 'cruda' = señal EMG               // Ajustes > Diagnóstico: apagar la señal en vivo para comparar el ruido
+  let senalVivo = true;               // Ajustes > Diagnóstico: apagar la señal en vivo para comparar el ruido
   let prevCrit = new Set();
 
   function rebuildDsp() {
@@ -222,9 +221,6 @@
   /* ---------- lo que manda el atril ---------- */
   function onEstado(s) {
     const prev = st; st = s;
-    // Gráfica de activación: el RMS que recibe el atril (como el Serial Plotter), lo que compara y su umbral
-    const umbral = s.modo !== 'SESION' ? 0 : s.uSuelta > 0 ? s.uSuelta : (s.uAhora || (s.cal && s.cal.ok ? s.cal.uon : 0));
-    if (actChart && s.b) for (const b of s.b) actChart.push(b[0], b[1], umbral, s.modo === 'SESION' && s.abajo);
     syncMusica(s);
     if (rec) recordUpdate(prev, s);
     if (!rec && view === 'live' && patient && prev && prev.modo === 'CALIBRANDO' && s.modo === 'SESION') startRecording(s);
@@ -411,8 +407,6 @@
       if (emgConn.status === 'error' && enTerapia) A.emg = ['warn', 'El sensor no está enviando la señal. Revisa que esté encendido y con batería.'];
     }
     if (st) {
-      if (st.web && st.web !== '?' && E.VERSION_PAGINA && st.web !== E.VERSION_PAGINA)
-        A.version = ['crit', 'Esta página (versión ' + E.VERSION_PAGINA + ') no corresponde al programa del atril (versión ' + st.web + '). Cierra la página y vuelve a abrir http://192.168.4.1; si sigue, vuelve a cargar el programa del atril.'];
       if (st.modo === 'PARO') A.paro = ['crit', 'Paro de emergencia activado en el atril. Suéltalo para continuar.'];
       else if (!st.datos && st.modo !== 'ARRANQUE') A.opto = ['crit', 'El atril no está recibiendo la señal del sensor. Revisa el cable entre el sensor y el atril.'];
       else if (st.cal && st.cal.inestable && enTerapia) A.cal = ['warn', 'La medición salió inestable. Revisa los electrodos y vuelve a calibrar.'];
@@ -477,17 +471,6 @@
    * Terapia en curso
    * =================================================================== */
   $('lv-pausa').addEventListener('click', () => sendCmd('p'));
-  // Qué muestra la gráfica (se recuerda en este celular)
-  function ponerVista(v) {
-    vista = v; S.vista = v; E.Store.saveSettings(S);
-    $('vista-act').classList.toggle('on', v === 'act'); $('vista-cruda').classList.toggle('on', v === 'cruda');
-    $('zoom').hidden = v !== 'cruda';
-    $('leyenda').innerHTML = v === 'act'
-      ? '<span class="linea-rms"></span>RMS<span class="linea-act"></span>nivel del atril<span class="linea-umbral"></span>umbral'
-      : '<span class="linea-act"></span> activación (RMS)';
-  }
-  $('vista-act').addEventListener('click', () => ponerVista('act'));
-  $('vista-cruda').addEventListener('click', () => ponerVista('cruda'));
   // Zoom de la gráfica: Auto (×1) y de ×2 en ×2 (se recuerda en este celular)
   const ZOOMS = [0.25, 0.5, 1, 2, 4, 8, 16];
   function ponerZoom(z) {
@@ -793,14 +776,12 @@
 
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
-  actChart = new E.ActChart($('live'));
-  ponerVista(S.vista === 'cruda' ? 'cruda' : 'act');
   chart.zoom = [0.25, 0.5, 1, 2, 4, 8, 16].includes(S.zoom) ? S.zoom : 1;
   ponerZoom(chart.zoom);
   progChart = new E.ProgressChart($('prog'), $('prog-tip'));
   initMusica();
   rebuildDsp();
-  (function frame() { if (view === 'live') (vista === 'act' ? actChart : chart).draw(); requestAnimationFrame(frame); })();
+  (function frame() { if (view === 'live') chart.draw(); requestAnimationFrame(frame); })();
   let tick = 0;
   setInterval(() => {
     const now = performance.now();

@@ -119,15 +119,6 @@
 #include <esp_http_server.h>
 #include <esp_heap_caps.h>
 #include <stdarg.h>
-// v8.3: la pagina va DENTRO del firmware si pagina_web.h esta junto a este .ino (lo genera
-// herramientas/preparar_littlefs.py). Asi la pagina siempre es la de esta version y no hace falta
-// subir LittleFS. Sin pagina_web.h se usa la carpeta data/ de LittleFS, como antes.
-#if __has_include("pagina_web.h")
-#include "pagina_web.h"
-#define HAY_PAGINA_INTERNA 1
-#else
-#define HAY_PAGINA_INTERNA 0
-#endif
 
 // ------------------------- Pines (esquematico) -------------------------
 // Motor de giro (J4):      IN1..IN4 = IO23, IO22, IO21, IO19
@@ -196,15 +187,14 @@ const float SENS_REL[3] = {0.10f, 0.20f, 0.35f};
 const int N_CAL_MAX = 160;              // v8.1: bloques que se guardan para la mediana (10 s = ~90)
 const int N_ARRIBA = 30;                // v8.2: 3 s de medianas para el nivel con la cabeza arriba
 const float SUELTA_FRAC = 0.40f;        // v8.2: termina al bajar al 40 % del camino arriba -> pico
-const unsigned long ASENTAR_MS = 800;   // v8.3: tras subir la cabeza, espera esto para reaprender el nivel
 const float MARGEN_MIN_MV    = 2.0f; // el umbral queda al menos 2 mV sobre el basal
 const float UMBRAL_OFF_FACTOR = 0.6f; // histeresis relativa a la media basal
 const unsigned long T_CONFIRMAR = 300;  // ms sobre/bajo el umbral para cambiar de estado
 const unsigned long HOLGURA_MS  = 50;   // tolera que un bloque llegue unos ms antes (300 ms = 4 bloques seguidos)
 const unsigned long T_PREMIO    = 1000; // ms sostenidos para el sonido de activacion
 const unsigned long WATCHDOG_MS = 500;  // sin datos por mas de esto -> todo se detiene
-const int   N_MEDIANA           = 13;   // v8.3 (antes 5): la senal que se compara es la MEDIANA de los ultimos
-                                        // 13 bloques (1.3 s): quita el vaiven, los saltos sueltos y los espasmos breves
+const int   N_MEDIANA           = 5;    // la senal que se compara es la MEDIANA de los ultimos
+                                        // 5 bloques (0.5 s): quita los saltos sueltos del ruido
 const unsigned long CAL_MS = 10000;          // 10 s de RMS basal (por reloj: nunca se traba)
 const unsigned long CAL_DESCARTAR_MS = 1000;  // se descarta el primer segundo
 const int CAL_MIN_MUESTRAS = 20;              // minimo de bloques para aceptar la calibracion
@@ -276,7 +266,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.3";
+const char *VERSION_ATRIL = "8.2";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -331,8 +321,6 @@ float calVals[N_CAL_MAX];               // v8.1: la mediana de cada bloque de la
 float histArriba[N_ARRIBA];             // v8.2: ultimas medianas fuera de una activacion
 int nArriba = 0, iArriba = 0;
 float baseAct = 0, uOnAct = 0, picoAct = 0;   // v8.2: de la activacion en curso
-unsigned long tSubio = 0;               // v8.3: cuando se detecto la ultima subida
-float uTrasSubir = 0;                   // v8.3: umbral de caida mientras se reaprende el nivel de arriba
 volatile float uAhoraPub = 0, uSueltaPub = 0, arribaPub = 0;   // v8.2: para la pagina (los calcula el loop)
 float umbralOn = 300, umbralOff = 200;
 
@@ -613,10 +601,7 @@ float nivelArribaActual() {
   return max(reposo, medianaDe(histArriba, nArriba, 0.0f, false));
 }
 float margenSobre(float base) { return max(max(umbralK * sdReposo, MARGEN_MIN_MV), margenRel * base); }
-float umbralOnAhora() {
-  if (nArriba < 10) return max(umbralOn, uTrasSubir);   // v8.3: reaprendiendo el nivel de arriba
-  float b = nivelArribaActual(); return max(umbralOn, b + margenSobre(b));
-}
+float umbralOnAhora() { float b = nivelArribaActual(); return max(umbralOn, b + margenSobre(b)); }
 float umbralSueltaAhora() {
   float off = baseAct + UMBRAL_OFF_FACTOR * (uOnAct - baseAct);
   return max(off, baseAct + SUELTA_FRAC * (picoAct - baseAct));
@@ -726,7 +711,6 @@ void iniciarCalibracion() {
   tCal = millis();
   nReposo = 0;
   nArriba = 0; iArriba = 0;                   // v8.2: el nivel de arriba se vuelve a medir
-  tSubio = 0; uTrasSubir = 0;                  // v8.3
   sumaReposo = suma2Reposo = 0.0;
   pistaPendiente = 0;
   Log.println();
@@ -830,7 +814,7 @@ void procesarRms(int mv) {
   if (!activo) {
     float uOnAhora = umbralOnAhora();             // v8.2: sobre el nivel actual con la cabeza arriba
     uAhoraPub = uOnAhora; uSueltaPub = 0; arribaPub = nivelArribaActual();
-    if (rmsSuave >= uOnAhora) {                    // v8.3: mientras reaprende usa uTrasSubir
+    if (rmsSuave >= uOnAhora && nArriba >= 10) {   // v8.2: primero aprende 1 s el nivel con la cabeza arriba
       if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; msSesionIni = msSesion; }
       sumaRmsAct += mv; nRmsAct++;
       if (ahora - tSobre + HOLGURA_MS >= T_CONFIRMAR) {
@@ -841,13 +825,7 @@ void procesarRms(int mv) {
         nActivaciones++;
         tBajo = 0;
       }
-    } else {
-      tSobre = 0;
-      // v8.3: tras subir espera a que se asiente; ya aprendido, solo guarda valores claramente de arriba
-      // (no los que van subiendo al empezar una caida, que inflarian el nivel)
-      float bA = nivelArribaActual();
-      if ((!tSubio || ahora - tSubio >= ASENTAR_MS) && (nArriba < 10 || rmsSuave < bA + 0.5f * margenSobre(bA))) guardarArriba(rmsSuave);
-    }
+    } else { tSobre = 0; guardarArriba(rmsSuave); }   // v8.2: guarda lo que queda bajo el umbral (o todo mientras aprende)
   } else {
     if (rmsSuave > picoAct) picoAct = rmsSuave;   // v8.2
     float uSuelta = umbralSueltaAhora();
@@ -858,7 +836,6 @@ void procesarRms(int mv) {
       if (ahora - tBajo + HOLGURA_MS >= T_CONFIRMAR) {
         terminarActivacion(tBajo);
         nArriba = 0; iArriba = 0;                  // v8.2: la cabeza acaba de subir: aprende 1 s ese nivel
-        tSubio = ahora; uTrasSubir = uSuelta + margenSobre(baseAct);   // v8.3
       }
     } else {
       if (tBajo) { sumaRmsAct += sumaCola; nRmsAct += nCola; tBajo = 0; }  // fue una baja corta
@@ -1218,7 +1195,6 @@ void imprimirEstado() {
 // ======================================================================
 static char js[8192];               // un mensaje JSON para la pagina
 static int jl = 0;
-char versionPagina[24] = "?";       // v8.3: version de la pagina que se esta sirviendo
 
 void ja(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void ja(const char *fmt, ...) {
@@ -1279,8 +1255,7 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
 
   jl = 0; js[0] = 0;
   ja("{\"type\":\"atril\",\"st\":");
-  ja("{\"web\":\"%s\",", versionPagina);     // v8.3: la pagina compara su version con esta
-  ja("\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"datos\":%d,\"rms\":%d,\"med\":%.1f",
+  ja("{\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"datos\":%d,\"rms\":%d,\"med\":%.1f",
      VERSION_ATRIL, (unsigned long)idArranque, NOMBRE_MODO[modo], datosOK() ? 1 : 0, rmsUltimo, rmsSuave);
   ja(",\"activo\":%d,\"abajo\":%d,\"abajoAct\":%d,\"nivel\":%d,\"durAct\":%.1f",
      act ? 1 : 0, cabezaAbajo() ? 1 : 0, abajoEsActividad ? 1 : 0, (int)(nivel * 100),
@@ -1326,7 +1301,7 @@ void lineaDelServidor(const char *l) {
 }
 
 // ---------- La pagina en la RAM (se lee de LittleFS una sola vez, al encender) ----------
-struct ArchivoWeb { char ruta[48]; const char *tipo; const uint8_t *datos; size_t largo; bool gz; };
+struct ArchivoWeb { char ruta[48]; const char *tipo; uint8_t *datos; size_t largo; bool gz; };
 const int N_ARCHIVOS = 24;
 ArchivoWeb archivos[N_ARCHIVOS];
 int nArchivos = 0;
@@ -1360,9 +1335,8 @@ void cargarCarpeta(const char *carpeta, int nivel) {
     if (ruta.length() >= sizeof(a.ruta)) continue;
     strcpy(a.ruta, ruta.c_str());
     a.gz = gz; a.tipo = tipoDe(a.ruta); a.largo = f.size();
-    uint8_t *buf = (uint8_t *)heap_caps_malloc(a.largo ? a.largo : 1, MALLOC_CAP_8BIT);
-    if (buf && f.read(buf, a.largo) != a.largo) { free(buf); buf = NULL; }
-    a.datos = buf;
+    a.datos = (uint8_t *)heap_caps_malloc(a.largo ? a.largo : 1, MALLOC_CAP_8BIT);
+    if (a.datos && f.read(a.datos, a.largo) != a.largo) { free(a.datos); a.datos = NULL; }
     if (a.datos) bytesEnRam += a.largo;
     nArchivos++;
   }
@@ -1370,19 +1344,6 @@ void cargarCarpeta(const char *carpeta, int nivel) {
 
 // En setup (antes de mover los motores): monta LittleFS y copia la pagina a la RAM
 void prepararPagina() {
-#if HAY_PAGINA_INTERNA
-  // v8.3: la pagina incluida en el firmware (en la flash del programa: no ocupa RAM ni LittleFS)
-  for (int i = 0; i < N_PAGINA_INTERNA && nArchivos < N_ARCHIVOS; i++) {
-    ArchivoWeb &a = archivos[nArchivos++];
-    strncpy(a.ruta, PAGINA_INTERNA[i].ruta, sizeof(a.ruta) - 1);
-    a.ruta[sizeof(a.ruta) - 1] = 0;
-    a.tipo = tipoDe(a.ruta); a.datos = PAGINA_INTERNA[i].datos; a.largo = PAGINA_INTERNA[i].largo; a.gz = PAGINA_INTERNA[i].gz;
-  }
-  strncpy(versionPagina, PAGINA_VERSION, sizeof(versionPagina) - 1);
-  Serial.printf(">> Pagina incluida en el firmware (version %s, %d archivos): no hace falta subir LittleFS. RAM libre: %u KB\n",
-                versionPagina, nArchivos, (unsigned)(ESP.getFreeHeap() / 1024));
-  return;
-#endif
   if (!LittleFS.begin(false)) {
     Serial.println("!! LittleFS no tiene la pagina: sube la carpeta data/ con \"Upload LittleFS\". El atril funciona igual.");
     return;
@@ -1393,14 +1354,6 @@ void prepararPagina() {
   Serial.printf(">> Pagina: %d archivos (%u KB en RAM%s). RAM libre: %u KB\n", nArchivos, (unsigned)(bytesEnRam / 1024),
                 enFlash ? ", algunos se leeran de la flash" : "", (unsigned)(ESP.getFreeHeap() / 1024));
   if (!nArchivos) Serial.println("!! LittleFS esta vacio: sube la carpeta data/ con \"Upload LittleFS\".");
-  File fv = LittleFS.open("/version.txt", "r");   // v8.3: version de la pagina de LittleFS
-  if (fv) {
-    int n = fv.read((uint8_t *)versionPagina, sizeof(versionPagina) - 1);
-    versionPagina[n > 0 ? n : 0] = 0;
-    for (int i = 0; versionPagina[i]; i++) if (versionPagina[i] == '\n' || versionPagina[i] == '\r') versionPagina[i] = 0;
-    fv.close();
-  }
-  Serial.printf(">> Pagina de LittleFS, version %s (sin pagina_web.h junto al .ino)\n", versionPagina);
 }
 
 ArchivoWeb *buscarArchivo(const char *ruta) {
@@ -1795,7 +1748,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v8.3 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
+  Serial.println("=== ASTRA - atril v8.2 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);

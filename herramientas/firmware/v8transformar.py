@@ -31,7 +31,7 @@ IPAddress ipServidor;
 """, "")
 
 rep('  Serial.println("=== ASTRA - atril v7.1 (sonido + servidor de la pagina) ===");',
-    '  Serial.println("=== ASTRA - atril v8.3 (sonido + red ASTRA + pagina en 192.168.4.1) ===");')
+    '  Serial.println("=== ASTRA - atril v8.2 (sonido + red ASTRA + pagina en 192.168.4.1) ===");')
 
 # 2) cabecera
 rep("//  ASTRA - Firmware del atril (ESP32) v2.3", "//  ASTRA - Firmware del atril (ESP32) v8 SIN LAPTOP (sonido + red ASTRA + pagina web)")
@@ -82,15 +82,6 @@ rep("#include <AccelStepper.h>\n", """#include <AccelStepper.h>
 #include <esp_http_server.h>
 #include <esp_heap_caps.h>
 #include <stdarg.h>
-// v8.3: la pagina va DENTRO del firmware si pagina_web.h esta junto a este .ino (lo genera
-// herramientas/preparar_littlefs.py). Asi la pagina siempre es la de esta version y no hace falta
-// subir LittleFS. Sin pagina_web.h se usa la carpeta data/ de LittleFS, como antes.
-#if __has_include("pagina_web.h")
-#include "pagina_web.h"
-#define HAY_PAGINA_INTERNA 1
-#else
-#define HAY_PAGINA_INTERNA 0
-#endif
 """)
 
 # 4) constantes de la red
@@ -117,7 +108,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.3";
+const char *VERSION_ATRIL = "8.2";
 """)
 
 # 11) tiempo de sesion y avisos de la red
@@ -157,7 +148,6 @@ void setup() {""", r"""// ======================================================
 // ======================================================================
 static char js[8192];               // un mensaje JSON para la pagina
 static int jl = 0;
-char versionPagina[24] = "?";       // v8.3: version de la pagina que se esta sirviendo
 
 void ja(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void ja(const char *fmt, ...) {
@@ -218,8 +208,7 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
 
   jl = 0; js[0] = 0;
   ja("{\"type\":\"atril\",\"st\":");
-  ja("{\"web\":\"%s\",", versionPagina);     // v8.3: la pagina compara su version con esta
-  ja("\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"datos\":%d,\"rms\":%d,\"med\":%.1f",
+  ja("{\"v\":\"%s\",\"boot\":%lu,\"modo\":\"%s\",\"datos\":%d,\"rms\":%d,\"med\":%.1f",
      VERSION_ATRIL, (unsigned long)idArranque, NOMBRE_MODO[modo], datosOK() ? 1 : 0, rmsUltimo, rmsSuave);
   ja(",\"activo\":%d,\"abajo\":%d,\"abajoAct\":%d,\"nivel\":%d,\"durAct\":%.1f",
      act ? 1 : 0, cabezaAbajo() ? 1 : 0, abajoEsActividad ? 1 : 0, (int)(nivel * 100),
@@ -264,7 +253,7 @@ void lineaDelServidor(const char *l) {
 }
 
 // ---------- La pagina en la RAM (se lee de LittleFS una sola vez, al encender) ----------
-struct ArchivoWeb { char ruta[48]; const char *tipo; const uint8_t *datos; size_t largo; bool gz; };
+struct ArchivoWeb { char ruta[48]; const char *tipo; uint8_t *datos; size_t largo; bool gz; };
 const int N_ARCHIVOS = 24;
 ArchivoWeb archivos[N_ARCHIVOS];
 int nArchivos = 0;
@@ -298,9 +287,8 @@ void cargarCarpeta(const char *carpeta, int nivel) {
     if (ruta.length() >= sizeof(a.ruta)) continue;
     strcpy(a.ruta, ruta.c_str());
     a.gz = gz; a.tipo = tipoDe(a.ruta); a.largo = f.size();
-    uint8_t *buf = (uint8_t *)heap_caps_malloc(a.largo ? a.largo : 1, MALLOC_CAP_8BIT);
-    if (buf && f.read(buf, a.largo) != a.largo) { free(buf); buf = NULL; }
-    a.datos = buf;
+    a.datos = (uint8_t *)heap_caps_malloc(a.largo ? a.largo : 1, MALLOC_CAP_8BIT);
+    if (a.datos && f.read(a.datos, a.largo) != a.largo) { free(a.datos); a.datos = NULL; }
     if (a.datos) bytesEnRam += a.largo;
     nArchivos++;
   }
@@ -308,19 +296,6 @@ void cargarCarpeta(const char *carpeta, int nivel) {
 
 // En setup (antes de mover los motores): monta LittleFS y copia la pagina a la RAM
 void prepararPagina() {
-#if HAY_PAGINA_INTERNA
-  // v8.3: la pagina incluida en el firmware (en la flash del programa: no ocupa RAM ni LittleFS)
-  for (int i = 0; i < N_PAGINA_INTERNA && nArchivos < N_ARCHIVOS; i++) {
-    ArchivoWeb &a = archivos[nArchivos++];
-    strncpy(a.ruta, PAGINA_INTERNA[i].ruta, sizeof(a.ruta) - 1);
-    a.ruta[sizeof(a.ruta) - 1] = 0;
-    a.tipo = tipoDe(a.ruta); a.datos = PAGINA_INTERNA[i].datos; a.largo = PAGINA_INTERNA[i].largo; a.gz = PAGINA_INTERNA[i].gz;
-  }
-  strncpy(versionPagina, PAGINA_VERSION, sizeof(versionPagina) - 1);
-  Serial.printf(">> Pagina incluida en el firmware (version %s, %d archivos): no hace falta subir LittleFS. RAM libre: %u KB\n",
-                versionPagina, nArchivos, (unsigned)(ESP.getFreeHeap() / 1024));
-  return;
-#endif
   if (!LittleFS.begin(false)) {
     Serial.println("!! LittleFS no tiene la pagina: sube la carpeta data/ con \"Upload LittleFS\". El atril funciona igual.");
     return;
@@ -331,14 +306,6 @@ void prepararPagina() {
   Serial.printf(">> Pagina: %d archivos (%u KB en RAM%s). RAM libre: %u KB\n", nArchivos, (unsigned)(bytesEnRam / 1024),
                 enFlash ? ", algunos se leeran de la flash" : "", (unsigned)(ESP.getFreeHeap() / 1024));
   if (!nArchivos) Serial.println("!! LittleFS esta vacio: sube la carpeta data/ con \"Upload LittleFS\".");
-  File fv = LittleFS.open("/version.txt", "r");   // v8.3: version de la pagina de LittleFS
-  if (fv) {
-    int n = fv.read((uint8_t *)versionPagina, sizeof(versionPagina) - 1);
-    versionPagina[n > 0 ? n : 0] = 0;
-    for (int i = 0; versionPagina[i]; i++) if (versionPagina[i] == '\n' || versionPagina[i] == '\r') versionPagina[i] = 0;
-    fv.close();
-  }
-  Serial.printf(">> Pagina de LittleFS, version %s (sin pagina_web.h junto al .ino)\n", versionPagina);
 }
 
 ArchivoWeb *buscarArchivo(const char *ruta) {
@@ -914,52 +881,6 @@ r1("int pistasAbajo[PISTAS_POR_LISTA]  = {1, 2, 3};   // /01/001, 002, 003 con l
    "int pistasAbajo[PISTAS_POR_LISTA]  = {4, 5, 6};   // v8.2: /01/004, 005, 006 con la CABEZA ABAJO")
 r1("int pistasArriba[PISTAS_POR_LISTA] = {4, 5, 6};   // /01/004, 005, 006 con la CABEZA ARRIBA",
    "int pistasArriba[PISTAS_POR_LISTA] = {1, 2, 3};   // v8.2: /01/001, 002, 003 con la CABEZA ARRIBA")
-
-# =====================================================================
-# v8.3: DETECCION CON SENALES DE POCO CONTRASTE (probado con los valores reales del Serial Plotter)
-#  Con los semiespinosos de la cabeza la senal con la cabeza abajo solo es ~30-50 % mayor que con
-#  la cabeza arriba, y la mediana de 0.5 s salta tanto como esa diferencia.
-#  - La senal que se compara (rmsSuave) es la MEDIANA de los ultimos 13 bloques (1.3 s; antes 5 =
-#    0.5 s): quita el vaiven y los picos o espasmos de menos de ~0.6 s sin borrar una postura
-#    sostenida. Retraso tipico de la deteccion: ~1 s.
-#  - Al subir la cabeza, el nivel "arriba" se reaprende despues de 0.8 s (cuando la senal ya se
-#    asento) y, mientras tanto, una caida nueva tiene que volver sobre el punto donde se detecto
-#    la subida (asi no se queda trabado ni toma la bajada como "arriba").
-#  - Ya aprendido, el nivel "arriba" solo guarda valores claramente de arriba (no los que van
-#    subiendo al empezar una caida, que lo inflaban y hacian perder la caida siguiente).
-# =====================================================================
-r1("const int   N_MEDIANA           = 5;    // la senal que se compara es la MEDIANA de los ultimos",
-   "const int   N_MEDIANA           = 13;   // v8.3 (antes 5): la senal que se compara es la MEDIANA de los ultimos")
-r1("                                        // 5 bloques (0.5 s): quita los saltos sueltos del ruido",
-   "                                        // 13 bloques (1.3 s): quita el vaiven, los saltos sueltos y los espasmos breves")
-r1("const float SUELTA_FRAC = 0.40f;        // v8.2: termina al bajar al 40 % del camino arriba -> pico",
-   "const float SUELTA_FRAC = 0.40f;        // v8.2: termina al bajar al 40 % del camino arriba -> pico\n"
-   "const unsigned long ASENTAR_MS = 800;   // v8.3: tras subir la cabeza, espera esto para reaprender el nivel")
-r1("float baseAct = 0, uOnAct = 0, picoAct = 0;   // v8.2: de la activacion en curso",
-   "float baseAct = 0, uOnAct = 0, picoAct = 0;   // v8.2: de la activacion en curso\n"
-   "unsigned long tSubio = 0;               // v8.3: cuando se detecto la ultima subida\n"
-   "float uTrasSubir = 0;                   // v8.3: umbral de caida mientras se reaprende el nivel de arriba")
-r1("float umbralOnAhora() { float b = nivelArribaActual(); return max(umbralOn, b + margenSobre(b)); }",
-   "float umbralOnAhora() {\n"
-   "  if (nArriba < 10) return max(umbralOn, uTrasSubir);   // v8.3: reaprendiendo el nivel de arriba\n"
-   "  float b = nivelArribaActual(); return max(umbralOn, b + margenSobre(b));\n"
-   "}")
-r1("  nArriba = 0; iArriba = 0;                   // v8.2: el nivel de arriba se vuelve a medir",
-   "  nArriba = 0; iArriba = 0;                   // v8.2: el nivel de arriba se vuelve a medir\n"
-   "  tSubio = 0; uTrasSubir = 0;                  // v8.3")
-r1("    if (rmsSuave >= uOnAhora && nArriba >= 10) {   // v8.2: primero aprende 1 s el nivel con la cabeza arriba",
-   "    if (rmsSuave >= uOnAhora) {                    // v8.3: mientras reaprende usa uTrasSubir")
-r1("    } else { tSobre = 0; guardarArriba(rmsSuave); }   // v8.2: guarda lo que queda bajo el umbral (o todo mientras aprende)",
-   "    } else {\n"
-   "      tSobre = 0;\n"
-   "      // v8.3: tras subir espera a que se asiente; ya aprendido, solo guarda valores claramente de arriba\n"
-   "      // (no los que van subiendo al empezar una caida, que inflarian el nivel)\n"
-   "      float bA = nivelArribaActual();\n"
-   "      if ((!tSubio || ahora - tSubio >= ASENTAR_MS) && (nArriba < 10 || rmsSuave < bA + 0.5f * margenSobre(bA))) guardarArriba(rmsSuave);\n"
-   "    }")
-r1("        nArriba = 0; iArriba = 0;                  // v8.2: la cabeza acaba de subir: aprende 1 s ese nivel",
-   "        nArriba = 0; iArriba = 0;                  // v8.2: la cabeza acaba de subir: aprende 1 s ese nivel\n"
-   "        tSubio = ahora; uTrasSubir = uSuelta + margenSobre(baseAct);   // v8.3")
 
 open(dst, 'w').write(s)
 print('OK', dst)
