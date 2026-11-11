@@ -105,7 +105,7 @@ RED_CLAVE = "clave"
 
 **Datos que ya tenías en el navegador:** en *Ajustes* aparece **«Subir datos guardados en este navegador»**.
 
-**MicroSD del DFPlayer** (FAT32): `/01/001.mp3` … `/01/006.mp3` y `/ADVERT/0001.mp3`.
+**MicroSD del DFPlayer** (FAT32): `/01/001.mp3` … `/01/006.mp3` y `/ADVERT/0001.mp3`. En la versión sin laptop (rama `claude/astra-sin-laptop`): cabeza arriba = 001–003, cabeza abajo = 004–006.
 
 ## Si algo no conecta
 

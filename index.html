@@ -150,7 +150,7 @@
       </label>
       <ol class="pasos">
         <li>Coloca los electrodos y enciende el sensor y el atril.</li>
-        <li>Acomoda al niño con la <b>cabeza apoyada y tranquila</b> (respaldo o cuña). Que no hable ni ría durante la calibración.</li>
+        <li>Acomoda al niño en la <b>postura de la terapia, con la cabeza arriba</b> (como la sostendrá) y tranquila. Que no hable ni ría durante la calibración.</li>
         <li>Pulsa <b>Comenzar</b>: ASTRA se calibra durante 10 segundos y la sesión empieza sola. Si el niño se movió mucho, usa <b>Volver a calibrar</b>.</li>
       </ol>
       <div class="estado-grande" id="st-estado"></div>
@@ -175,10 +175,18 @@
       </div>
       <div class="calibrando" id="lv-cal" hidden>
         <b id="lv-cal-titulo">Calibrando…</b>
-        <span id="lv-cal-txt">Mantén la cabeza del niño apoyada y quieta.</span>
+        <span id="lv-cal-txt">Mantén la cabeza del niño arriba, en la postura de la terapia, y quieta.</span>
         <div class="bar"><div id="lv-cal-bar"></div></div>
       </div>
-      <h3>Señal EMG en tiempo real</h3>
+      <div class="row-between graf-cab">
+        <div><h3>Señal EMG en tiempo real</h3>
+          <p class="leyenda" title="Línea amarilla: RMS de ~100 ms, como en el Serial Plotter"><span class="linea-act"></span> activación (RMS)</p></div>
+        <div class="zoom" role="group" aria-label="Zoom de la gráfica">
+          <button class="btn small ghost" id="zoom-menos" type="button" aria-label="Alejar">−</button>
+          <button class="btn small ghost" id="zoom-auto" type="button">Auto</button>
+          <button class="btn small ghost" id="zoom-mas" type="button" aria-label="Acercar">+</button>
+        </div>
+      </div>
       <canvas id="live" class="live"></canvas>
       <div class="vivo-kpis">
         <div class="kpi"><span>Tiempo cabeza abajo</span><b id="lv-abajo">00:00</b></div>
@@ -188,7 +196,7 @@
       <div class="form-actions">
         <div class="form-actions left">
           <button class="btn ghost" id="lv-pausa" type="button">❚❚ Pausar</button>
-          <button class="btn ghost" id="lv-recal" type="button" title="Si el niño cambió de posición o se movieron los electrodos">↻ Volver a calibrar</button>
+          <button class="btn ghost" id="lv-recal" type="button" title="Si el niño cambió de posición o se movieron los electrodos">↻ Recalibrar</button>
         </div>
         <button class="btn danger" id="lv-fin" type="button">■ Finalizar sesión</button>
       </div>

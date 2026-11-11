@@ -18,7 +18,7 @@
   /* Señal EMG cruda del Arduino (filtrada) en tiempo real: buffer circular, mín/máx por columna de píxeles.
    * flag por muestra: 2 = activación (o ARRIBA en calibración), 1 = fase de calibración midiendo. */
   class LiveChart {
-    constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.setWindow(15); }
+    constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.zoom = 1; this.setWindow(15); }
     setWindow(s) {
       this.win = s; this.N = Math.round(s * this.fs);
       this.sig = new Float32Array(this.N); this.flag = new Uint8Array(this.N); this.w = 0;
@@ -45,11 +45,27 @@
         }
         if (lo === Infinity) { lo = c ? mn[c - 1] : 0; hi = c ? mx[c - 1] : 0; }   // columna sin muestras validas: como la anterior
         mn[c] = lo; mx[c] = hi; fl[c] = f;
-        target = Math.max(target, -lo, hi);
       }
-      target *= 1.15;
-      this.ymax = target > this.ymax ? target : this.ymax - (this.ymax - target) * 0.03;
-      const Y = v => T + H / 2 - (v / this.ymax) * (H / 2);
+      // Escala ROBUSTA: el 98 % de las columnas cabe; un pico suelto (movimiento, cable) no aplasta la señal.
+      // Lo que se pasa del borde se recorta. El zoom (botones − / +) multiplica sobre esto.
+      const picos = new Float32Array(cols);
+      for (let c = 0; c < cols; c++) picos[c] = Math.max(-mn[c], mx[c]);
+      picos.sort();
+      target = Math.max(target, picos[Math.min(cols - 1, Math.floor(cols * 0.98))] * 1.25) / this.zoom;
+      this.ymax = target > this.ymax ? this.ymax + (target - this.ymax) * 0.3 : this.ymax - (this.ymax - target) * 0.05;
+      const Y = v => T + H / 2 - (Math.max(-this.ymax, Math.min(this.ymax, v)) / this.ymax) * (H / 2);
+      // Línea de ACTIVACIÓN: RMS de ~100 ms de la señal (como el Serial Plotter)
+      const porCol = N / cols, env = new Float32Array(cols), anchoEnv = Math.max(1, Math.round(0.1 * this.fs / porCol));
+      const e2 = new Float32Array(cols), en = new Float32Array(cols);
+      for (let c = 0; c < cols; c++) {
+        const i0 = Math.floor(c * N / cols), i1 = Math.max(i0 + 1, Math.floor((c + 1) * N / cols));
+        for (let i = i0; i < i1; i++) { const v = this.sig[(this.w + i) % N]; if (v === v) { e2[c] += v * v; en[c]++; } }
+      }
+      for (let c = 0; c < cols; c++) {
+        let s = 0, n = 0;
+        for (let k = Math.max(0, c - anchoEnv + 1); k <= c; k++) { s += e2[k]; n += en[k]; }
+        env[c] = n ? Math.sqrt(s / n) : (c ? env[c - 1] : 0);
+      }
 
       for (let c = 0; c < cols; c++) {
         if (!fl[c]) continue;
@@ -57,9 +73,12 @@
         ctx.fillRect(L + c, T, 1, H);
       }
       axes(ctx, L, T, W, H, this.win, [-1, -0.5, 0, 0.5, 1].map(f => [Y(f * this.ymax), (f * this.ymax).toFixed(this.ymax < 10 ? 2 : 0)]), 'mV');
-      ctx.strokeStyle = css('--signal'); ctx.beginPath();
+      ctx.strokeStyle = css('--signal'); ctx.globalAlpha = 0.75; ctx.beginPath();
       for (let c = 0; c < cols; c++) { ctx.moveTo(L + c + 0.5, Y(mn[c])); ctx.lineTo(L + c + 0.5, Y(mx[c]) - 0.5); }
-      ctx.stroke();
+      ctx.stroke(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = css('--star'); ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.beginPath();
+      for (let c = 0; c < cols; c++) { const y = Y(env[c]); if (c) ctx.lineTo(L + c + 0.5, y); else ctx.moveTo(L + 0.5, y); }
+      ctx.stroke(); ctx.lineWidth = 1;
     }
   }
 

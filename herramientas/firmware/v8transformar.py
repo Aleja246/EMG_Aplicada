@@ -31,7 +31,7 @@ IPAddress ipServidor;
 """, "")
 
 rep('  Serial.println("=== ASTRA - atril v7.1 (sonido + servidor de la pagina) ===");',
-    '  Serial.println("=== ASTRA - atril v8.1 (sonido + red ASTRA + pagina en 192.168.4.1) ===");')
+    '  Serial.println("=== ASTRA - atril v8.2 (sonido + red ASTRA + pagina en 192.168.4.1) ===");')
 
 # 2) cabecera
 rep("//  ASTRA - Firmware del atril (ESP32) v2.3", "//  ASTRA - Firmware del atril (ESP32) v8 SIN LAPTOP (sonido + red ASTRA + pagina web)")
@@ -108,7 +108,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.1";
+const char *VERSION_ATRIL = "8.2";
 """)
 
 # 11) tiempo de sesion y avisos de la red
@@ -806,6 +806,81 @@ r1("""    if (nEmgOut && (ahora - tEmg >= 40 || nEmgOut > 1000)) {   // senal: t
       }
     }
     if (nEmgOut && (ahora - tEmg >= 40 || nEmgOut > 1000)) {   // senal: tandas de ~40 ms""")
+
+# =====================================================================
+# v8.2: DETECTAR TAMBIEN CUANDO LA CABEZA SUBE (a pedido)
+#  Problema: el reposo se calibra con la cabeza APOYADA, pero en la terapia el nino SOSTIENE la
+#  cabeza arriba y el semiespinoso trabaja un poco: ese nivel queda sobre el umbral de relajacion
+#  y, tras la primera caida, el atril se quedaba en "cabeza abajo".
+#  - Nivel "cabeza arriba" actual = mediana de los ultimos 3 s fuera de una activacion (nunca
+#    menor que el reposo calibrado). Para una CAIDA la senal tiene que subir sobre ESE nivel el
+#    mismo margen de siempre (k x SD robusta, 2 mV o el % de la sensibilidad).
+#  - La caida TERMINA (cabeza arriba) cuando la senal baja al 40 % del camino entre el nivel de
+#    arriba (antes de caer) y el pico de la caida, o bajo el umbral de relajacion, por 300 ms.
+#  - Al empezar la sesion, tras recalibrar y CADA VEZ QUE LA CABEZA SUBE, aprende 1 s el nivel con
+#    la cabeza arriba (en ese segundo no busca caidas). Asi se ajusta si el nino la sostiene con mas
+#    o menos fuerza que en la calibracion.
+#  - Si la cabeza arriba esta tan relajada como en la calibracion, todo es igual que en v8.1.
+# =====================================================================
+r1("const int N_CAL_MAX = 160;              // v8.1: bloques que se guardan para la mediana (10 s = ~90)",
+   "const int N_CAL_MAX = 160;              // v8.1: bloques que se guardan para la mediana (10 s = ~90)\n"
+   "const int N_ARRIBA = 30;                // v8.2: 3 s de medianas para el nivel con la cabeza arriba\n"
+   "const float SUELTA_FRAC = 0.40f;        // v8.2: termina al bajar al 40 % del camino arriba -> pico")
+r1("float calVals[N_CAL_MAX];               // v8.1: la mediana de cada bloque de la calibracion",
+   "float calVals[N_CAL_MAX];               // v8.1: la mediana de cada bloque de la calibracion\n"
+   "float histArriba[N_ARRIBA];             // v8.2: ultimas medianas fuera de una activacion\n"
+   "int nArriba = 0, iArriba = 0;\n"
+   "float baseAct = 0, uOnAct = 0, picoAct = 0;   // v8.2: de la activacion en curso\n"
+   "volatile float uAhoraPub = 0, uSueltaPub = 0, arribaPub = 0;   // v8.2: para la pagina (los calcula el loop)")
+r1("void calcularUmbrales() {\n  umbralOn = reposo",
+   "// v8.2: nivel con la cabeza arriba (ultimos 3 s fuera de una activacion), nunca menor que el reposo\n"
+   "float nivelArribaActual() {\n"
+   "  if (nArriba < 10) return reposo;\n"
+   "  return max(reposo, medianaDe(histArriba, nArriba, 0.0f, false));\n"
+   "}\n"
+   "float margenSobre(float base) { return max(max(umbralK * sdReposo, MARGEN_MIN_MV), margenRel * base); }\n"
+   "float umbralOnAhora() { float b = nivelArribaActual(); return max(umbralOn, b + margenSobre(b)); }\n"
+   "float umbralSueltaAhora() {\n"
+   "  float off = baseAct + UMBRAL_OFF_FACTOR * (uOnAct - baseAct);\n"
+   "  return max(off, baseAct + SUELTA_FRAC * (picoAct - baseAct));\n"
+   "}\n"
+   "void guardarArriba(float v) { histArriba[iArriba] = v; iArriba = (iArriba + 1) % N_ARRIBA; if (nArriba < N_ARRIBA) nArriba++; }\n"
+   "\n"
+   "void calcularUmbrales() {\n  umbralOn = reposo")
+r1("  nReposo = 0;\n  sumaReposo = suma2Reposo = 0.0;",
+   "  nReposo = 0;\n  nArriba = 0; iArriba = 0;                   // v8.2: el nivel de arriba se vuelve a medir\n  sumaReposo = suma2Reposo = 0.0;")
+r1("  if (!activo) {\n    if (rmsSuave >= umbralOn) {",
+   "  if (!activo) {\n"
+   "    float uOnAhora = umbralOnAhora();             // v8.2: sobre el nivel actual con la cabeza arriba\n"
+   "    uAhoraPub = uOnAhora; uSueltaPub = 0; arribaPub = nivelArribaActual();\n"
+   "    if (rmsSuave >= uOnAhora && nArriba >= 10) {   // v8.2: primero aprende 1 s el nivel con la cabeza arriba")
+r1("        activo = true;\n",
+   "        activo = true;\n        baseAct = nivelArribaActual(); uOnAct = uOnAhora; picoAct = rmsSuave;   // v8.2\n")
+r1("    } else tSobre = 0;",
+   "    } else { tSobre = 0; guardarArriba(rmsSuave); }   // v8.2: guarda lo que queda bajo el umbral (o todo mientras aprende)")
+r1("    if (rmsSuave < umbralOff) {",
+   "    if (rmsSuave > picoAct) picoAct = rmsSuave;   // v8.2\n"
+   "    float uSuelta = umbralSueltaAhora();\n"
+   "    uSueltaPub = uSuelta;\n"
+   "    if (rmsSuave < uSuelta) {                      // v8.2: antes rmsSuave < umbralOff")
+r1("      if (ahora - tBajo + HOLGURA_MS >= T_CONFIRMAR) terminarActivacion(tBajo);",
+   "      if (ahora - tBajo + HOLGURA_MS >= T_CONFIRMAR) {\n"
+   "        terminarActivacion(tBajo);\n"
+   "        nArriba = 0; iArriba = 0;                  // v8.2: la cabeza acaba de subir: aprende 1 s ese nivel\n"
+   "      }")
+r1('  ja(",\\"sid\\":%d,\\"nAct\\":%d,',
+   '  ja(",\\"uAhora\\":%.1f,\\"uSuelta\\":%.1f,\\"arriba\\":%.1f", (float)uAhoraPub, (float)uSueltaPub, (float)arribaPub);   // v8.2\n'
+   '  ja(",\\"sid\\":%d,\\"nAct\\":%d,')
+
+# =====================================================================
+# v8.2: ORDEN DE LAS CANCIONES (correccion de la usuaria): en la microSD las pistas 001-003 son
+# las de la CABEZA ARRIBA y 004-006 las de la CABEZA ABAJO. Solo cambian los valores por defecto;
+# la pagina elige "Cancion 1, 2 o 3" de cada lista y el atril la guarda en su memoria.
+# =====================================================================
+r1("int pistasAbajo[PISTAS_POR_LISTA]  = {1, 2, 3};   // /01/001, 002, 003 con la CABEZA ABAJO",
+   "int pistasAbajo[PISTAS_POR_LISTA]  = {4, 5, 6};   // v8.2: /01/004, 005, 006 con la CABEZA ABAJO")
+r1("int pistasArriba[PISTAS_POR_LISTA] = {4, 5, 6};   // /01/004, 005, 006 con la CABEZA ARRIBA",
+   "int pistasArriba[PISTAS_POR_LISTA] = {1, 2, 3};   // v8.2: /01/001, 002, 003 con la CABEZA ARRIBA")
 
 open(dst, 'w').write(s)
 print('OK', dst)

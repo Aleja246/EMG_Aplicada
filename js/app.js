@@ -230,10 +230,10 @@
   }
 
   /* ---------- música y volumen (lo único técnico que ve el fisio) ---------- */
-  // Cabeza abajo: pistas 001-003 del DFPlayer; cabeza arriba: 004-006
+  // Cabeza ARRIBA: pistas 001-003 del DFPlayer; cabeza ABAJO: 004-006
   const MUS_OPC = {
-    abajo: [['1,1,1', 'Canción 1'], ['2,2,2', 'Canción 2'], ['3,3,3', 'Canción 3']],
-    arriba: [['4,4,4', 'Canción 1'], ['5,5,5', 'Canción 2'], ['6,6,6', 'Canción 3']]
+    abajo: [['4,4,4', 'Canción 1'], ['5,5,5', 'Canción 2'], ['6,6,6', 'Canción 3']],
+    arriba: [['1,1,1', 'Canción 1'], ['2,2,2', 'Canción 2'], ['3,3,3', 'Canción 3']]
   };
   const musValida = (l, v) => MUS_OPC[l].some(o => o[0] === v);
   // Lo elegido en esta página (o Canción 1 si no hay elección válida: p. ej. la lista vieja "las tres")
@@ -320,6 +320,8 @@
       ['Reposo de la calibración', [c && c.ok ? f1(c.reposo) + ' ± ' + f1(c.sd) + ' mV' : '—', c && c.inestable ? 'mal' : '']],
       ['Umbral de activación / relajación', [c && c.ok ? f1(c.uon) + ' / ' + f1(c.uoff) + ' mV' : '—', '']],
       ['Sensibilidad', [c && c.sens ? ['', 'más sensible', 'normal', 'menos sensible'][c.sens] : '—', '']],
+      ['Nivel con la cabeza arriba (se ajusta solo)', [st && st.arriba ? f1(st.arriba) + ' mV' : '—', '']],
+      ['Umbral ahora: caída / subida', [st && st.uAhora ? f1(st.uAhora) + (st.uSuelta ? ' / ' + f1(st.uSuelta) : '') + ' mV' : '—', '']],
       ['Equipos en la red / páginas abiertas', [srv ? (srv.equipos != null ? srv.equipos : '—') + ' / ' + (srv.paginas != null ? srv.paginas : '—') : '—', '']],
       ['Memoria libre del atril', [srv && srv.memoria ? Math.round(srv.memoria / 1024) + ' KB' : '—', srv && srv.memoria && srv.memoria < 30000 ? 'mal' : '']],
       ['Versión del atril', [st && st.v ? st.v : '—', '']]
@@ -468,9 +470,19 @@
   /* ===================================================================
    * Terapia en curso
    * =================================================================== */
-  $('lv-pausa').addEventListener('click', () => sendCmd('p'));   // el atril alterna pausa / seguir con 'p'
+  $('lv-pausa').addEventListener('click', () => sendCmd('p'));
+  // Zoom de la gráfica: Auto (×1) y de ×2 en ×2 (se recuerda en este celular)
+  const ZOOMS = [0.25, 0.5, 1, 2, 4, 8, 16];
+  function ponerZoom(z) {
+    chart.zoom = z; S.zoom = z; E.Store.saveSettings(S);
+    $('zoom-auto').textContent = z === 1 ? 'Auto' : '×' + (z >= 1 ? z : '1/' + (1 / z));
+    $('zoom-auto').classList.toggle('on', z === 1);
+  }
+  $('zoom-mas').addEventListener('click', () => ponerZoom(ZOOMS[Math.min(ZOOMS.length - 1, ZOOMS.indexOf(chart.zoom) + 1)]));
+  $('zoom-menos').addEventListener('click', () => ponerZoom(ZOOMS[Math.max(0, ZOOMS.indexOf(chart.zoom) - 1)]));
+  $('zoom-auto').addEventListener('click', () => ponerZoom(1));   // el atril alterna pausa / seguir con 'p'
   $('lv-recal').addEventListener('click', () => {
-    if (confirm('¿Volver a calibrar? Deja la cabeza del niño apoyada y quieta 10 segundos. El tiempo de la terapia continúa después.')) sendCmd('c');
+    if (confirm('¿Volver a calibrar? Deja la cabeza del niño arriba, en la postura de la terapia, y quieta 10 segundos. El tiempo de la terapia continúa después.')) sendCmd('c');
   });
   $('lv-fin').addEventListener('click', () => {
     if (!rec) { if (confirm('La terapia todavía no empezó a medir. ¿Salir?')) { rec = null; show('patient'); } return; }
@@ -496,7 +508,7 @@
       const c = st.cal;
       $('lv-cal').className = 'calibrando';
       $('lv-cal-titulo').textContent = 'Calibrando · ' + Math.ceil(c.restante) + ' s';
-      $('lv-cal-txt').textContent = 'Mantén la cabeza del niño apoyada y quieta.';
+      $('lv-cal-txt').textContent = 'Mantén la cabeza del niño arriba, en la postura de la terapia, y quieta.';
       $('lv-cal-bar').style.width = (100 * (1 - c.restante / c.total)) + '%';
     } else if (!rec) {
       const esperando = equipoListo() || sim;
@@ -764,6 +776,8 @@
 
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
+  chart.zoom = [0.25, 0.5, 1, 2, 4, 8, 16].includes(S.zoom) ? S.zoom : 1;
+  ponerZoom(chart.zoom);
   progChart = new E.ProgressChart($('prog'), $('prog-tip'));
   initMusica();
   rebuildDsp();

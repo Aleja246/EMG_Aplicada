@@ -39,7 +39,7 @@ Con esta versión **no se necesita laptop, Node.js, internet ni GitHub Pages** d
 | | Qué cambió | Qué NO cambió |
 |---|---|---|
 | **Arduino** `firmware/arduino_emg_ap/arduino_emg_ap.ino` (v5.1-AP) | Tu `arduino_emg.ino` v5 con cambios solo en la red y en **qué muestras entran al RMS**:<br>• Se une a la red ASTRA (clave en `credenciales.h`); el atril está fijo en `192.168.4.1`. `WiFi.setTimeout(0)`: unirse a la red ya no detiene el `loop` (antes hasta 10 s).<br>• **Las muestras tomadas mientras el WiFi transmite se apartan del RMS** (el del opto y el del Serial Plotter). Cada transmisión hace que el módulo WiFi consuma corriente de golpe, y como el ADC mide contra los 5 V de la placa, esas lecturas salen movidas. Los filtros siguen recibiendo todas las muestras. **Sin WiFi el RMS es exactamente el de siempre.**<br>• El WiFi transmite justo **después** de cada línea del opto, 10 veces por segundo (antes 25), para que el atril reciba el RMS a tiempo. Si un envío tarda más de 60 ms, la señal en vivo descansa 3 s; el opto nunca se pausa.<br>• Solo transmite la señal cuando hay una página abierta mirándola (lo decide el atril). | Muestreo de 1000 Hz, A0, filtros (60 Hz y armónicos), bloques de 100 ms, opto (Serial1, 9600, `"640\n"`), formato del Serial Plotter (`Bruto`, `Sin60`, `SinArm`). |
-| **ESP32** `firmware/esp32_atril_ap/esp32_atril_ap.ino` (v8.1) | Se generó **desde tu firmware original** (v5 con sonido, en `herramientas/firmware/`) con las adaptaciones ya probadas del v7.1 y una parte de red nueva: red ASTRA, página desde LittleFS, señal del Arduino por WiFi y WebSocket.<br>**Calibración (v8.1):**<br>• El reposo y su dispersión se calculan con **mediana y MAD** en lugar de media y DE: un movimiento, una risa o un espasmo breve durante los 10 s ya no sube el umbral.<br>• Umbral de activación = reposo + el mayor de **3 DE**, **2 mV** o **20 % del reposo** (antes 2 DE o 2 mV, demasiado pegado al ruido).<br>• **Sensibilidad** elegible en la página (ver sección 4). | Pines, orden de bobinas, velocidades, aceleraciones, límites, microswitch, 10 s de calibración con el primer segundo descartado, mediana de 0,5 s, umbral de relajación (60 %), confirmaciones de 300 ms, detección cabeza arriba/abajo, luz, DFPlayer, listas, avisos, PARO, BOOT y todos los comandos del monitor serie (`+` y `-` siguen ajustando el factor). |
+| **ESP32** `firmware/esp32_atril_ap/esp32_atril_ap.ino` (v8.2) | Se generó **desde tu firmware original** (v5 con sonido, en `herramientas/firmware/`) con las adaptaciones ya probadas del v7.1 y una parte de red nueva: red ASTRA, página desde LittleFS, señal del Arduino por WiFi y WebSocket.<br>**Calibración (v8.1):**<br>• El reposo y su dispersión se calculan con **mediana y MAD** en lugar de media y DE: un movimiento, una risa o un espasmo breve durante los 10 s ya no sube el umbral.<br>• Umbral de activación = reposo + el mayor de **3 DE**, **2 mV** o **20 % del reposo** (antes 2 DE o 2 mV, demasiado pegado al ruido).<br>• **Sensibilidad** elegible en la página (ver sección 4).<br>**Detección de la subida (v8.2):** el atril mide el nivel de la señal **con la cabeza arriba** (mediana de los últimos 3 s) y lo vuelve a aprender 1 s cada vez que la cabeza sube. Una caída es subir sobre **ese** nivel, y la cabeza "subió" cuando la señal baja al 40 % del camino entre ese nivel y el pico de la caída. Antes, si el niño sostenía la cabeza con más fuerza que al calibrar, tras la primera caída el atril se quedaba en "cabeza abajo".<br>**Canciones (v8.2):** por defecto, cabeza arriba = pistas 001–003 y cabeza abajo = 004–006. | Pines, orden de bobinas, velocidades, aceleraciones, límites, microswitch, 10 s de calibración con el primer segundo descartado, mediana de 0,5 s, umbral de relajación (60 %), confirmaciones de 300 ms, detección cabeza arriba/abajo, luz, DFPlayer, listas, avisos, PARO, BOOT y todos los comandos del monitor serie (`+` y `-` siguen ajustando el factor). |
 | **Página** | La sirve el ESP32. Los registros se guardan en el navegador (IndexedDB). El registro pide solo sexo, edad en años, GMFCS y diagnóstico opcional. Canciones: «Canción 1, 2 y 3» para cada posición. Sensibilidad por paciente. Diagnóstico de conexión en Ajustes. En la gráfica no se dibujan las muestras apartadas por el WiFi. | Diseño, pantallas, terapia en vivo, expediente, progreso, Excel, volumen y modo demostración. |
 
 ---
@@ -165,7 +165,8 @@ Desconecta los USB y deja cada placa en su power bank.
    En iPhone esto además protege los registros (ver sección 6).
 5. Arriba a la derecha debe decir **«Equipo listo»** (punto verde).
 6. **Registrar paciente** o **Buscar paciente** → **Iniciar terapia** → escribe el fisioterapeuta responsable,
-   elige la **sensibilidad** → **Comenzar**. El atril calibra 10 s (cabeza apoyada y quieta) y la sesión empieza sola.
+   elige la **sensibilidad** → **Comenzar**. El atril calibra 10 s (**cabeza arriba en la postura de la terapia**, quieta)
+   y la sesión empieza sola.
    - **Normal** (recomendada): umbral = reposo + el mayor de 3 DE, 2 mV o 20 %.
    - **Más sensible**: 2 DE o 10 %. Úsala si el atril no detecta caídas leves (niño con poca fuerza).
    - **Menos sensible**: 4 DE o 35 %. Úsala si hay espasmos o movimientos que el atril toma por caídas.
@@ -182,8 +183,8 @@ Desconecta los USB y deja cada placa en su power bank.
 8. Al finalizar: revisa el resumen, escribe observaciones, **Descargar Excel** (opcional) y **Guardar sesión**.
 
 **Ajustes** (arriba a la derecha):
-- la canción con la cabeza arriba y con la cabeza abajo: **Canción 1, 2 o 3** (en la microSD: cabeza abajo = 001–003,
-  cabeza arriba = 004–006);
+- la canción con la cabeza arriba y con la cabeza abajo: **Canción 1, 2 o 3** (en la microSD: cabeza **arriba** = 001–003,
+  cabeza **abajo** = 004–006);
 - el volumen (0–30): el atril lo guarda en su memoria;
 - descargar e importar respaldos;
 - el **Diagnóstico de la conexión**;
@@ -197,8 +198,11 @@ Una computadora con WiFi se usa igual: se une a la red ASTRA y abre `http://192.
 ### Calibrar bien con niños de 10 a 15 años con parálisis cerebral
 - **Piel y electrodos:** limpia la piel y asegura bien los cables (cinta). Un cable que se mueve produce picos
   que el atril puede tomar por contracciones.
-- **Durante los 10 s:** cabeza **apoyada** (respaldo, cuña o la mano del fisioterapeuta), ambiente tranquilo, sin hablar,
-  reír ni comer. El primer segundo se descarta.
+- **Durante los 10 s:** la cabeza **arriba, en la misma postura de la terapia** (como el niño la va a sostener; puede
+  tener un apoyo ligero), ambiente tranquilo, sin hablar, reír ni comer. El primer segundo se descarta. Así el reposo
+  calibrado corresponde a "cabeza arriba" y el atril distingue mejor la caída.
+- **Si la cabeza arriba da más señal que en la calibración**, el atril se equivoca solo en la primera caída y desde ahí
+  se ajusta solo (v8.2). Si la diferencia entre arriba y abajo es pequeña, calibra de nuevo con la cabeza arriba.
 - **Un movimiento breve ya no arruina la calibración** (v8.1), pero si el niño se movió casi todo el tiempo o la
   página avisa «La medición salió inestable», pulsa **Volver a calibrar**.
 - **Si recolocas los electrodos o cambias la posición del niño**, vuelve a calibrar.
@@ -208,6 +212,12 @@ Una computadora con WiFi se usa igual: se une a la red ASTRA y abre `http://192.
   sin repetir la calibración, y queda guardada con el paciente.
 - El atril confirma una caída cuando la señal pasa el umbral durante **300 ms**. Los espasmos más cortos (menos de
   ~0,3 s) se ignoran; los más largos pueden contar como una caída breve.
+
+### La gráfica en vivo
+- La línea **amarilla** es la **activación** (RMS de ~100 ms), igual que `SinArm` en el Serial Plotter: sube claramente
+  en cada contracción. Debajo, en verde agua, está la señal EMG filtrada.
+- La escala se ajusta sola (**Auto**) sin que un pico suelto la aplaste. El semiespinoso de la cabeza da señales
+  pequeñas: si no se aprecia bien, usa **+** para acercar (×2, ×4…) y **−** para alejar. El zoom se recuerda en ese celular.
 
 ## 5. Dónde se guardan los pacientes y las sesiones
 
@@ -365,6 +375,9 @@ compiladores del ESP32 y del UNO R4 están bloqueadas en este entorno):
 | **v5.1-AP, ruido del WiFi** (modelo: cada envío mueve unos mV la lectura de A0 durante ~3 ms) | Tu código de diagnóstico sin WiFi: reposo 4,6 mV, contraste de una contracción 7,2 veces. **v5-AP:** reposo 6,8 mV (+48 %), contraste 5,0. **v5.1-AP:** reposo 5,2 mV, contraste 6,4. La magnitud real depende de tu placa: el diagnóstico la mide. |
 | **v5.1-AP, WiFi lento** (1 de cada 15 envíos se atasca 400 ms) | Esperas de más de 200 ms sin RMS en el atril: v5-AP 22 (una de 509 ms, que dispara «sin datos»); **v5.1-AP 5, ninguna de 500 ms** |
 | **v8.1, calibración con niño con PC** (3 casos aleatorios: 8 caídas reales, algunas débiles, y 8 espasmos breves; a veces se mueve durante la calibración) | Firmware original: si se mueve al calibrar, umbral ≈ 47 mV y detecta **0–1 de 8**; si está quieto, **3–8 falsas alarmas**. **v8.1: 8 de 8 siempre, 2–3 falsas alarmas** |
+| **v8.2, subir y bajar la cabeza** (10 ciclos; calibrado con la cabeza apoyada a 15 mV; cabeza arriba sostenida a 20, 24 o 28 mV; abajo a 40–45 mV) | Original y v8.1: detectan la primera caída y se quedan en "abajo" (**0 de 10 subidas**). **v8.2: se equivoca solo el primer ciclo (~4 s) y luego 9 de 9 caídas y 9 de 9 subidas.** Calibrado con la cabeza arriba (arriba 30, abajo 38 mV, diferencia de solo 27 %): 9–10 de 10 |
+| v8.2, niño con PC (caídas débiles y espasmos) | 8 de 8 caídas, 0–1 falsas alarmas (v8.1: 2–3) |
+| v8.2 contra tu original, mismo escenario | Mismos mensajes del monitor serie salvo la calibración; los comandos al DFPlayer cambian solo por el nuevo orden de las canciones (arriba 001–003, abajo 004–006) |
 | v8.1 contra tu original, mismo escenario | Mismos mensajes y mismos comandos al DFPlayer; solo cambian las líneas de la calibración (umbral más alto) |
 | Sensibilidad y señal en vivo desde la página | Se aplican, se rechazan valores fuera de rango y apagar/encender la señal no cuenta paquetes perdidos falsos |
 

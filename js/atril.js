@@ -98,7 +98,7 @@
       this.sumaAct = 0; this.nRmsAct = 0; this.sumaCola = 0; this.nCola = 0;
       this.nActiv = 0; this.tActMs = 0; this.sid = 0; this.msSes = 0; this.msSesIni = 0;
       this.tCambio = 0; this.abajoAntes = false; this.tIniAbajo = 0; this.tUltCancion = -1e9; this.cancion = 4; this.orden = 0;
-      this.mus = { abajo: [1, 2, 3], arriba: [4, 5, 6], idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
+      this.mus = { abajo: [4, 5, 6], arriba: [1, 2, 3], idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
         tAviso: 0, tPista: 0, subio: false, reiniciar: false, tLista: performance.now() + 2300, tCmd: 0, vol: 15 };
       this.tPrev = performance.now();
       this._msg('=== ASTRA - atril v5.1 (simulado) ===');

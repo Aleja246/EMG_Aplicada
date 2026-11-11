@@ -185,6 +185,8 @@ const float MARGEN_REL_INICIAL = 0.20f; // v8.1: el umbral queda al menos 20 % s
 const float SENS_K[3]   = {2.0f, 3.0f, 4.0f};
 const float SENS_REL[3] = {0.10f, 0.20f, 0.35f};
 const int N_CAL_MAX = 160;              // v8.1: bloques que se guardan para la mediana (10 s = ~90)
+const int N_ARRIBA = 30;                // v8.2: 3 s de medianas para el nivel con la cabeza arriba
+const float SUELTA_FRAC = 0.40f;        // v8.2: termina al bajar al 40 % del camino arriba -> pico
 const float MARGEN_MIN_MV    = 2.0f; // el umbral queda al menos 2 mV sobre el basal
 const float UMBRAL_OFF_FACTOR = 0.6f; // histeresis relativa a la media basal
 const unsigned long T_CONFIRMAR = 300;  // ms sobre/bajo el umbral para cambiar de estado
@@ -264,7 +266,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.1";
+const char *VERSION_ATRIL = "8.2";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -316,6 +318,10 @@ float umbralK = UMBRAL_K_INICIAL;
 float margenRel = MARGEN_REL_INICIAL;   // v8.1
 int sensibilidad = 2;                   // v8.1: 1 mas sensible, 2 normal, 3 menos sensible
 float calVals[N_CAL_MAX];               // v8.1: la mediana de cada bloque de la calibracion
+float histArriba[N_ARRIBA];             // v8.2: ultimas medianas fuera de una activacion
+int nArriba = 0, iArriba = 0;
+float baseAct = 0, uOnAct = 0, picoAct = 0;   // v8.2: de la activacion en curso
+volatile float uAhoraPub = 0, uSueltaPub = 0, arribaPub = 0;   // v8.2: para la pagina (los calcula el loop)
 float umbralOn = 300, umbralOff = 200;
 
 // --- Deteccion ---
@@ -351,8 +357,8 @@ float faseColor = 0;                // 0..1, posicion en la rueda de colores
 bool musicaSonando = false;
 int cancion = 4;                    // archivo de /01 que esta sonando (001..255)
 // Listas de musica (las podra cambiar la pagina web con configurarPistas)
-int pistasAbajo[PISTAS_POR_LISTA]  = {1, 2, 3};   // /01/001, 002, 003 con la CABEZA ABAJO
-int pistasArriba[PISTAS_POR_LISTA] = {4, 5, 6};   // /01/004, 005, 006 con la CABEZA ARRIBA
+int pistasAbajo[PISTAS_POR_LISTA]  = {4, 5, 6};   // v8.2: /01/004, 005, 006 con la CABEZA ABAJO
+int pistasArriba[PISTAS_POR_LISTA] = {1, 2, 3};   // v8.2: /01/001, 002, 003 con la CABEZA ARRIBA
 int idxAbajo = -1, idxArriba = -1;  // posicion en cada lista (-1 = aun no suena)
 bool listaAbajoSonando = false;     // que lista esta sonando
 bool pistaTerminada = false;        // el DFPlayer aviso que termino la pista
@@ -589,6 +595,19 @@ float medianaDe(const float *v, int n, float centro, bool abs) {
   return n % 2 ? t[n / 2] : 0.5f * (t[n / 2 - 1] + t[n / 2]);
 }
 
+// v8.2: nivel con la cabeza arriba (ultimos 3 s fuera de una activacion), nunca menor que el reposo
+float nivelArribaActual() {
+  if (nArriba < 10) return reposo;
+  return max(reposo, medianaDe(histArriba, nArriba, 0.0f, false));
+}
+float margenSobre(float base) { return max(max(umbralK * sdReposo, MARGEN_MIN_MV), margenRel * base); }
+float umbralOnAhora() { float b = nivelArribaActual(); return max(umbralOn, b + margenSobre(b)); }
+float umbralSueltaAhora() {
+  float off = baseAct + UMBRAL_OFF_FACTOR * (uOnAct - baseAct);
+  return max(off, baseAct + SUELTA_FRAC * (picoAct - baseAct));
+}
+void guardarArriba(float v) { histArriba[iArriba] = v; iArriba = (iArriba + 1) % N_ARRIBA; if (nArriba < N_ARRIBA) nArriba++; }
+
 void calcularUmbrales() {
   umbralOn = reposo + max(max(umbralK * sdReposo, MARGEN_MIN_MV), margenRel * reposo);   // v8.1: + margen relativo
   umbralOff = reposo + UMBRAL_OFF_FACTOR * (umbralOn - reposo);
@@ -691,6 +710,7 @@ void iniciarCalibracion() {
   modo = CALIBRANDO;
   tCal = millis();
   nReposo = 0;
+  nArriba = 0; iArriba = 0;                   // v8.2: el nivel de arriba se vuelve a medir
   sumaReposo = suma2Reposo = 0.0;
   pistaPendiente = 0;
   Log.println();
@@ -792,22 +812,31 @@ void procesarRms(int mv) {
 
   // Histeresis + confirmacion en el tiempo
   if (!activo) {
-    if (rmsSuave >= umbralOn) {
+    float uOnAhora = umbralOnAhora();             // v8.2: sobre el nivel actual con la cabeza arriba
+    uAhoraPub = uOnAhora; uSueltaPub = 0; arribaPub = nivelArribaActual();
+    if (rmsSuave >= uOnAhora && nArriba >= 10) {   // v8.2: primero aprende 1 s el nivel con la cabeza arriba
       if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; msSesionIni = msSesion; }
       sumaRmsAct += mv; nRmsAct++;
       if (ahora - tSobre + HOLGURA_MS >= T_CONFIRMAR) {
         activo = true;
+        baseAct = nivelArribaActual(); uOnAct = uOnAhora; picoAct = rmsSuave;   // v8.2
         tInicioActivo = tSobre;
         tCambioCabeza = ahora;                             // cambia de cabeza abajo <-> arriba
         nActivaciones++;
         tBajo = 0;
       }
-    } else tSobre = 0;
+    } else { tSobre = 0; guardarArriba(rmsSuave); }   // v8.2: guarda lo que queda bajo el umbral (o todo mientras aprende)
   } else {
-    if (rmsSuave < umbralOff) {
+    if (rmsSuave > picoAct) picoAct = rmsSuave;   // v8.2
+    float uSuelta = umbralSueltaAhora();
+    uSueltaPub = uSuelta;
+    if (rmsSuave < uSuelta) {                      // v8.2: antes rmsSuave < umbralOff
       if (!tBajo) { tBajo = ahora; sumaCola = 0; nCola = 0; }
       sumaCola += mv; nCola++;
-      if (ahora - tBajo + HOLGURA_MS >= T_CONFIRMAR) terminarActivacion(tBajo);
+      if (ahora - tBajo + HOLGURA_MS >= T_CONFIRMAR) {
+        terminarActivacion(tBajo);
+        nArriba = 0; iArriba = 0;                  // v8.2: la cabeza acaba de subir: aprende 1 s ese nivel
+      }
     } else {
       if (tBajo) { sumaRmsAct += sumaCola; nRmsAct += nCola; tBajo = 0; }  // fue una baja corta
       sumaRmsAct += mv; nRmsAct++;
@@ -1236,6 +1265,7 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
      CAL_MIN_MUESTRAS, reposo, sdReposo, reposo > 0 ? sdReposo / reposo : 0.0f, CAL_CV_MAX);
   ja(",\"k\":%.1f,\"margen\":%.1f,\"rel\":%.2f,\"sens\":%d,\"koff\":%.2f,\"uon\":%.1f,\"uoff\":%.1f,\"pocos\":%d,\"inestable\":%d}",
      umbralK, MARGEN_MIN_MV, margenRel, sensibilidad, UMBRAL_OFF_FACTOR, umbralOn, umbralOff, calPocos ? 1 : 0, calInestable ? 1 : 0);
+  ja(",\"uAhora\":%.1f,\"uSuelta\":%.1f,\"arriba\":%.1f", (float)uAhoraPub, (float)uSueltaPub, (float)arribaPub);   // v8.2
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":0",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
      lineasMalas);
@@ -1718,7 +1748,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v8.1 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
+  Serial.println("=== ASTRA - atril v8.2 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);

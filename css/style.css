@@ -154,7 +154,11 @@ dialog::backdrop { background: rgba(3, 5, 20, .7); backdrop-filter: blur(3px); }
   .vivo-top span { font-size: .8rem; }
   .postura { font-size: 1.45rem; } .reloj { font-size: 1.6rem; }
   .vivo h3 { font-size: .9rem; margin-bottom: 2px; }
-  canvas.live { height: 170px; }
+  canvas.live { height: 150px; }
+  .graf-cab h3 { font-size: .85rem; } .zoom .btn { min-width: 34px; padding: 2px 8px; font-size: .85rem; }
+  .leyenda { margin: 0; font-size: .72rem; }
+  .vivo .form-actions, .vivo .form-actions.left { flex-wrap: nowrap; gap: 6px; }
+  .vivo .form-actions .btn { padding: 9px 10px; font-size: .88rem; white-space: nowrap; }
   .vivo-kpis { grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 6px; }
   .vivo-kpis .kpi { padding: 8px 10px; } .vivo-kpis .kpi b { font-size: 1.5rem; }
   .vivo .form-actions { margin-top: 8px; }
@@ -163,6 +167,13 @@ dialog::backdrop { background: rgba(3, 5, 20, .7); backdrop-filter: blur(3px); }
   .calibrando { padding: 8px 10px; margin-bottom: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* zoom y leyenda de la gráfica en vivo */
+.graf-cab { align-items: center; margin-top: 4px; } .graf-cab h3 { margin: 0; }
+.zoom { display: flex; gap: 4px; } .zoom .btn { min-width: 40px; padding: 4px 10px; }
+.zoom #zoom-auto.on { border-color: var(--primary); color: var(--primary); }
+.leyenda { font-size: .78rem; color: var(--muted); margin: 2px 0 4px; }
+.linea-act { display: inline-block; width: 18px; height: 3px; border-radius: 2px; background: var(--star); vertical-align: middle; margin-right: 4px; }
 
 /* diagnóstico (Ajustes) */
 details summary { cursor: pointer; color: var(--muted); font-weight: 600; padding: 4px 0; }
