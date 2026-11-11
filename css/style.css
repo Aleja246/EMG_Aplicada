@@ -144,8 +144,28 @@ dialog { color: var(--text); background: #0e1540; border: 1px solid var(--line);
 dialog::backdrop { background: rgba(3, 5, 20, .7); backdrop-filter: blur(3px); }
 
 @media (max-width: 640px) {
-  .grid2, .vivo-kpis { grid-template-columns: 1fr; }
+  .grid2 { grid-template-columns: 1fr; }
   .topbar { padding: 8px 12px; } .card { padding: 16px; }
-  .vivo-top > div:last-child { text-align: left; }
+  main { padding: 12px 10px 40px; }
+  /* Terapia en curso: todo en una pantalla de celular, sin desplazarse */
+  .vivo h2 { font-size: 1.1rem; }
+  .vivo hr { margin: 8px 0; }
+  .vivo-top { flex-wrap: nowrap; margin-bottom: 8px; gap: 10px; }
+  .vivo-top span { font-size: .8rem; }
+  .postura { font-size: 1.45rem; } .reloj { font-size: 1.6rem; }
+  .vivo h3 { font-size: .9rem; margin-bottom: 2px; }
+  canvas.live { height: 170px; }
+  .vivo-kpis { grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 6px; }
+  .vivo-kpis .kpi { padding: 8px 10px; } .vivo-kpis .kpi b { font-size: 1.5rem; }
+  .vivo .form-actions { margin-top: 8px; }
+  .vivo .btn { padding: 9px 12px; font-size: .92rem; }
+  .pill { padding: 4px 10px; font-size: .8rem; }
+  .calibrando { padding: 8px 10px; margin-bottom: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* diagnóstico (Ajustes) */
+details summary { cursor: pointer; color: var(--muted); font-weight: 600; padding: 4px 0; }
+.diag { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 10px 0 0; font-size: .88rem; }
+.diag dt { color: var(--muted); } .diag dd { margin: 0; font-variant-numeric: tabular-nums; }
+.diag dd.ok { color: var(--green); } .diag dd.mal { color: var(--amber); }

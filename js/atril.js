@@ -292,11 +292,13 @@
   }
 
   /* ===================================================================
-   * Servidor de la página (servidor/servidor.js): UN WebSocket /ws trae
+   * Conexión en vivo: UN WebSocket /ws con el ESP32 del atril (http://192.168.4.1)
+   * (o con servidor/servidor.js en la versión con laptop). Trae
    *   - binario: paquetes 0xAA 0x55 de la señal cruda del Arduino
    *   - {type:'atril', st}: estado del ESP32 (lo mismo que antes daba /estado)
    *   - {type:'servidor', arduino, atril}: quién está conectado
-   * y lleva las órdenes: {type:'cmd', c} y {type:'musica', l, p}.
+   * y lleva las órdenes: {type:'cmd', c}, {type:'musica', l, p} y {type:'volumen', v}.
+   * Cada 2 s manda {type:'ping', t} y el ESP32 contesta {type:'pong', t}: así se mide el retraso.
    * Se presenta a la app como dos fuentes: emg (señal) y atril (estado).
    * =================================================================== */
   class ServidorLink {
@@ -314,14 +316,19 @@
       this.h.onStatus('connecting');
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       let ws;
-      try { ws = this.ws = new WebSocket(proto + '://' + this.host + '/ws?role=monitor'); }
+      try { ws = this.ws = new WebSocket(proto + '://' + this.host + '/ws'); }
       catch (e) { this.h.onStatus('error', 'dirección del servidor no válida'); return; }
       ws.binaryType = 'arraybuffer';
-      ws.onopen = () => { this.parser.reset(); this.h.onStatus('open'); };
+      ws.onopen = () => {
+        this.parser.reset(); this.h.onStatus('open');
+        clearInterval(this.pinger);
+        this.pinger = setInterval(() => this._enviar({ type: 'ping', t: performance.now() }), 2000);
+      };
       ws.onmessage = ev => {
         if (typeof ev.data !== 'string') { this.parser.push(new Uint8Array(ev.data)); return; }
         let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
         if (m.type === 'servidor') { this.info = m; this.h.onServidor(m); }
+        else if (m.type === 'pong' && typeof m.t === 'number') { this.rtt = performance.now() - m.t; if (this.h.onRtt) this.h.onRtt(this.rtt); }
         else if (m.type === 'atril' && m.st) {
           if (this.boot !== null && m.st.boot !== this.boot) m.st.reinicio = true;
           this.boot = m.st.boot;
@@ -329,8 +336,9 @@
         }
       };
       ws.onclose = () => {
+        clearInterval(this.pinger);
         if (!this.run) return;
-        this.h.onStatus('error', 'sin conexión con el servidor de la página (' + this.host + ')');
+        this.h.onStatus('error', 'sin conexión con el atril (' + this.host + ')');
         setTimeout(() => this._conectar(), 1500);
       };
     }
@@ -338,7 +346,7 @@
       if (!this.ws || this.ws.readyState !== 1) return false;
       this.ws.send(JSON.stringify(obj)); return true;
     }
-    stop() { if (!this.run) return; this.run = false; try { this.ws && this.ws.close(); } catch (e) { /* ya cerrado */ } this.h.onStatus('disconnected'); }
+    stop() { if (!this.run) return; this.run = false; clearInterval(this.pinger); try { this.ws && this.ws.close(); } catch (e) { /* ya cerrado */ } this.h.onStatus('disconnected'); }
   }
 
   EMG.ServidorLink = ServidorLink;

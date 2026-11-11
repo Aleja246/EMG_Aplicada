@@ -1,4 +1,4 @@
-/* ASTRA — interfaz para el fisioterapeuta.
+/* ASTRA — interfaz para el fisioterapeuta (versión sin laptop: la sirve el ESP32 en http://192.168.4.1).
  * Quién hace qué:
  *   Sensor (Arduino)  -> señal EMG (solo se dibuja) y el RMS que va al atril
  *   Atril (ESP32)     -> calibración, detección de la postura, estrellas, luz y música
@@ -18,8 +18,8 @@
   const pct = v => (isFinite(v) && v !== null ? Math.round(v) + ' %' : '—');
   const edadTexto = p => {
     if (p.edadAnios === undefined || p.edadAnios === '') return p.edad || '';
-    const a = +p.edadAnios, m = +(p.edadMeses || 0);
-    return (a ? a + (a === 1 ? ' año' : ' años') : '') + (m ? (a ? ' ' : '') + m + ' meses' : (a ? '' : '0 años'));
+    const a = +p.edadAnios;
+    return a + (a === 1 ? ' año' : ' años');
   };
   const idDe = p => p.codigo || ('AST-' + String(p.id || '').slice(-4));
   let toastTimer;
@@ -74,16 +74,21 @@
   }
 
   /* ---------- registro ---------- */
-  $('form-register').addEventListener('submit', e => {
+  $('form-register').addEventListener('submit', async e => {
     e.preventDefault();
+    const boton = e.target.querySelector('[type=submit]');
+    if (boton.disabled) return;                       // evita registrar dos veces con doble toque
     const fd = new FormData(e.target), p = {};
     fd.forEach((v, k) => { p[k] = typeof v === 'string' ? v.trim() : v; });
+    p.edadAnios = String(parseInt(p.edadAnios, 10));
     p.fechaRegistro = new Date().toISOString();
-    const guardado = E.Store.savePatient(p);
-    if (!guardado) { toast('No se pudo guardar el paciente.'); return; }
-    patient = guardado;
-    toast('Paciente guardado con el ID ' + idDe(guardado));
-    show('patient');
+    boton.disabled = true;
+    try {
+      patient = await E.Store.savePatient(p);
+      toast('Paciente guardado con el ID ' + idDe(patient));
+      show('patient');
+    } catch (err) { /* el aviso ya salió (Store.onError) */ }
+    finally { boton.disabled = false; }
   });
 
   /* ---------- buscar paciente por ID ---------- */
@@ -132,7 +137,9 @@
       chart.push(x, flag);
     }
   }
-  const servidorHost = () => (/^https?:$/.test(location.protocol) ? location.host : (S.servidor || 'localhost:8080'));
+  // El atril (ESP32) sirve la página: la conexión en vivo va al mismo lugar de donde vino la página
+  const servidorHost = () => (/^https?:$/.test(location.protocol) ? location.host : (S.servidor || '192.168.4.1'));
+  let rtt = null;                     // retraso de ida y vuelta con el atril (ms)
 
   async function disconnectAll() {
     const e = emg, a = atril; emg = null; atril = null; sim = null; st = null; link = null; srv = null;
@@ -148,6 +155,7 @@
       onSamples,
       onEstado,
       onServidor,
+      onRtt: v => { rtt = v; },
       onStatus: (s, msg) => {
         if (s === 'connecting' || s === 'open') {
           if (atrilConn.status !== 'connecting') onAtrilStatus('connecting');
@@ -188,7 +196,8 @@
   /* ---------- estado del sistema, en palabras sencillas ---------- */
   function sysInfo() {
     if (sim) return ['demo', 'Modo demostración'];
-    if (atrilConn.status === 'error' && atrilConn.msg !== 'atril') return ['bad', 'Equipo no encontrado'];
+    if (!link) return ['bad', 'Sin conexión con el atril'];
+    if (atrilConn.status === 'error' && atrilConn.msg !== 'atril') return ['bad', 'Sin conexión con el atril'];
     if (atrilConn.status === 'connecting' || (atrilConn.status === 'connected' && !st)) return ['warn', 'Conectando con el equipo…'];
     if (atrilConn.status !== 'connected') return ['bad', 'Atril apagado'];
     if (st && st.modo === 'PARO') return ['bad', 'Paro de emergencia activado'];
@@ -267,7 +276,40 @@
     $('mus-estado').textContent = on
       ? 'Guardado en el atril. Suena una canción cuando el niño sostiene la cabeza y otra cuando se le cae.'
       : 'El atril no está encendido: los cambios se mandarán en cuanto lo esté.';
+    const ed = E.Store.estado;
+    $('datos-estado').textContent = ed.modo === 'indexeddb'
+      ? 'Se guardan solo en este dispositivo y este navegador: ' + ed.pacientes + ' paciente(s), ' + ed.sesiones + ' sesión(es). ' +
+        'Otro celular no los ve. Descarga un respaldo con frecuencia.' + (ed.persistente === false ? ' El navegador puede borrarlos si se queda sin espacio.' : '')
+      : 'Este navegador NO está guardando los registros (' + (ed.error || 'sin IndexedDB') + ').';
+    if ($('diag-box').open) renderDiag();
   }
+  // Diagnóstico de la conexión (para revisar el equipo; no hace falta durante la terapia)
+  function renderDiag() {
+    const a = srv && srv.arduino, d = a && a.diag, c = st && st.cal;
+    const si = (v, ok, no) => [v ? ok : no, v ? 'ok' : 'mal'];
+    const filas = [
+      ['Página ↔ atril', si(atrilConn.status === 'connected', 'conectada', sim ? 'modo demostración' : 'sin conexión')],
+      ['Retraso (ida y vuelta)', [rtt != null && link ? Math.round(rtt) + ' ms' : '—', rtt != null && rtt > 500 ? 'mal' : '']],
+      ['Sensor (Arduino) por WiFi', a ? si(a.conectado, 'conectado' + (a.ip ? ' (' + a.ip + ')' : ''), 'no conectado') : ['—', '']],
+      ['Muestras/s que llegan a esta página', [rx.fs ? Math.round(rx.fs) + ' (se miden 1000)' : '—', rx.fs && Math.abs(rx.fs - 1000) > 100 ? 'mal' : '']],
+      ['Muestras/s que recibe el atril', [a && a.fs ? Math.round(a.fs) : '—', '']],
+      ['Paquetes perdidos (sensor → atril)', [a ? String(a.perdidos) : '—', a && a.perdidos ? 'mal' : '']],
+      ['Paquetes perdidos (atril → página)', [emg && emg.lost != null ? String(emg.lost) : '—', emg && emg.lost ? 'mal' : '']],
+      ['Frecuencia medida en el Arduino', [d && d.fs ? d.fs + ' Hz' : '—', '']],
+      ['Rango de la señal en A0', [d && d.max != null ? (d.min * 5 / 16383).toFixed(2) + ' a ' + (d.max * 5 / 16383).toFixed(2) + ' V' : '—', '']],
+      ['Estado del atril', [st ? st.modo + (st.datos ? '' : ' · sin RMS del opto') : '—', st && !st.datos ? 'mal' : '']],
+      ['RMS actual (opto)', [st ? st.rms + ' mV (mediana ' + f1(st.med) + ')' : '—', '']],
+      ['Reposo de la calibración', [c && c.ok ? f1(c.reposo) + ' ± ' + f1(c.sd) + ' mV' : '—', c && c.inestable ? 'mal' : '']],
+      ['Umbral de activación / relajación', [c && c.ok ? f1(c.uon) + ' / ' + f1(c.uoff) + ' mV' : '—', '']],
+      ['Equipos en la red / páginas abiertas', [srv ? (srv.equipos != null ? srv.equipos : '—') + ' / ' + (srv.paginas != null ? srv.paginas : '—') : '—', '']],
+      ['Memoria libre del atril', [srv && srv.memoria ? Math.round(srv.memoria / 1024) + ' KB' : '—', srv && srv.memoria && srv.memoria < 30000 ? 'mal' : '']],
+      ['Versión del atril', [st && st.v ? st.v : '—', '']]
+    ];
+    $('diag').innerHTML = filas.map(() => '<dt></dt><dd></dd>').join('');
+    const dts = $('diag').querySelectorAll('dt'), dds = $('diag').querySelectorAll('dd');
+    filas.forEach((f, i) => { dts[i].textContent = f[0]; dds[i].textContent = f[1][0]; if (f[1][1]) dds[i].className = f[1][1]; });
+  }
+  $('diag-box').addEventListener('toggle', () => { if ($('diag-box').open) renderDiag(); });
 
   /* ---------- registro de la sesión ---------- */
   const keyOf = (s, sid) => s.boot + ':' + (sid === undefined ? s.sid : sid);
@@ -275,10 +317,13 @@
     rec = {
       start: new Date().toISOString(), key: keyOf(s), t0: s.tSes, base: 0, last: s.tSes, minId: s.nAct,
       abajoS: 0, caidas: 0, maxAbajoS: 0, curAbajoS: 0, eraAbajo: false,
-      acts: [], seen: new Set(), rms: [], umbral: s.cal.uon, recal: 0, pausaS: 0
+      acts: [], seen: new Set(), rms: [], umbral: s.cal.uon, cal: fotoCal(s), recal: 0, pausaS: 0
     };
     toast('La terapia empezó: ASTRA ya está midiendo.');
   }
+  // Lo que dejó la calibración del atril (se guarda con la sesión y va al Excel)
+  const fotoCal = s => ({ reposoMV: s.cal.reposo, sdMV: s.cal.sd, umbralOnMV: s.cal.uon, umbralOffMV: s.cal.uoff, bloques: s.cal.n,
+    factorK: s.cal.k, inestable: !!s.cal.inestable, pocosDatos: !!s.cal.pocos, abajoEsActividad: !!s.abajoAct, version: s.v });
   const recTime = () => (rec ? rec.base + rec.last - rec.t0 : 0);
   function recordUpdate(prev, s) {
     const take = () => {
@@ -293,7 +338,7 @@
     const enSesion = s.modo === 'SESION' || s.modo === 'PAUSA';
     if (enSesion && keyOf(s) !== rec.key) {   // recalibraron: la misma terapia continúa
       rec.base += rec.last - rec.t0; rec.key = keyOf(s); rec.t0 = 0; rec.last = s.tSes; rec.minId = 0;
-      rec.umbral = s.cal.uon; rec.recal++; take();
+      rec.umbral = s.cal.uon; rec.cal = fotoCal(s); rec.recal++; take();
     }
     if (enSesion && keyOf(s) === rec.key) rec.last = s.tSes;
     if (s.modo === 'SESION' && keyOf(s) === rec.key) {
@@ -323,7 +368,7 @@
     const A = {}, enTerapia = view === 'live' || view === 'start';
     if (!sim) {
       if (atrilConn.status === 'error' && atrilConn.msg === 'atril') A.atril = ['crit', 'El atril no responde. Revisa que esté encendido y con batería.'];
-      else if (atrilConn.status === 'error') A.red = ['crit', 'No se encuentra el equipo. Revisa que la ventana del programa de ASTRA siga abierta en esta computadora.'];
+      else if (atrilConn.status === 'error') A.red = ['crit', 'No hay conexión con el atril. Revisa que esté encendido y que este celular esté unido a la red WiFi «' + (srv && srv.red || 'ASTRA') + '»; luego abre http://192.168.4.1'];
       else if (atrilConn.status === 'disconnected' && enTerapia) A.atril = ['crit', 'Sin conexión con el atril.'];
       if (emgConn.status === 'error' && enTerapia) A.emg = ['warn', 'El sensor no está enviando la señal. Revisa que esté encendido y con batería.'];
     }
@@ -387,7 +432,7 @@
   /* ===================================================================
    * Terapia en curso
    * =================================================================== */
-  $('lv-pausa').addEventListener('click', () => sendCmd(st && st.modo === 'PAUSA' ? 'r' : 'p'));
+  $('lv-pausa').addEventListener('click', () => sendCmd('p'));   // el atril alterna pausa / seguir con 'p'
   $('lv-recal').addEventListener('click', () => {
     if (confirm('¿Volver a calibrar? Deja la cabeza del niño apoyada y quieta 10 segundos. El tiempo de la terapia continúa después.')) sendCmd('c');
   });
@@ -448,7 +493,7 @@
     const t = recTime(), abajo = Math.min(t, rec.abajoS), arriba = Math.max(0, t - abajo);
     return {
       patientId: patient.id, codigo: idDe(patient), fecha: rec.start, fisio: localStorage.getItem('emg.fisio') || '',
-      duracionS: t, umbralMV: rec.umbral, recalibraciones: rec.recal, observaciones: '',
+      duracionS: t, umbralMV: rec.umbral, calibracion: rec.cal, recalibraciones: rec.recal, observaciones: '',
       resumen: {
         tiempoArribaS: arriba, tiempoAbajoS: abajo, caidas: rec.caidas, caidaMasLargaS: rec.maxAbajoS,
         pctArriba: t > 0 ? 100 * arriba / t : null, caidasMin: t > 0 ? rec.caidas / (t / 60) : null,
@@ -503,7 +548,7 @@
   function renderPatient() {
     const p = patient; if (!p) return show('patients');
     $('p-id').textContent = idDe(p);
-    const datos = [p.sexo, edadTexto(p), p.gmfcs ? 'GMFCS ' + p.gmfcs : '', p.controlCefalico, p.diagnostico, p.posicion]
+    const datos = [p.sexo, edadTexto(p), p.gmfcs ? 'GMFCS ' + p.gmfcs : '', p.diagnostico]
       .filter(Boolean).join(' · ');
     $('p-datos').textContent = datos + (p.fechaRegistro ? ' · registrado el ' + fmtDate(p.fechaRegistro) : '');
     const ses = E.Store.sessionsFor(p.id);
@@ -567,7 +612,9 @@
       xls.addEventListener('click', () => descargarSesion(s, p));
       const del = document.createElement('button'); del.className = 'btn small ghost'; del.textContent = '🗑';
       del.title = 'Eliminar esta sesión';
-      del.addEventListener('click', () => { if (confirm('¿Eliminar esta sesión del expediente?')) { E.Store.deleteSession(s.id); renderPatient(); } });
+      del.addEventListener('click', () => {
+        if (confirm('¿Eliminar esta sesión del expediente?')) E.Store.deleteSession(s.id).then(renderPatient, () => {});
+      });
       td.append(ver, ' ', xls, ' ', del); tr.appendChild(td); tb.appendChild(tr);
     });
     $('h-vacio').hidden = ses.length > 0;
@@ -592,18 +639,18 @@
   }
   $('ses-cerrar').addEventListener('click', () => { $('ses-card').hidden = true; });
   $('ses-excel').addEventListener('click', () => { if (sesVista) descargarSesion(sesVista, patient); });
-  $('btn-h-notas').addEventListener('click', () => {
+  $('btn-h-notas').addEventListener('click', async () => {
     if (!patient) return;
-    patient.notas = $('h-notas').value; E.Store.savePatient(patient);
-    $('h-notas-ok').textContent = 'Guardado ✓';
+    patient.notas = $('h-notas').value;
+    try { await E.Store.savePatient(patient); $('h-notas-ok').textContent = 'Guardado ✓'; }
+    catch (e) { $('h-notas-ok').textContent = 'No se guardó'; }
   });
 
   /* ---------- Excel ---------- */
   const archivo = (p, extra) => 'ASTRA_' + idDe(p).replace(/[^\w-]/g, '') + '_' + extra + '.xlsx';
   function datosPaciente(p) {
     return [['Paciente', idDe(p)], ['Sexo', p.sexo || ''], ['Edad', edadTexto(p)], ['Nivel funcional (GMFCS)', p.gmfcs || ''],
-      ['Control de cabeza al inicio', p.controlCefalico || ''], ['Diagnóstico', p.diagnostico || ''], ['Posición en terapia', p.posicion || ''],
-      ['Fecha de registro', p.fechaRegistro ? fmtDate(p.fechaRegistro) : '']];
+      ['Diagnóstico', p.diagnostico || ''], ['Fecha de registro', p.fechaRegistro ? fmtDate(p.fechaRegistro) : '']];
   }
   function hojaSesion(r) {
     const u = res(r);
@@ -615,7 +662,12 @@
       ['Tiempo con la cabeza caída', clock(u.tiempoAbajoS)], ['Tiempo cabeza caída (s)', u.tiempoAbajoS != null ? +u.tiempoAbajoS.toFixed(1) : ''],
       ['Número de caídas de cabeza', u.caidas != null ? u.caidas : ''], ['Caída más larga (s)', u.caidaMasLargaS != null ? +u.caidaMasLargaS.toFixed(1) : ''],
       ['Caídas por minuto', u.caidasMin != null ? +u.caidasMin.toFixed(2) : ''],
-      ['Veces que se volvió a calibrar', r.recalibraciones || 0], ['Observaciones', r.observaciones || '']];
+      ['Veces que se volvió a calibrar', r.recalibraciones || 0],
+      ['Calibración: reposo medio (mV)', r.calibracion && r.calibracion.reposoMV != null ? +(+r.calibracion.reposoMV).toFixed(1) : ''],
+      ['Calibración: desviación (mV)', r.calibracion && r.calibracion.sdMV != null ? +(+r.calibracion.sdMV).toFixed(2) : ''],
+      ['Umbral de relajación (mV)', r.calibracion && r.calibracion.umbralOffMV != null ? +(+r.calibracion.umbralOffMV).toFixed(1) : ''],
+      ['Calibración inestable', r.calibracion ? (r.calibracion.inestable ? 'Sí' : 'No') : ''],
+      ['Observaciones', r.observaciones || '']];
   }
   function excelSesion(r, p, senal) {
     const hojas = [
@@ -657,21 +709,21 @@
   /* ---------- ajustes ---------- */
   $('btn-settings').addEventListener('click', () => { renderAjustes(); $('dlg-settings').showModal(); });
   $('btn-sim').addEventListener('click', () => { if (sim) { disconnectAll(); toast('Modo demostración apagado.'); } else startSim(); $('dlg-settings').close(); });
-  $('btn-backup').addEventListener('click', () => E.download('astra-respaldo-' + new Date().toISOString().slice(0, 10) + '.json', E.Store.backup(), 'application/json'));
+  $('btn-backup').addEventListener('click', async () => {
+    try {
+      E.download('ASTRA-respaldo-' + new Date().toISOString().slice(0, 10) + '.json', await E.Store.backup(), 'application/json');
+      toast('Respaldo descargado. Guárdalo en un lugar seguro (contiene datos clínicos).');
+    } catch (e) { toast('No se pudo crear el respaldo: ' + e.message); }
+  });
   $('btn-restore').addEventListener('click', () => $('file-restore').click());
   $('file-restore').addEventListener('change', async e => {
     try {
       const r = await E.Store.restore(await e.target.files[0].text());
-      toast('Importados: ' + r.patients + ' pacientes y ' + r.sessions + ' sesiones.');
-      renderHome();
+      toast('Importados: ' + r.patients + ' pacientes y ' + r.sessions + ' sesiones' +
+        (r.repetidos ? ' (' + r.repetidos + ' ya estaban)' : '') + (r.renombrados ? '. ' + r.renombrados + ' recibieron un ID nuevo porque el suyo ya existía' : '') + '.');
+      renderHome(); renderAjustes();
     } catch (err) { toast('No se pudo importar: ' + err.message); }
     e.target.value = '';
-  });
-  $('btn-subir').addEventListener('click', async () => {
-    const loc = E.Store.datosLocales();
-    if (!confirm('¿Pasar a esta computadora ' + loc.patients.length + ' paciente(s) y ' + loc.sessions.length + ' sesión(es) guardados antes en el navegador?')) return;
-    try { const r = await E.Store.restore(loc); toast('Listo: ' + r.patients + ' pacientes y ' + r.sessions + ' sesiones.'); renderHome(); }
-    catch (e) { toast('No se pudo: ' + e.message); }
   });
 
   /* ---------- arranque ---------- */
@@ -697,11 +749,9 @@
   window.addEventListener('beforeunload', e => { if (rec || fin) { e.preventDefault(); e.returnValue = ''; } });
   E.Store.onError = toast;
   show('home');
-  E.Store.conectar().then(remoto => {
-    if (!remoto) { $('sys-text').textContent = 'Equipo no encontrado'; $('sys').className = 'sys bad'; return; }
-    const loc = E.Store.datosLocales();
-    $('btn-subir').hidden = !(loc.patients.length || loc.sessions.length);
-    renderHome();
-    conectar();
+  // Registros de este navegador (IndexedDB) y, si la página vino del atril, conexión en vivo
+  E.Store.conectar().then(() => {
+    renderHome(); if (view === 'patients') renderPatients();
+    if (/^https?:$/.test(location.protocol)) conectar();
   });
 })();

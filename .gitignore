@@ -7,3 +7,8 @@ node_modules/
 
 # Datos de pacientes del servidor (nunca a GitHub)
 servidor/datos/
+
+# Claves WiFi reales de ASTRA (copia de credenciales_ejemplo.h): nunca a GitHub
+credenciales.h
+# Respaldos de la pagina (contienen registros clinicos)
+ASTRA-respaldo-*.json

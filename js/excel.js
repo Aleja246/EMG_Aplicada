@@ -68,10 +68,5 @@
   }
 
   EMG.xlsxBlob = libro;
-  EMG.xlsx = function (archivo, hojas) {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(libro(hojas)); a.download = archivo;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  };
+  EMG.xlsx = function (archivo, hojas) { EMG.descargarBlob(archivo, libro(hojas)); };
 })();

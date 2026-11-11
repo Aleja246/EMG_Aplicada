@@ -41,8 +41,8 @@
         <label>Sexo *
           <select name="sexo" required><option value="">Selecciona…</option><option>Femenino</option><option>Masculino</option></select>
         </label>
-        <label>Edad *
-          <span class="fila-edad"><input name="edadAnios" type="number" min="0" max="25" required placeholder="años"><input name="edadMeses" type="number" min="0" max="11" placeholder="meses"></span>
+        <label>Edad (años) *
+          <input name="edadAnios" type="number" inputmode="numeric" min="0" max="25" step="1" required placeholder="años">
         </label>
         <label>Nivel funcional (GMFCS) *
           <select name="gmfcs" required>
@@ -52,23 +52,13 @@
             <option value="V">V · transportado en silla de ruedas</option>
           </select>
         </label>
-        <label>Control de cabeza al inicio *
-          <select name="controlCefalico" required>
-            <option value="">Selecciona…</option><option>No sostiene la cabeza</option><option>La sostiene unos segundos</option>
-            <option>La sostiene con apoyo del tronco</option><option>La sostiene sin apoyo por poco tiempo</option>
-          </select>
-        </label>
         <label>Diagnóstico (opcional)
           <select name="diagnostico">
             <option value="">—</option><option>Parálisis cerebral espástica</option><option>Parálisis cerebral discinética</option>
             <option>Parálisis cerebral atáxica</option><option>Parálisis cerebral mixta</option><option>Hipotonía</option><option>Otro / en estudio</option>
           </select>
         </label>
-        <label>Posición habitual en terapia (opcional)
-          <select name="posicion"><option value="">—</option><option>Prono sobre cuña</option><option>Prono sobre rollo</option><option>Sentado con apoyo</option><option>Otra</option></select>
-        </label>
       </div>
-      <label>Observaciones (opcional)<textarea name="notas" rows="2" placeholder="p. ej. usa lentes, se cansa rápido, prefiere música suave…"></textarea></label>
       <div class="form-actions">
         <button class="btn ghost" type="button" data-nav="home">← Atrás</button>
         <button class="btn" type="submit">Guardar paciente</button>
@@ -228,13 +218,18 @@
     </div>
     <label>Volumen <b id="vol-val">—</b><input type="range" id="vol" min="0" max="30" step="1"></label>
     <hr>
-    <h3>Datos</h3>
+    <h3>Registros</h3>
+    <p class="muted small-text" id="datos-estado"></p>
     <div class="form-actions left">
       <button class="btn ghost small" type="button" id="btn-backup">Descargar respaldo</button>
       <button class="btn ghost small" type="button" id="btn-restore">Importar respaldo…</button>
-      <input type="file" id="file-restore" accept=".json" hidden>
-      <button class="btn ghost small" type="button" id="btn-subir" hidden>Subir datos guardados en este navegador</button>
+      <input type="file" id="file-restore" accept=".json,application/json" hidden>
     </div>
+    <hr>
+    <details id="diag-box">
+      <summary>Diagnóstico de la conexión</summary>
+      <dl class="diag" id="diag"></dl>
+    </details>
     <hr>
     <div class="form-actions">
       <button class="btn ghost small" type="button" id="btn-sim">Modo demostración (sin equipo)</button>

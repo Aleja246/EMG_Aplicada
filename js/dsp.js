@@ -10,7 +10,7 @@
 
   EMG.DEFAULTS = {
     cfgVer: 2,       // sube cuando cambian los valores por defecto (descarta ajustes viejos de la v1)
-    servidor: 'localhost:8080', // servidor/servidor.js (solo se usa si abres index.html como archivo)
+    servidor: '192.168.4.1',   // el atril (ESP32); solo se usa si abres index.html como archivo
     emgUsb: false,   // true: la señal EMG llega por USB (Web Serial) en vez de por el servidor
     fs: 1000,        // Hz, igual que FS en arduino_emg.ino
     adcMax: 16383,   // 14 bits
