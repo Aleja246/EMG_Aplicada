@@ -37,7 +37,8 @@
   let link = null, srv = null, sim = null, st = null;
   let rec = null;        // sesión en curso
   let fin = null;        // sesión terminada, esperando que la guarden
-  const rx = { lastData: 0, samples: 0, lastCount: 0, lastT: performance.now(), fs: 0 };
+  const rx = { lastData: 0, samples: 0, lastCount: 0, lastT: performance.now(), fs: 0, apartadas: 0 };
+  let senalVivo = true;               // Ajustes > Diagnóstico: apagar la señal en vivo para comparar el ruido
   let prevCrit = new Set();
 
   function rebuildDsp() {
@@ -128,13 +129,16 @@
     if (status !== 'connected') st = null;
     renderSys();
   }
+  // Muestras crudas del Arduino. Bit 15 = tomada mientras el WiFi del Arduino transmitía (v5.1-AP):
+  // los filtros de la pantalla la reciben igual (no se inventa nada), pero no se dibuja.
   function onSamples(arr) {
     rx.lastData = performance.now(); rx.samples += arr.length;
     const flag = st && st.modo === 'SESION' ? (st.abajo ? 1 : 2) : 0;
     for (let i = 0; i < arr.length; i++) {
-      const raw = arr[i], x = proc.process(raw);
-      quality.feed(raw, proc.hpOut, x);
-      chart.push(x, flag);
+      const tx = arr[i] & 0x8000, raw = arr[i] & 0x3FFF, x = proc.process(raw);
+      if (tx) rx.apartadas++;
+      else quality.feed(raw, proc.hpOut, x);
+      chart.push(tx ? NaN : x, flag);
     }
   }
   // El atril (ESP32) sirve la página: la conexión en vivo va al mismo lugar de donde vino la página
@@ -157,6 +161,7 @@
       onServidor,
       onRtt: v => { rtt = v; },
       onStatus: (s, msg) => {
+        if (s === 'open' && link) setTimeout(() => link && link.atril.senal(senalVivo), 200);   // el atril sabe si esta pagina quiere la señal
         if (s === 'connecting' || s === 'open') {
           if (atrilConn.status !== 'connecting') onAtrilStatus('connecting');
           if (emgConn.status !== 'connecting') onEmgStatus('connecting');
@@ -225,10 +230,17 @@
   }
 
   /* ---------- música y volumen (lo único técnico que ve el fisio) ---------- */
+  // Cabeza abajo: pistas 001-003 del DFPlayer; cabeza arriba: 004-006
   const MUS_OPC = {
-    abajo: [['1,2,3', 'Las tres, una tras otra'], ['1,1,1', 'Solo la canción 1'], ['2,2,2', 'Solo la canción 2'], ['3,3,3', 'Solo la canción 3']],
-    arriba: [['4,5,6', 'Las tres, una tras otra'], ['4,4,4', 'Solo la canción 1'], ['5,5,5', 'Solo la canción 2'], ['6,6,6', 'Solo la canción 3']]
+    abajo: [['1,1,1', 'Canción 1'], ['2,2,2', 'Canción 2'], ['3,3,3', 'Canción 3']],
+    arriba: [['4,4,4', 'Canción 1'], ['5,5,5', 'Canción 2'], ['6,6,6', 'Canción 3']]
   };
+  const musValida = (l, v) => MUS_OPC[l].some(o => o[0] === v);
+  // Lo elegido en esta página (o Canción 1 si no hay elección válida: p. ej. la lista vieja "las tres")
+  function musElegida(l) {
+    if (!musValida(l, S['mus_' + l])) { S['mus_' + l] = MUS_OPC[l][0][0]; E.Store.saveSettings(S); }
+    return S['mus_' + l];
+  }
   const musEnviado = { abajo: 0, arriba: 0 };
   function initMusica() {
     for (const l of ['abajo', 'arriba']) {
@@ -255,8 +267,8 @@
   function syncMusica(s) {
     if (!s.musica) return;
     for (const l of ['abajo', 'arriba']) {
-      const q = S['mus_' + l];
-      if (q && q !== s.musica[l].join(',') && performance.now() - musEnviado[l] > 4000) enviarMusica(l, q, false);
+      const q = musElegida(l);
+      if (q !== s.musica[l].join(',') && performance.now() - musEnviado[l] > 4000) enviarMusica(l, q, false);
     }
     if (S.volumen !== undefined && s.musica.vol !== undefined && s.musica.vol !== S.volumen &&
         performance.now() - (musEnviado.vol || 0) > 4000) { musEnviado.vol = performance.now(); atril.volumen(S.volumen); }
@@ -264,15 +276,15 @@
   function renderAjustes() {
     const m = st && st.musica, on = !!m && equipoListo();
     for (const l of ['abajo', 'arriba']) {
-      const sel = $('mus-' + l), v = S['mus_' + l] || (m ? m[l].join(',') : MUS_OPC[l][0][0]);
-      if (![...sel.options].some(o => o.value === v)) {
-        const o = document.createElement('option'); o.value = v; o.textContent = 'Personalizada'; sel.appendChild(o);
-      }
-      if (document.activeElement !== sel) sel.value = v;
+      const sel = $('mus-' + l);
+      if (document.activeElement !== sel) sel.value = musElegida(l);
     }
     const vol = S.volumen !== undefined ? S.volumen : (m && m.vol !== undefined ? m.vol : 15);
     if (document.activeElement !== $('vol')) $('vol').value = vol;
     $('vol-val').textContent = vol;
+    const sens = st && st.cal && st.cal.sens ? st.cal.sens : patient && patient.sensibilidad || 2;
+    if (document.activeElement !== $('aj-sens')) $('aj-sens').value = String(sens);
+    $('aj-sens').disabled = !(equipoListo() || sim);
     $('mus-estado').textContent = on
       ? 'Guardado en el atril. Suena una canción cuando el niño sostiene la cabeza y otra cuando se le cae.'
       : 'El atril no está encendido: los cambios se mandarán en cuanto lo esté.';
@@ -295,12 +307,19 @@
       ['Muestras/s que recibe el atril', [a && a.fs ? Math.round(a.fs) : '—', '']],
       ['Paquetes perdidos (sensor → atril)', [a ? String(a.perdidos) : '—', a && a.perdidos ? 'mal' : '']],
       ['Paquetes perdidos (atril → página)', [emg && emg.lost != null ? String(emg.lost) : '—', emg && emg.lost ? 'mal' : '']],
-      ['Frecuencia medida en el Arduino', [d && d.fs ? d.fs + ' Hz' : '—', '']],
+      ['Frecuencia medida en el Arduino', [d && d.fs ? d.fs + ' Hz' : '—', d && d.fs && Math.abs(d.fs - 1000) > 20 ? 'mal' : '']],
+      ['Señal en vivo del sensor', [d && d.sen != null ? (d.sen ? 'se está enviando' : 'apagada') : '—', '']],
+      ['Muestras apartadas por el WiFi (último s)', [d && d.tx != null ? d.tx + ' de 1000 (no cuentan para el RMS)' : '—', '']],
+      ['Ruido mientras transmite / sin transmitir', [d && d.rOk != null ? f1(d.rTx) + ' / ' + f1(d.rOk) + ' mV' : '—', d && d.rTx > 2 * d.rOk && d.rOk > 0 ? 'mal' : '']],
+      ['Envío WiFi más lento (último s)', [d && d.wMax != null ? d.wMax + ' ms' : '—', d && d.wMax > 60 ? 'mal' : '']],
+      ['Pausas de la señal por WiFi lento', [d && d.lentos != null ? String(d.lentos) : '—', d && d.lentos ? 'mal' : '']],
+      ['Mayor espera entre datos al atril (10 s)', [d && d.opto ? d.opto + ' ms (normal: 100)' : '—', d && d.opto > 250 ? 'mal' : '']],
       ['Rango de la señal en A0', [d && d.max != null ? (d.min * 5 / 16383).toFixed(2) + ' a ' + (d.max * 5 / 16383).toFixed(2) + ' V' : '—', '']],
       ['Estado del atril', [st ? st.modo + (st.datos ? '' : ' · sin RMS del opto') : '—', st && !st.datos ? 'mal' : '']],
       ['RMS actual (opto)', [st ? st.rms + ' mV (mediana ' + f1(st.med) + ')' : '—', '']],
       ['Reposo de la calibración', [c && c.ok ? f1(c.reposo) + ' ± ' + f1(c.sd) + ' mV' : '—', c && c.inestable ? 'mal' : '']],
       ['Umbral de activación / relajación', [c && c.ok ? f1(c.uon) + ' / ' + f1(c.uoff) + ' mV' : '—', '']],
+      ['Sensibilidad', [c && c.sens ? ['', 'más sensible', 'normal', 'menos sensible'][c.sens] : '—', '']],
       ['Equipos en la red / páginas abiertas', [srv ? (srv.equipos != null ? srv.equipos : '—') + ' / ' + (srv.paginas != null ? srv.paginas : '—') : '—', '']],
       ['Memoria libre del atril', [srv && srv.memoria ? Math.round(srv.memoria / 1024) + ' KB' : '—', srv && srv.memoria && srv.memoria < 30000 ? 'mal' : '']],
       ['Versión del atril', [st && st.v ? st.v : '—', '']]
@@ -310,6 +329,19 @@
     filas.forEach((f, i) => { dts[i].textContent = f[0]; dds[i].textContent = f[1][0]; if (f[1][1]) dds[i].className = f[1][1]; });
   }
   $('diag-box').addEventListener('toggle', () => { if ($('diag-box').open) renderDiag(); });
+  $('aj-sens').addEventListener('change', () => {
+    const n = +$('aj-sens').value;
+    if (!atril || !atril.sensibilidad) return;
+    atril.sensibilidad(n).then(ok => toast(ok ? 'Sensibilidad cambiada: el atril recalculó el umbral.' : 'El atril no recibió la sensibilidad.'));
+    if (patient && (patient.sensibilidad || 2) !== n) { patient.sensibilidad = n; E.Store.savePatient(patient).catch(() => {}); }
+  });
+  $('btn-senal').addEventListener('click', () => {
+    senalVivo = !senalVivo;
+    if (atril && atril.senal) atril.senal(senalVivo);
+    if (senalVivo && link) link.parser.lastSeq = -1;   // la señal vuelve a empezar: ese salto no es pérdida
+    $('btn-senal').textContent = senalVivo ? 'Apagar la señal en vivo' : 'Encender la señal en vivo';
+    toast(senalVivo ? 'Señal en vivo encendida.' : 'Señal en vivo apagada: el sensor deja de transmitirla (el atril sigue funcionando).');
+  });
 
   /* ---------- registro de la sesión ---------- */
   const keyOf = (s, sid) => s.boot + ':' + (sid === undefined ? s.sid : sid);
@@ -407,6 +439,7 @@
     $('st-fisios').innerHTML = fisios.map(() => '<option></option>').join('');
     $('st-fisios').querySelectorAll('option').forEach((o, i) => { o.value = fisios[i]; });
     $('st-fisio').value = localStorage.getItem('emg.fisio') || '';
+    $('st-sens').value = String(patient.sensibilidad || 2);
     show('start'); renderStart();
   });
   $('st-atras').addEventListener('click', () => show('patient'));
@@ -425,6 +458,9 @@
     if (!fisio) { toast('Escribe quién dirige la sesión.'); $('st-fisio').focus(); return; }
     localStorage.setItem('emg.fisio', fisio);
     rec = null; fin = null;
+    const sens = +$('st-sens').value || 2;          // se guarda con el paciente y se manda al atril antes de calibrar
+    if ((patient.sensibilidad || 2) !== sens) { patient.sensibilidad = sens; E.Store.savePatient(patient).catch(() => {}); }
+    if (atril && atril.sensibilidad) atril.sensibilidad(sens);
     if (st && (st.modo === 'SESION' || st.modo === 'PAUSA')) sendCmd('c');   // calibra de nuevo para esta sesión
     show('live'); renderLive();
   });
@@ -482,7 +518,7 @@
     $('lv-caidas').textContent = rec ? rec.caidas : 0;
     const cal = st && st.cal && st.cal.ok;
     $('lv-pie').textContent = (cal ? 'Calibración completada' : 'Falta calibrar') + ' · ' +
-      (emgConn.status === 'connected' || sim ? 'Señal disponible' : 'Sin señal del sensor');
+      (!senalVivo ? 'Señal en vivo apagada (Ajustes)' : emgConn.status === 'connected' || sim ? 'Señal disponible' : 'Sin señal del sensor');
     $('lv-pausa').textContent = st && st.modo === 'PAUSA' ? '▶ Continuar' : '❚❚ Pausar';
   }
 

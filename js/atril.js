@@ -65,6 +65,10 @@
     async musica(lista, p) {
       try { await this.be.musica(lista, p); return true; } catch (e) { return false; }
     }
+    async sensibilidad(n) {
+      try { await this.be.sensibilidad(n); return true; } catch (e) { return false; }
+    }
+    async senal() { return true; }
     async volumen(v) {
       try { await this.be.volumen(v); return true; } catch (e) { return false; }
     }
@@ -76,7 +80,7 @@
    * Recibe un RMS (mV) cada 100 ms con feedBlock(), como el ESP32 por el opto.
    * =================================================================== */
   const C = {
-    CAL_MS: 10000, DESC_MS: 1000, MIN_MUESTRAS: 20, CV_MAX: 0.5, K_INICIAL: 2, MARGEN: 2, OFF: 0.6,
+    CAL_MS: 10000, DESC_MS: 1000, MIN_MUESTRAS: 20, CV_MAX: 0.5, K_INICIAL: 3, MARGEN: 2, OFF: 0.6,
     N_MED: 5, CONFIRMAR: 300, HOLGURA: 50, WATCHDOG: 500, V_LENTO: 600, V_RAPIDO: 1000, T_ACEL: 2000,
     N_CANCIONES: 3, ABAJO_MIN: 1000, ENTRE_CANCIONES: 5000
   };
@@ -108,7 +112,13 @@
     _ms() { return performance.now(); }
     _datosOK() { return this.hayDatos && this._ms() - this.tDato < C.WATCHDOG; }
     _abajo() { return this.abajoAct ? this.activo : !this.activo; }
-    _umbrales() { this.uon = this.reposo + Math.max(this.k * this.sd, C.MARGEN); this.uoff = this.reposo + C.OFF * (this.uon - this.reposo); }
+    _umbrales() { this.uon = this.reposo + Math.max(this.k * this.sd, C.MARGEN, (this.rel || 0.2) * this.reposo); this.uoff = this.reposo + C.OFF * (this.uon - this.reposo); }
+    sensibilidad(n) {     // como el atril v8.1: 1 mas sensible, 2 normal, 3 menos sensible
+      if (!(n >= 1 && n <= 3)) return Promise.resolve({ ok: false });
+      this.sens = n; this.k = [2, 3, 4][n - 1]; this.rel = [0.1, 0.2, 0.35][n - 1];
+      this._msg('>> Sensibilidad ' + n); if (this.calibrado) { this._umbrales(); this._imprimir(); }
+      return Promise.resolve({ ok: true });
+    }
     _imprimir() {
       this._msg('---- Calibracion ----');
       this._msg('Reposo: ' + Math.round(this.reposo) + ' mV (SD ' + this.sd.toFixed(1) + ')');
@@ -132,7 +142,7 @@
     _cerrar() { this._terminarActivacion(this.tBajo || this._ms()); }
     _iniciarCalibracion() {
       this._cerrar();
-      this.modo = 'CALIBRANDO'; this.tCal = this._ms(); this.nRep = 0; this.sR = this.s2R = 0;
+      this.modo = 'CALIBRANDO'; this.tCal = this._ms(); this.nRep = 0; this.sR = this.s2R = 0; this.valsR = [];
       this._msg('>> CALIBRACION BASAL: cabeza apoyada y estable durante 10 s (luz azul).');
       this._msg('>> Se descarta el primer segundo; no hagas contracciones voluntarias.');
     }
@@ -145,7 +155,10 @@
       this.sid++; this.msSes = 0;
       if (this.pocos) this._msg('!! Calibracion basal con solo ' + this.nRep + ' bloques: se conservan los umbrales anteriores. Repite con c o BOOT.');
       else {
-        const media = this.sR / this.nRep, sd = Math.sqrt(Math.max(this.s2R / this.nRep - media * media, 0));
+        // como el atril v8.1: mediana y MAD (robustas a un movimiento breve durante la calibracion)
+        const v = (this.valsR || []).slice().sort((a, b) => a - b), mitad = a => (a.length % 2 ? a[a.length >> 1] : (a[a.length / 2 - 1] + a[a.length / 2]) / 2);
+        const media = v.length ? mitad(v) : this.sR / this.nRep;
+        const sd = v.length ? 1.4826 * mitad(v.map(x => Math.abs(x - media)).sort((a, b) => a - b)) : 0;
         this.reposo = media; this.sd = Math.max(sd, 0.5);
         this.inestable = media > 0 && sd / media > C.CV_MAX;
         if (this.inestable) this._msg('!! RMS basal inestable (variacion > 50 % de la media). Revisa electrodos;');
@@ -183,7 +196,7 @@
       let flag = 0;
       if (this.modo === 'CALIBRANDO') {
         if (ahora - this.tCal >= C.DESC_MS && this.ventana.length === C.N_MED) {
-          this.sR += this.med; this.s2R += this.med * this.med; this.nRep++; flag = 2;
+          this.sR += this.med; this.s2R += this.med * this.med; this.nRep++; (this.valsR = this.valsR || []).push(this.med); flag = 2;
         }
       } else if (this.modo === 'SESION') {
         this.nivel = Math.min(1, Math.max(0, (this.med - this.reposo) / Math.max(this.uon - this.reposo, 1)));
@@ -278,7 +291,7 @@
         durAct: this.activo ? r1((ahora - this.tIni) / 1000) : 0,
         cal: { ok: this.calibrado ? 1 : 0, restante: this.modo === 'CALIBRANDO' ? r1(Math.max(0, C.CAL_MS - tc) / 1000) : 0, total: C.CAL_MS / 1000, desc: C.DESC_MS / 1000,
           n: this.modo === 'CALIBRANDO' ? this.nRep : this.calN, nMin: C.MIN_MUESTRAS, reposo: r1(this.reposo), sd: Math.round(this.sd * 100) / 100,
-          cv: this.reposo > 0 ? Math.round(1000 * this.sd / this.reposo) / 1000 : 0, cvMax: C.CV_MAX, k: this.k, margen: C.MARGEN, koff: C.OFF,
+          cv: this.reposo > 0 ? Math.round(1000 * this.sd / this.reposo) / 1000 : 0, cvMax: C.CV_MAX, k: this.k, margen: C.MARGEN, rel: this.rel || 0.2, sens: this.sens || 2, koff: C.OFF,
           uon: r1(this.uon), uoff: r1(this.uoff), pocos: this.pocos ? 1 : 0, inestable: this.inestable ? 1 : 0 },
         sid: this.sid, nAct: this.nActiv, tAct: r1(this.tActMs / 1000), tSes: r1(this.msSes / 1000), velE: this._velE(),
         cancion: this.cancion, orden: this.orden, malas: 0, rssi: -40,
@@ -308,7 +321,8 @@
       const link = this;
       this.emg = { kind: 'servidor', get lost() { return link.parser.lost; }, stop() { link.stop(); } };
       this.atril = { kind: 'servidor', cmd: c => link._enviar({ type: 'cmd', c }), musica: (l, p) => link._enviar({ type: 'musica', l, p }),
-        volumen: v => link._enviar({ type: 'volumen', v }), stop() { link.stop(); } };
+        volumen: v => link._enviar({ type: 'volumen', v }), sensibilidad: n => link._enviar({ type: 'sensibilidad', n }),
+        senal: on => link._enviar({ type: 'senal', on: !!on }), stop() { link.stop(); } };
       this._conectar();
     }
     _conectar() {

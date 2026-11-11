@@ -141,10 +141,17 @@
     <div class="card form-card">
       <h2>Nueva sesión · <span class="id-tag" id="st-id"></span></h2>
       <label>Fisioterapeuta responsable *<input id="st-fisio" list="st-fisios" placeholder="Nombre de quien dirige la sesión" autocomplete="off"><datalist id="st-fisios"></datalist></label>
+      <label>Sensibilidad de la detección
+        <select id="st-sens">
+          <option value="2">Normal (recomendada)</option>
+          <option value="1">Más sensible: detecta caídas leves</option>
+          <option value="3">Menos sensible: si hay espasmos o falsas alarmas</option>
+        </select>
+      </label>
       <ol class="pasos">
         <li>Coloca los electrodos y enciende el sensor y el atril.</li>
-        <li>Acomoda al niño con la <b>cabeza apoyada y tranquila</b>.</li>
-        <li>Pulsa <b>Comenzar</b>: ASTRA se calibra durante 10 segundos y la sesión empieza sola.</li>
+        <li>Acomoda al niño con la <b>cabeza apoyada y tranquila</b> (respaldo o cuña). Que no hable ni ría durante la calibración.</li>
+        <li>Pulsa <b>Comenzar</b>: ASTRA se calibra durante 10 segundos y la sesión empieza sola. Si el niño se movió mucho, usa <b>Volver a calibrar</b>.</li>
       </ol>
       <div class="estado-grande" id="st-estado"></div>
       <div class="form-actions">
@@ -217,6 +224,13 @@
       <label>Canción con la cabeza ABAJO<select id="mus-abajo"></select></label>
     </div>
     <label>Volumen <b id="vol-val">—</b><input type="range" id="vol" min="0" max="30" step="1"></label>
+    <label>Sensibilidad de la detección (se aplica al momento, sin volver a calibrar)
+      <select id="aj-sens">
+        <option value="2">Normal (recomendada)</option>
+        <option value="1">Más sensible: detecta caídas leves</option>
+        <option value="3">Menos sensible: si hay espasmos o falsas alarmas</option>
+      </select>
+    </label>
     <hr>
     <h3>Registros</h3>
     <p class="muted small-text" id="datos-estado"></p>
@@ -229,6 +243,8 @@
     <details id="diag-box">
       <summary>Diagnóstico de la conexión</summary>
       <dl class="diag" id="diag"></dl>
+      <p class="muted small-text">Para comparar el ruido: apaga la señal en vivo unos segundos y mira si baja «Ruido sin transmitir» en el Serial Plotter o la pantalla.</p>
+      <button class="btn ghost small" type="button" id="btn-senal">Apagar la señal en vivo</button>
     </details>
     <hr>
     <div class="form-actions">

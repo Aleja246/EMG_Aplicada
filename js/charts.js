@@ -37,12 +37,13 @@
       let target = 0.02;
       for (let c = 0; c < cols; c++) {
         const i0 = Math.floor(c * N / cols), i1 = Math.max(i0 + 1, Math.floor((c + 1) * N / cols));
-        let lo = 0, hi = 0, f = 0;
+        let lo = Infinity, hi = -Infinity, f = 0;
         for (let i = i0; i < i1; i++) {
           const j = (this.w + i) % N, v = this.sig[j];
-          if (v < lo) lo = v; if (v > hi) hi = v;
+          if (v < lo) lo = v; if (v > hi) hi = v;               // NaN (muestra apartada) no cuenta
           if (this.flag[j] > f) f = this.flag[j];
         }
+        if (lo === Infinity) { lo = c ? mn[c - 1] : 0; hi = c ? mx[c - 1] : 0; }   // columna sin muestras validas: como la anterior
         mn[c] = lo; mx[c] = hi; fl[c] = f;
         target = Math.max(target, -lo, hi);
       }

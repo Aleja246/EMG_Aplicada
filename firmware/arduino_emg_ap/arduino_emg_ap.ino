@@ -1,6 +1,24 @@
 /*
   =====================================================================
-   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5-AP
+   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5.1-AP
+  ---------------------------------------------------------------------
+   v5.1-AP (senal limpia con el WiFi encendido):
+     - Cada envio por WiFi hace que el modulo WiFi del R4 consuma corriente de
+       golpe; el ADC mide contra los 5 V de la placa, asi que esas muestras
+       salen movidas. Ahora las muestras tomadas MIENTRAS se transmite (y
+       TX_COLA_MS despues) se APARTAN del RMS (el del opto y el del Serial
+       Plotter). Los filtros siguen recibiendo TODAS las muestras, como antes.
+       Sin WiFi no se aparta nada: el RMS es exactamente el de siempre.
+     - El envio por WiFi se hace justo DESPUES de mandar la linea al opto
+       (10 veces por segundo, antes 25): la siguiente linea tiene ~100 ms de
+       margen aunque el modulo WiFi tarde.
+     - Si un envio tarda mas de ENVIO_LENTO_MS, la senal en vivo se pausa 3 s
+       (el opto nunca se pausa).
+     - El atril puede pedir "S" (mandar la senal en vivo) o "N" (no mandarla):
+       no se manda si no hay ninguna pagina abierta.
+     - En el paquete crudo, el bit 15 marca las muestras apartadas (la pagina
+       las sabe distinguir). El diagnostico informa cuantas, el ruido con y sin
+       transmision, el envio mas lento y la mayor espera entre lineas del opto.
   ---------------------------------------------------------------------
    VERSION SIN LAPTOP: es el mismo arduino_emg.ino v5, linea por linea.
    Solo cambia a donde se conecta por WiFi:
@@ -133,7 +151,10 @@ const char SERVIDOR_IP[]   = "192.168.4.1";
 const uint16_t PUERTO_SERVIDOR = 9001;
 const uint16_t PUERTO_AVISO    = 9999;
 const bool USB_PARA_PAGINA = false;            // true: paquetes crudos por USB en vez del Serial Plotter
-const char VERSION_EMG[]   = "5-AP";
+const char VERSION_EMG[]   = "5.1-AP";
+const uint8_t  TX_COLA_MS      = 5;             // ms que se siguen apartando despues de cada envio WiFi
+const uint32_t ENVIO_LENTO_MS  = 60;            // un envio mas lento que esto pausa la senal en vivo 3 s
+const uint16_t MARCA_TX        = 0x8000;        // bit 15 de una muestra cruda: tomada durante un envio WiFi
 
 // ------------------------- Notch biquad (forma directa II transpuesta) --
 struct Notch {
@@ -152,6 +173,14 @@ float dc = 2.5f;
 double s_bruto = 0, s_60 = 0, s_arm = 0;   // RMS en bloques de N_BLOQUE muestras
 int cuenta = 0;
 int bloquesHechos = 0;
+// v5.1: muestras apartadas porque se tomaron mientras el WiFi transmitia
+int nLimpias = 0;                       // muestras del bloque que cuentan para el RMS
+double t_bruto = 0, t_60 = 0, t_arm = 0;   // las apartadas (por si hubiera que usarlas todas)
+volatile bool wifiOcupado = false;      // el loop esta mandando algo por WiFi
+uint8_t colaTx = 0;                     // ms que se siguen apartando despues de mandar
+volatile uint32_t apartadas = 0;        // total de muestras apartadas
+volatile float rmsTxMv = 0;             // SinArm de las muestras apartadas del ultimo bloque que tuvo (mV)
+volatile float rmsLimpioMv = 0;         // SinArm del ultimo bloque, sin las apartadas (mV)
 
 // ---- Muestras crudas: la interrupcion escribe, el loop lee ----
 const uint32_t N_CRUDO = 2048;      // 2 s de reserva (potencia de 2)
@@ -190,6 +219,12 @@ uint32_t tAviso = 0;                          // ultimo aviso UDP recibido
 uint32_t sigWifi = 0, sigUsb = 0;             // siguiente muestra a mandar
 uint32_t tRevisar = 0, tEnvio = 0, tDiag = 0, tIntento = 0, tRed = 0;
 bool redAntes = false;
+// v5.1: senal en vivo ordenada y medida
+bool enviarSenal = true;                      // el atril manda "S" / "N"
+bool hayHueco = false;                        // acaba de salir una linea al opto
+uint32_t pausaSenalHasta = 0;                 // senal en vivo pausada por un envio lento
+uint32_t envioMax = 0, nLentos = 0, tRevisarOrden = 0, apartadasAntes = 0, tApartadas = 0, apartadasSeg = 0;
+uint32_t tOptoMax = 0;
 
 // ======================================================================
 //  Muestreo (interrupcion a FS). Mismo procesamiento que v2.
@@ -198,10 +233,13 @@ void alMuestrear(timer_callback_args_t *) {
   if (PIN_MUESTREO >= 0) digitalWrite(PIN_MUESTREO, HIGH);
 
   int cuentaAdc = analogRead(PIN_EMG);
+  // v5.1: esta muestra se tomo mientras (o justo despues de que) el WiFi transmitia?
+  bool tx = wifiOcupado || colaTx;
+  if (wifiOcupado) colaTx = TX_COLA_MS; else if (colaTx) colaTx--;
   ultimoAdc = (uint16_t)cuentaAdc;
   if (cuentaAdc < minAcum) minAcum = cuentaAdc;
   if (cuentaAdc > maxAcum) maxAcum = cuentaAdc;
-  crudo[nCrudo & (N_CRUDO - 1)] = (uint16_t)cuentaAdc;
+  crudo[nCrudo & (N_CRUDO - 1)] = (uint16_t)cuentaAdc | (tx ? MARCA_TX : 0);
   nCrudo = nCrudo + 1;
 
   float v = cuentaAdc * V_REF / ADC_MAX;
@@ -212,18 +250,33 @@ void alMuestrear(timer_callback_args_t *) {
   float ya = x;
   for (int k = 0; k < nArm; k++) ya = arm[k].run(ya);
 
-  s_bruto += (double)x * x;
-  s_60    += (double)y60 * y60;
-  s_arm   += (double)ya * ya;
+  if (!tx) {
+    s_bruto += (double)x * x;
+    s_60    += (double)y60 * y60;
+    s_arm   += (double)ya * ya;
+    nLimpias++;
+  } else {                                     // v5.1: apartada (no cuenta para el RMS)
+    t_bruto += (double)x * x;
+    t_60    += (double)y60 * y60;
+    t_arm   += (double)ya * ya;
+    apartadas = apartadas + 1;
+  }
 
   if (++cuenta >= N_BLOQUE) {
+    // v5.1: RMS solo con las muestras limpias. Sin WiFi son las 100 (igual que siempre).
+    // Si quedaran menos de la mitad, se usan todas (nunca se deja de mandar al opto).
+    int nApart = N_BLOQUE - nLimpias;
+    if (nApart > 0) rmsTxMv = sqrt(t_arm / nApart) * 1000.0f;
+    int n = nLimpias;
+    if (n < N_BLOQUE / 2) { n = N_BLOQUE; s_bruto += t_bruto; s_60 += t_60; s_arm += t_arm; }
+    rmsLimpioMv = sqrt(s_arm / n) * 1000.0f;
     minBloque = minAcum; maxBloque = maxAcum; minAcum = 65535; maxAcum = 0;
     if (bloquesHechos <= BLOQUES_ASENTAR) bloquesHechos++;
     if (colaEsc - colaLei < N_COLA) {
       uint32_t i = colaEsc % N_COLA;
-      colaBruto[i] = sqrt(s_bruto / N_BLOQUE);
-      cola60[i]    = sqrt(s_60 / N_BLOQUE);
-      colaArm[i]   = sqrt(s_arm / N_BLOQUE);
+      colaBruto[i] = sqrt(s_bruto / n);
+      cola60[i]    = sqrt(s_60 / n);
+      colaArm[i]   = sqrt(s_arm / n);
       colaOpto[i]  = bloquesHechos > BLOQUES_ASENTAR;
       ultimoRmsMv  = colaArm[i] * 1000.0f;
       colaEsc = colaEsc + 1;
@@ -231,7 +284,9 @@ void alMuestrear(timer_callback_args_t *) {
       bloquesPerdidos = bloquesPerdidos + 1;   // el loop lleva > 6.4 s sin vaciar la cola
     }
     s_bruto = s_60 = s_arm = 0;
+    t_bruto = t_60 = t_arm = 0;
     cuenta = 0;
+    nLimpias = 0;
   }
 
   if (PIN_MUESTREO >= 0) digitalWrite(PIN_MUESTREO, LOW);
@@ -259,8 +314,13 @@ int ponerVoltios(char *dst, int cap, const char *etiqueta, float v) {
   return snprintf(dst, cap, "%s:%ld.%03ld", etiqueta, mv / 1000, mv % 1000);
 }
 
-void vaciarCola() {
+uint32_t tUltOpto = 0, optoMax = 0;   // v5.1: mayor espera entre lineas del opto (diagnostico)
+
+// Devuelve cuantos bloques se mandaron (v5.1: el WiFi transmite justo despues)
+int vaciarCola() {
+  int hechos = 0;
   while (colaLei != colaEsc) {
+    hechos++;
     uint32_t i = colaLei % N_COLA;
     float rmsBruto = colaBruto[i], rms60 = cola60[i], rmsArm = colaArm[i];
     bool alOpto = colaOpto[i];
@@ -275,6 +335,9 @@ void vaciarCola() {
       char l[12];
       int n = snprintf(l, sizeof l, "%ld\n", mv);
       Serial1.write((const uint8_t *)l, n);
+      uint32_t t = millis();
+      if (tUltOpto && t - tUltOpto > optoMax) optoMax = t - tUltOpto;
+      tUltOpto = t;
     }
 
     // USB: igual que v2 -> Bruto:0.123,Sin60:0.045,SinArm:0.012
@@ -291,6 +354,7 @@ void vaciarCola() {
       Serial.write((const uint8_t *)u, n);     // ~40 bytes cada 100 ms: el muestreo no se entera (va en la interrupcion)
     }
   }
+  return hechos;
 }
 
 // ======================================================================
@@ -358,20 +422,41 @@ void cerrarFlujo() {
   transmitiendo = false;
 }
 
+// v5.1: todo lo que hace transmitir al modulo WiFi va entre wifiOcupado = true / false
+// (asi la interrupcion aparta las muestras tomadas mientras tanto)
+size_t mandarWifi(const uint8_t *b, size_t n) {
+  uint32_t t0 = millis();
+  wifiOcupado = true;
+  size_t r = flujo.write(b, n);
+  wifiOcupado = false;
+  uint32_t d = millis() - t0;
+  if (d > envioMax) envioMax = d;
+  if (r == n && d > ENVIO_LENTO_MS) {          // WiFi lento: la senal en vivo descansa 3 s (el opto sigue)
+    pausaSenalHasta = millis() + 3000;
+    nLentos++;
+  }
+  return r;
+}
+
 // Paquete de diagnostico: AA 57 | n | texto JSON | checksum (XOR del texto)
 void mandarDiagnostico() {
-  char t[200];
+  char t[256];
   uint16_t mn = minBloque, mx = maxBloque, ua = ultimoAdc;
   float seg = (millis() - tInicioMuestreo) / 1000.0f;
-  int n = snprintf(t, sizeof t, "{\"v\":\"%s\",\"adc\":%u,\"min\":%u,\"max\":%u,\"fs\":%.1f,\"rms\":%.0f,\"perdidos\":%lu}",
-                   VERSION_EMG, ua, mn, mx, seg > 0 ? nCrudo / seg : 0.0f, (float)ultimoRmsMv, (unsigned long)bloquesPerdidos);
+  int n = snprintf(t, sizeof t, "{\"v\":\"%s\",\"adc\":%u,\"min\":%u,\"max\":%u,\"fs\":%.1f,\"rms\":%.0f,\"perdidos\":%lu"
+                   ",\"sen\":%d,\"tx\":%lu,\"rTx\":%.1f,\"rOk\":%.1f,\"wMax\":%lu,\"lentos\":%lu,\"opto\":%lu}",
+                   VERSION_EMG, ua, mn, mx, seg > 0 ? nCrudo / seg : 0.0f, (float)ultimoRmsMv, (unsigned long)bloquesPerdidos,
+                   enviarSenal ? 1 : 0, (unsigned long)apartadasSeg, (float)rmsTxMv, (float)rmsLimpioMv,
+                   (unsigned long)envioMax, (unsigned long)nLentos, (unsigned long)optoMax);
+  envioMax = 0;
+  if (millis() - tOptoMax > 10000) { tOptoMax = millis(); optoMax = 0; }   // la mayor espera de los ultimos ~10 s
   if (n <= 0 || n > 250) return;
   uint8_t p[256 + 4];
   p[0] = 0xAA; p[1] = 0x57; p[2] = (uint8_t)n;
   uint8_t chk = 0;
   for (int i = 0; i < n; i++) { p[3 + i] = t[i]; chk ^= (uint8_t)t[i]; }
   p[3 + n] = chk;
-  if (flujo.write(p, n + 4) != (size_t)(n + 4)) cerrarFlujo();
+  if (mandarWifi(p, n + 4) != (size_t)(n + 4)) cerrarFlujo();
 }
 
 void atenderWifi() {
@@ -390,7 +475,7 @@ void atenderWifi() {
       } else { mensaje("!! Sin red WiFi (el Arduino sigue midiendo y mandando al ESP32)."); cerrarFlujo(); }
     }
     // Sin red (p. ej. el atril todavia arranca): vuelve a pedirla cada 15 s (no espera)
-    if (!red && ahora - tRed > 15000) { tRed = ahora; WiFi.begin(RED_SSID, RED_CLAVE); }
+    if (!red && ahora - tRed > 15000) { tRed = ahora; wifiOcupado = true; WiFi.begin(RED_SSID, RED_CLAVE); wifiOcupado = false; }
     // Aviso del servidor por UDP: "ASTRA-SERVIDOR 9001 9002"
     if (red) {
       int n = udp.parsePacket();
@@ -411,18 +496,45 @@ void atenderWifi() {
   if (!transmitiendo && hayServidor && redAntes && ahora - tIntento >= 3000 &&
       (SERVIDOR_IP[0] || ahora - tAviso < 5000)) {
     tIntento = ahora;
-    if (flujo.connect(ipServidor, PUERTO_SERVIDOR)) {
+    wifiOcupado = true;
+    bool ok = flujo.connect(ipServidor, PUERTO_SERVIDOR);
+    wifiOcupado = false;
+    if (ok) {
       transmitiendo = true;
+      enviarSenal = true;                       // hasta que el atril diga otra cosa
       sigWifi = inicioAlineado();               // empieza desde "ahora"
       tDiag = 0;
       mensaje(">> Conectado al servidor: la senal ya sale a la pagina.");
     }
   }
 
-  if (transmitiendo && ahora - tEnvio >= 40) {  // la senal sale en tandas de ~40 ms
-    tEnvio = ahora;
-    int len = armarPaquetes(sigWifi, bufWifi, MAX_PAQ_WIFI);
-    if (len && flujo.write(bufWifi, len) != (size_t)len) cerrarFlujo();   // el servidor se fue
+  // v5.1: ordenes del atril ("S" = mandar la senal en vivo, "N" = no), cada medio segundo
+  if (transmitiendo && ahora - tRevisarOrden >= 500) {
+    tRevisarOrden = ahora;
+    if (flujo.available() > 0) {
+      uint8_t o[8];
+      int k = flujo.read(o, sizeof o);
+      for (int i = 0; i < k; i++) {
+        if (o[i] == 'S' && !enviarSenal) { enviarSenal = true; sigWifi = inicioAlineado(); }
+        else if (o[i] == 'N') enviarSenal = false;
+      }
+    }
+  }
+
+  // v5.1: la senal sale justo despues de cada linea del opto (~10 veces por segundo)
+  bool pausada = pausaSenalHasta && (int32_t)(ahora - pausaSenalHasta) < 0;
+  if (transmitiendo && hayHueco) {
+    hayHueco = false;
+    if (!enviarSenal || pausada) sigWifi = inicioAlineado();   // no se manda: no se acumula
+    else {
+      tEnvio = ahora;
+      int len = armarPaquetes(sigWifi, bufWifi, MAX_PAQ_WIFI);
+      if (len && mandarWifi(bufWifi, len) != (size_t)len) cerrarFlujo();   // el servidor se fue
+    }
+  }
+  if (ahora - tApartadas >= 1000) {             // muestras apartadas en el ultimo segundo
+    uint32_t a = apartadas;
+    apartadasSeg = a - apartadasAntes; apartadasAntes = a; tApartadas = ahora;
   }
   if (transmitiendo && ahora - tDiag >= 1000) {
     tDiag = ahora;
@@ -464,7 +576,7 @@ void setup() {
 }
 
 void loop() {
-  vaciarCola();
+  if (vaciarCola()) hayHueco = true;           // v5.1: acaba de salir al opto: ahora puede transmitir el WiFi
   if (USB_PARA_PAGINA) mandarCrudoUsb();
   if (wifiListo) atenderWifi();
 }

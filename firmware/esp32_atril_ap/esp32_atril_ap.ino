@@ -179,7 +179,12 @@ const int  V_PLANETAS    = 400;    // pasos/s (~1.8 rpm, una vuelta del eje en ~
 const int  ACEL_PLANETAS = 200;    // pasos/s^2: arranque suave del lazy susan
 
 // ------------------------- Ajustes de deteccion -----------------------
-const float UMBRAL_K_INICIAL = 2.0f; // factor sobre la SD basal (ajustable con +/- de 0.5 en 0.5)
+const float UMBRAL_K_INICIAL = 3.0f; // factor sobre la SD basal ROBUSTA (v8.1: antes 2.0; +/- de 0.5 en 0.5)
+const float MARGEN_REL_INICIAL = 0.20f; // v8.1: el umbral queda al menos 20 % sobre el reposo
+// v8.1: sensibilidad elegida en la pagina -> {k, margen relativo}
+const float SENS_K[3]   = {2.0f, 3.0f, 4.0f};
+const float SENS_REL[3] = {0.10f, 0.20f, 0.35f};
+const int N_CAL_MAX = 160;              // v8.1: bloques que se guardan para la mediana (10 s = ~90)
 const float MARGEN_MIN_MV    = 2.0f; // el umbral queda al menos 2 mV sobre el basal
 const float UMBRAL_OFF_FACTOR = 0.6f; // histeresis relativa a la media basal
 const unsigned long T_CONFIRMAR = 300;  // ms sobre/bajo el umbral para cambiar de estado
@@ -259,7 +264,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8";
+const char *VERSION_ATRIL = "8.1";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -308,6 +313,9 @@ double sumaReposo = 0.0, suma2Reposo = 0.0;
 bool calibrado = false;
 float reposo = 100, sdReposo = 10;
 float umbralK = UMBRAL_K_INICIAL;
+float margenRel = MARGEN_REL_INICIAL;   // v8.1
+int sensibilidad = 2;                   // v8.1: 1 mas sensible, 2 normal, 3 menos sensible
+float calVals[N_CAL_MAX];               // v8.1: la mediana de cada bloque de la calibracion
 float umbralOn = 300, umbralOff = 200;
 
 // --- Deteccion ---
@@ -377,6 +385,8 @@ struct PedidoMusica { uint8_t abajo; uint8_t p[3]; };
 QueueHandle_t colaMusica = NULL;    // listas de musica de la pagina -> loop
 QueueHandle_t colaVolumen = NULL;   // volumen de la pagina -> loop
 QueueHandle_t colaAvisos = NULL;    // mensajes de la red -> loop (los imprime)
+QueueHandle_t colaSens = NULL;      // v8.1: sensibilidad de la pagina -> loop
+volatile bool senalPedida = true;   // v8.1: la pagina quiere ver la senal en vivo
 void avisar(int8_t a) { if (colaAvisos) xQueueSend(colaAvisos, &a, 0); }
 int volumen = VOLUMEN;              // volumen en uso (0 a 30); VOLUMEN es el de fabrica
 bool reiniciarLista = false;        // la lista que suena cambio: empezar ya con la nueva
@@ -570,8 +580,17 @@ void frenarEstrellas() {
   else estrellas.stop();
 }
 
+// v8.1: mediana de v[0..n) o, con abs = true, mediana de |v - centro| (MAD)
+float medianaDe(const float *v, int n, float centro, bool abs) {
+  static float t[N_CAL_MAX];
+  if (n <= 0) return 0;
+  for (int i = 0; i < n; i++) t[i] = abs ? fabsf(v[i] - centro) : v[i];
+  for (int a = 1; a < n; a++) { float x = t[a]; int b = a - 1; while (b >= 0 && t[b] > x) { t[b + 1] = t[b]; b--; } t[b + 1] = x; }
+  return n % 2 ? t[n / 2] : 0.5f * (t[n / 2 - 1] + t[n / 2]);
+}
+
 void calcularUmbrales() {
-  umbralOn = reposo + max(umbralK * sdReposo, MARGEN_MIN_MV);
+  umbralOn = reposo + max(max(umbralK * sdReposo, MARGEN_MIN_MV), margenRel * reposo);   // v8.1: + margen relativo
   umbralOff = reposo + UMBRAL_OFF_FACTOR * (umbralOn - reposo);
 }
 
@@ -579,7 +598,7 @@ void imprimirCalibracion() {
   Log.println();
   Log.println("---- Calibracion ----");
   Log.printf("Reposo: %.0f mV (SD %.1f)\n", reposo, sdReposo);
-  Log.printf("Umbral de activacion: %.1f mV (media + %.1f SD)\n", umbralOn, umbralK);
+  Log.printf("Umbral de activacion: %.1f mV (mediana + %.1f SD robusta, minimo +%.0f %%; sensibilidad %d)\n", umbralOn, umbralK, margenRel * 100, sensibilidad);
   Log.printf("Umbral de relajacion: %.0f mV\n", umbralOff);
   Log.printf("Activaciones: %d | tiempo activo total: %.1f s | lineas danadas: %lu\n",
                 nActivaciones, tiempoActivoTotal / 1000.0f, lineasMalas);
@@ -659,6 +678,14 @@ void terminarArranque() {
   if (calibrado) iniciarSesion(); else iniciarCalibracion();
 }
 
+// v8.1: sensibilidad elegida en la pagina (1, 2 o 3)
+void aplicarSensibilidad(int n) {
+  if (n < 1 || n > 3) return;
+  sensibilidad = n; umbralK = SENS_K[n - 1]; margenRel = SENS_REL[n - 1];
+  Log.printf(">> Sensibilidad %d (%s)\n", n, n == 1 ? "mas sensible" : n == 2 ? "normal" : "menos sensible");
+  if (calibrado) { calcularUmbrales(); imprimirCalibracion(); }
+}
+
 void iniciarCalibracion() {
   cerrarActivacion();
   modo = CALIBRANDO;
@@ -692,9 +719,9 @@ void terminarCalibracion() {
     // Casi no llegaron datos: no se cambia nada y se sigue (nunca se queda trabado)
     Log.printf("!! Calibracion basal con solo %d bloques: se conservan los umbrales anteriores. Repite con c o BOOT.\n", nReposo);
   } else {
-    double media = sumaReposo / nReposo;
-    double var = suma2Reposo / nReposo - media * media;
-    float sd = sqrtf((float)max(var, 0.0));
+    // v8.1: mediana y MAD (robustas a un movimiento o espasmo breve); antes media y SD
+    double media = medianaDe(calVals, min(nReposo, N_CAL_MAX), 0.0f, false);
+    float sd = 1.4826f * medianaDe(calVals, min(nReposo, N_CAL_MAX), (float)media, true);
     reposo = (float)media;
     sdReposo = max(sd, 0.5f);
     // Calidad: solo AVISA; el atril sigue funcionando (supervisado por la fisioterapeuta)
@@ -751,6 +778,7 @@ void procesarRms(int mv) {
     if (ahora - tCal >= CAL_DESCARTAR_MS && ventanaN == N_MEDIANA) {
       sumaReposo += rmsSuave;
       suma2Reposo += (double)rmsSuave * rmsSuave;
+      if (nReposo < N_CAL_MAX) calVals[nReposo] = rmsSuave;   // v8.1
       nReposo++;
       usado = true;
     }
@@ -870,6 +898,8 @@ void leerComandos() {
   while (colaMusica && xQueueReceive(colaMusica, &m, 0) == pdTRUE) aplicarMusica(m);
   uint8_t vol;
   while (colaVolumen && xQueueReceive(colaVolumen, &vol, 0) == pdTRUE) aplicarVolumen(vol);
+  uint8_t sn;
+  while (colaSens && xQueueReceive(colaSens, &sn, 0) == pdTRUE) aplicarSensibilidad(sn);   // v8.1
 }
 
 void revisarBoot() {
@@ -1204,8 +1234,8 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
   ja(",\"cal\":{\"ok\":%d,\"restante\":%.1f,\"total\":%.1f,\"desc\":%.1f,\"n\":%d,\"nMin\":%d,\"reposo\":%.1f,\"sd\":%.2f,\"cv\":%.3f,\"cvMax\":%.2f",
      calibrado ? 1 : 0, restante, CAL_MS / 1000.0f, CAL_DESCARTAR_MS / 1000.0f, modo == CALIBRANDO ? nReposo : calN,
      CAL_MIN_MUESTRAS, reposo, sdReposo, reposo > 0 ? sdReposo / reposo : 0.0f, CAL_CV_MAX);
-  ja(",\"k\":%.1f,\"margen\":%.1f,\"koff\":%.2f,\"uon\":%.1f,\"uoff\":%.1f,\"pocos\":%d,\"inestable\":%d}",
-     umbralK, MARGEN_MIN_MV, UMBRAL_OFF_FACTOR, umbralOn, umbralOff, calPocos ? 1 : 0, calInestable ? 1 : 0);
+  ja(",\"k\":%.1f,\"margen\":%.1f,\"rel\":%.2f,\"sens\":%d,\"koff\":%.2f,\"uon\":%.1f,\"uoff\":%.1f,\"pocos\":%d,\"inestable\":%d}",
+     umbralK, MARGEN_MIN_MV, margenRel, sensibilidad, UMBRAL_OFF_FACTOR, umbralOn, umbralOff, calPocos ? 1 : 0, calInestable ? 1 : 0);
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":0",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
      lineasMalas);
@@ -1408,7 +1438,7 @@ void mensajeDePagina(httpd_req_t *req, const char *m) {
   if (ahora - ventana > 1000) { ventana = ahora; cuenta = 0; }
   if (++cuenta > 20) return;        // mas de 20 mensajes por segundo: se ignoran
 
-  char tipo[12], t[8];
+  char tipo[24], t[8];
   if (!textoDe(m, "type", tipo, sizeof tipo)) return;
   char linea[32];
   if (!strcmp(tipo, "ping")) {      // para medir el retraso de la conexion
@@ -1432,6 +1462,15 @@ void mensajeDePagina(httpd_req_t *req, const char *m) {
         sscanf(p, "[%d,%d,%d]", &a, &b, &c) != 3) return;
     snprintf(linea, sizeof linea, "M %s %d,%d,%d", t, a, b, c);
     lineaDelServidor(linea);        // revisa que cada pista este entre 1 y 255
+  } else if (!strcmp(tipo, "sensibilidad")) {      // v8.1: 1, 2 o 3
+    const char *v = valorDe(m, "n");
+    if (!v || *v < '1' || *v > '3' || (v[1] >= '0' && v[1] <= '9')) return;
+    uint8_t n = *v - '0';
+    if (colaSens) xQueueSend(colaSens, &n, 0);
+  } else if (!strcmp(tipo, "senal")) {             // v8.1: ver o no la senal en vivo (para comparar el ruido)
+    const char *v = valorDe(m, "on");
+    if (!v) return;
+    senalPedida = !strncmp(v, "true", 4) || *v == '1';
   } else if (!strcmp(tipo, "volumen")) {
     const char *v = valorDe(m, "v");
     if (!v || *v < '0' || *v > '9') return;
@@ -1606,6 +1645,7 @@ void tareaRed(void *) {
   WiFiUDP udp;
   uint32_t tDato = 0, tEmg = 0, tEstado = 0, tSeg = 0, muestrasAntes = 0;
   uint32_t sb = 0, sa = 0, sl = 0;
+  int senalEnviada = -1;                          // v8.1: ultima orden mandada al Arduino (1 = S, 0 = N)
   for (;;) {
     uint32_t ahora = millis();
     WiFiClient nuevo = srvArduino.accept();
@@ -1614,6 +1654,7 @@ void tareaRed(void *) {
       arduino = nuevo;
       arduino.setNoDelay(true);
       npend = 0; ultimoSeq = -1; tDato = ahora;
+      senalEnviada = -1;                          // v8.1: se le dice de nuevo si mandar la senal
       strncpy(ipArduino, arduino.remoteIP().toString().c_str(), sizeof ipArduino - 1);
       arduinoDesde = ahora;
       if (!hayArduino) { hayArduino = true; avisar(3); }
@@ -1628,6 +1669,15 @@ void tareaRed(void *) {
         arduino.stop();
         hayArduino = false; fsArduino = 0;
         avisar(-3);
+      }
+    }
+    // v8.1: el Arduino solo transmite la senal si alguien la esta mirando (menos ruido por WiFi)
+    if (hayArduino) {
+      int quiero = senalPedida && numPaginas > 0 ? 1 : 0;
+      if (quiero != senalEnviada) {
+        uint8_t o = quiero ? 'S' : 'N';
+        if (arduino.write(&o, 1) == 1) senalEnviada = quiero;
+        if (quiero) ultimoSeq = -1;               // la senal vuelve a empezar: ese salto de numeracion no es perdida
       }
     }
     if (nEmgOut && (ahora - tEmg >= 40 || nEmgOut > 1000)) {   // senal: tandas de ~40 ms
@@ -1668,7 +1718,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v8 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
+  Serial.println("=== ASTRA - atril v8.1 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
@@ -1694,6 +1744,7 @@ void setup() {
   colaMusica = xQueueCreate(4, sizeof(PedidoMusica));
   colaVolumen = xQueueCreate(4, sizeof(uint8_t));
   colaAvisos = xQueueCreate(16, sizeof(int8_t));
+  colaSens = xQueueCreate(4, sizeof(uint8_t));      // v8.1
   if (USAR_WIFI) {
     prepararPagina();                                 // LittleFS -> RAM, antes de mover los motores
     xTaskCreatePinnedToCore(tareaRed, "red", 8192, NULL, 1, NULL, 0);  // nucleo 0
