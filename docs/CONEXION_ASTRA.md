@@ -71,28 +71,39 @@ RED_CLAVE = "clave"
 2. Abre **`servidor/iniciar-servidor.bat`** con doble clic (en Mac: `iniciar-servidor.command`).
    - Se abre una ventana negra (déjala abierta) y el navegador en **http://localhost:8080**.
    - La primera vez Windows pregunta si permites que Node.js use la red: elige **Redes privadas → Permitir**.
-3. Enciende el Arduino y el atril. En unos segundos, arriba a la derecha de la página: **«EMG (WiFi): ~1000 Hz»** y **«Atril: …»** en verde.
-4. **Registrar paciente** o **Buscar paciente** → **Iniciar terapia**.
-5. El atril calibra solo (10 s de RMS basal con la cabeza apoyada) y la página **empieza a registrar la sesión** al terminar.
-   Si el atril ya estaba en sesión, pulsa **Registrar la sesión desde ahora**.
-6. **En vivo** ves:
-   - la señal EMG del Arduino;
-   - el RMS y la mediana que usa el atril, con U_on y U_off;
-   - la cabeza abajo / arriba, las activaciones y los mensajes del monitor serie.
+3. Enciende el sensor (Arduino) y el atril. Arriba a la derecha de la página, el indicador pasa a verde: **«Equipo listo»**.
+4. En la pantalla de inicio: **Registrar paciente** o **Buscar paciente**.
+   - **Registrar paciente**: por confidencialidad **no se pide el nombre ni la fecha de nacimiento**. La página asigna sola
+     un ID (**AST-0001**, **AST-0002**, …) y pide sexo, edad, nivel funcional (GMFCS), control de cabeza al inicio y,
+     si quieres, diagnóstico, posición en terapia y observaciones.
+   - **Buscar paciente**: se busca escribiendo el ID (o solo el número).
+5. En el expediente del paciente, **Iniciar terapia** → escribe quién dirige la sesión y pulsa **Comenzar**.
+   El atril se calibra solo (10 s con la cabeza del niño apoyada y quieta) y la sesión **empieza a registrarse sola**.
+6. **Durante la terapia** la pantalla muestra solo lo necesario:
+   - tiempo de sesión y postura estimada (**Cabeza arriba / Cabeza abajo**);
+   - la señal EMG en tiempo real;
+   - **tiempo con la cabeza abajo** y **episodios de cabeza abajo**;
+   - en la esquina, el estado del equipo, y abajo si la calibración está completa y si llega la señal.
 
-   Puedes usar **Pausa**, **Umbral − / +**, **Recalibrar** e **Invertir abajo / arriba**.
-7. **Música del atril:** elige la canción para la cabeza **abajo** (001–003, o las tres en orden) y para la cabeza **arriba** (004–006).
-   El aviso `/ADVERT/0001.mp3` suena cada vez que sube la cabeza y luego sigue la canción. El ESP32 guarda la elección en su memoria.
-8. **Finalizar terapia** guarda la sesión del paciente en la laptop: activaciones, tiempos, RMS, calibración, música y la señal RMS de toda la sesión.
-9. En **Historial** del paciente:
-   - el progreso entre sesiones;
-   - el botón **Señal** para ver la de cada sesión;
-   - el CSV;
-   - las **notas de la fisioterapeuta**.
+   Botones: **Pausar**, **Volver a calibrar** y **Finalizar sesión**. Todo lo demás se guarda y se ve al final.
+7. **Finalizar sesión** muestra el resumen (duración, umbral de activación, tiempo con la cabeza erguida y caída,
+   número de caídas, caída más larga), deja escribir **observaciones** y permite **descargar el Excel** antes de **Guardar**.
+8. En el **expediente** del paciente quedan:
+   - el **resumen general** (sesiones, promedio de tiempo con la cabeza erguida, caídas por minuto, mejor sesión, tendencia);
+   - la **gráfica de progreso** entre sesiones;
+   - la **tabla de sesiones** (fecha, fisioterapeuta, duración, umbral, tiempos, caídas) con **Ver** la señal, **⬇ Excel** y eliminar;
+   - **⬇ Excel de todas las sesiones** y las **notas del paciente**.
+9. **Ajustes** (arriba a la derecha) solo tiene lo útil en terapia:
+   - la **canción con la cabeza arriba** (pistas 004–006 del DFPlayer) y la **canción con la cabeza abajo** (001–003);
+   - el **volumen** (0 a 30);
+   - respaldo de los datos y **modo demostración** para practicar sin el equipo.
+
+   El aviso `/ADVERT/0001.mp3` suena cada vez que el niño sube la cabeza y después sigue la canción.
+   El atril guarda la elección y el volumen en su memoria.
 
 **Ver desde otro equipo** (por ejemplo, una tablet en la misma red): abre `http://IP-de-la-laptop:8080`. La IP aparece en la ventana del servidor.
 
-**Datos que ya tenías en el navegador:** en *Ajustes* aparece **«Subir al servidor los datos guardados en este navegador»**.
+**Datos que ya tenías en el navegador:** en *Ajustes* aparece **«Subir datos guardados en este navegador»**.
 
 **MicroSD del DFPlayer** (FAT32): `/01/001.mp3` … `/01/006.mp3` y `/ADVERT/0001.mp3`.
 
@@ -100,17 +111,17 @@ RED_CLAVE = "clave"
 
 | Lo que ves | Qué revisar |
 |---|---|
-| La página dice «No hay conexión con el servidor» | ¿Está abierta la ventana negra del servidor? Abre la página desde **http://localhost:8080**, no con doble clic en `index.html`. |
-| «EMG: Arduino sin conectar» | Monitor Serie del Arduino: ¿dice «WiFi conectado»? Si no, revisa `RED_SSID` / `RED_CLAVE`. ¿Dice «Servidor encontrado»? Si no, ver la fila de abajo. |
-| «Atril: ESP32 sin conectar» | Lo mismo en el Monitor Serie del ESP32. |
+| La página dice «Equipo no encontrado» | ¿Está abierta la ventana negra del servidor? Abre la página desde **http://localhost:8080**, no con doble clic en `index.html`. |
+| «Sensor sin conexión» | Monitor Serie del Arduino: ¿dice «WiFi conectado»? Si no, revisa `RED_SSID` / `RED_CLAVE`. ¿Dice «Servidor encontrado»? Si no, ver la fila de abajo. |
+| «Atril apagado» | Lo mismo en el Monitor Serie del ESP32. |
 | Las placas se conectan a la red pero nunca «encuentran el servidor» | La red bloquea los avisos entre equipos (redes de invitados), o el firewall de Windows bloqueó Node.js. Usa la **zona con cobertura** de la laptop, o escribe la IP de la laptop en `SERVIDOR_IP` en los dos programas (la muestra la ventana del servidor). |
-| «Señal saturada» | Electrodos, electrodo de referencia o cable de Nova: la señal está pegada a 0 V o a 5 V. Pasa el cursor sobre el indicador EMG para ver el rango que mide el Arduino. |
+| «La señal está en el límite» | Electrodos, electrodo de referencia o cable de Nova: la señal está pegada a 0 V o a 5 V. |
 
 ## Qué se agregó a tus programas (y qué no cambió)
 - **Arduino v5:** el muestreo, los filtros, el RMS, el opto y el Serial Plotter son los mismos de tu v2.
   - El muestreo va en una interrupción, para que el WiFi nunca lo retrase.
   - Se agregó: unirse a la red, encontrar al servidor y mandarle la señal cruda y un diagnóstico cada segundo.
-- **ESP32 v7:** probado en la computadora con el mismo escenario que tu código; imprime los mismos mensajes y manda los mismos comandos al DFPlayer.
-  - Se agregó, en el otro núcleo del ESP32: la conexión con el servidor, las órdenes de la página y la elección de canciones (guardada en su memoria).
+- **ESP32 v7.1:** probado en la computadora con el mismo escenario que tu código; imprime los mismos mensajes y manda los mismos comandos al DFPlayer.
+  - Se agregó, en el otro núcleo del ESP32: la conexión con el servidor, las órdenes de la página y la elección de canciones y el volumen (guardados en su memoria).
 
 **Falta probarlo en las placas reales:** se probó con un servidor real, con la lógica del ESP32 corriendo en la computadora conectada a ese servidor, con un Arduino simulado y con la página en el navegador.

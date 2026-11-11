@@ -3,338 +3,242 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>sEMG Cervical – Monitor de terapia</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f766e'/%3E%3Cpath d='M3 17h6l3-9 5 16 3-7h9' stroke='%23fff' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+  <title>ASTRA</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b1030'/%3E%3Cpath d='M16 5l2.6 7.6L26 15l-7.4 2.4L16 25l-2.6-7.6L6 15l7.4-2.4z' fill='%23ffd76a'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 <header class="topbar">
-  <button class="brand" id="btn-home" type="button">
-    <span class="logo">∿</span><span>sEMG Cervical <small>(nombre por definir)</small></span>
-  </button>
+  <button class="brand" id="btn-home" type="button" title="Inicio"><span class="brand-star">✦</span>ASTRA</button>
   <div class="topbar-right">
-    <div class="chip" id="emg-chip" title="Señal EMG cruda que manda el Arduino">
-      <span class="dot" id="emg-dot"></span><span id="emg-text">EMG: sin conexión</span>
-    </div>
-    <div class="chip" id="atril-chip" title="Atril (ESP32): calibra, detecta y mueve los actuadores">
-      <span class="dot" id="atril-dot"></span><span id="atril-text">Atril: sin conexión</span>
-    </div>
-    <button class="btn small" id="btn-connect" type="button">Conectar ASTRA</button>
-    <button class="btn small ghost" id="btn-sim" type="button">Simulación</button>
-    <select class="btn small ghost" id="sim-fault" hidden title="Probar alarmas">
-      <option value="">Simular falla…</option><option value="disconnect">Electrodo desconectado</option><option value="flat">Señal plana</option>
-      <option value="noise60">Ruido 60 Hz</option><option value="nodata">Arduino sin datos</option>
-    </select>
+    <div class="sys" id="sys" role="status"><span class="dot" id="sys-dot"></span><span id="sys-text">Buscando el equipo…</span></div>
     <button class="btn small ghost" id="btn-settings" type="button">⚙ Ajustes</button>
   </div>
 </header>
-
 <div id="alarms" class="alarms" role="alert" aria-live="assertive"></div>
 
 <main>
   <!-- ========== INICIO ========== -->
   <section id="view-home" class="view">
-    <div class="card hero">
-      <h1>Monitor de control cervical</h1>
-      <p class="muted">Registra o busca a un paciente para iniciar la terapia con sEMG.</p>
+    <div class="hero">
+      <h1 class="astra">ASTRA</h1>
+      <p class="lema">Activación del semiespinoso para terapia con retroalimentación audiovisual</p>
       <div class="home-actions">
-        <button class="btn big green" id="go-register" type="button">Registrar paciente</button>
-        <button class="btn big blue" id="go-search" type="button">Buscar paciente</button>
+        <button class="btn big" id="go-register" type="button"><span class="ico">＋</span>Registrar paciente</button>
+        <button class="btn big alt" id="go-patients" type="button"><span class="ico">⌕</span>Buscar paciente</button>
       </div>
-    </div>
-    <div class="card">
-      <h3>Resumen</h3>
-      <p id="home-stats" class="muted"></p>
-      <p class="muted small-text">Los datos se guardan <b>solo en este navegador</b>. Haz respaldos periódicos desde Ajustes.
-        Nunca subas CSV ni respaldos de pacientes a GitHub.</p>
+      <p class="muted small-text" id="home-stats"></p>
     </div>
   </section>
 
   <!-- ========== REGISTRO ========== -->
   <section id="view-register" class="view" hidden>
-    <form id="form-register" class="card form-card green-border" autocomplete="off">
+    <form id="form-register" class="card form-card" autocomplete="off">
       <h2>Registrar paciente</h2>
+      <p class="muted">Por confidencialidad no se guarda el nombre. El paciente se identifica con este ID:
+        <b class="id-tag" id="reg-id">AST-0001</b></p>
       <div class="grid2">
-        <label>Nombre(s) *<input name="nombres" required></label>
-        <label>Apellidos *<input name="apellidos" required></label>
-        <label>Fecha de nacimiento *<input name="nacimiento" type="date" required></label>
-        <label>Nivel GMFCS *
+        <label>Sexo *
+          <select name="sexo" required><option value="">Selecciona…</option><option>Femenino</option><option>Masculino</option></select>
+        </label>
+        <label>Edad *
+          <span class="fila-edad"><input name="edadAnios" type="number" min="0" max="25" required placeholder="años"><input name="edadMeses" type="number" min="0" max="11" placeholder="meses"></span>
+        </label>
+        <label>Nivel funcional (GMFCS) *
           <select name="gmfcs" required>
             <option value="">Selecciona…</option>
-            <option>I</option><option>II</option><option>III</option><option>IV</option><option>V</option>
+            <option value="I">I · camina sin limitaciones</option><option value="II">II · camina con limitaciones</option>
+            <option value="III">III · camina con ayuda manual</option><option value="IV">IV · movilidad propia limitada</option>
+            <option value="V">V · transportado en silla de ruedas</option>
           </select>
         </label>
+        <label>Control de cabeza al inicio *
+          <select name="controlCefalico" required>
+            <option value="">Selecciona…</option><option>No sostiene la cabeza</option><option>La sostiene unos segundos</option>
+            <option>La sostiene con apoyo del tronco</option><option>La sostiene sin apoyo por poco tiempo</option>
+          </select>
+        </label>
+        <label>Diagnóstico (opcional)
+          <select name="diagnostico">
+            <option value="">—</option><option>Parálisis cerebral espástica</option><option>Parálisis cerebral discinética</option>
+            <option>Parálisis cerebral atáxica</option><option>Parálisis cerebral mixta</option><option>Hipotonía</option><option>Otro / en estudio</option>
+          </select>
+        </label>
+        <label>Posición habitual en terapia (opcional)
+          <select name="posicion"><option value="">—</option><option>Prono sobre cuña</option><option>Prono sobre rollo</option><option>Sentado con apoyo</option><option>Otra</option></select>
+        </label>
       </div>
-      <details class="more">
-        <summary>Datos clínicos opcionales (recomendados)</summary>
-        <div class="grid2">
-          <label>ID / expediente<input name="expediente"></label>
-          <label>Sexo
-            <select name="sexo"><option value="">—</option><option>Femenino</option><option>Masculino</option><option>Otro</option></select>
-          </label>
-          <label>Diagnóstico / tipo de PC
-            <select name="diagnostico">
-              <option value="">—</option><option>PC espástica</option><option>PC discinética</option>
-              <option>PC atáxica</option><option>PC mixta</option><option>Otro / en estudio</option>
-            </select>
-          </label>
-          <label>Edad gestacional al nacer (semanas)<input name="gestacion" type="number" min="22" max="44"></label>
-          <label>Tutor / contacto<input name="contacto"></label>
-          <label>Medicación / toxina botulínica / cirugías<input name="medicacion"></label>
-        </div>
-        <label>Notas<textarea name="notas" rows="2"></textarea></label>
-        <label class="check"><input type="checkbox" name="consentimiento"> Consentimiento informado firmado por el tutor</label>
-      </details>
+      <label>Observaciones (opcional)<textarea name="notas" rows="2" placeholder="p. ej. usa lentes, se cansa rápido, prefiere música suave…"></textarea></label>
       <div class="form-actions">
         <button class="btn ghost" type="button" data-nav="home">← Atrás</button>
-        <button class="btn green" type="submit">Guardar</button>
+        <button class="btn" type="submit">Guardar paciente</button>
       </div>
     </form>
   </section>
 
-  <!-- ========== BUSCAR ========== -->
-  <section id="view-search" class="view" hidden>
-    <div class="card form-card blue-border">
-      <h2>Buscar paciente</h2>
-      <div class="search-layout">
-        <div class="search-col">
-          <div class="searchbox">
-            <input id="search-input" placeholder="Nombre completo…" autocomplete="off">
-            <span class="search-ico">🔍</span>
-          </div>
-          <ul id="suggestions" class="suggestions"></ul>
-        </div>
-        <div class="data-col card inner" id="patient-data">
-          <h3>Datos</h3>
-          <p class="muted" id="pd-empty">Selecciona un paciente de la lista.</p>
-          <dl id="pd-body" hidden></dl>
-        </div>
+  <!-- ========== PACIENTES (buscar por ID) ========== -->
+  <section id="view-patients" class="view" hidden>
+    <div class="card">
+      <div class="row-between">
+        <h2>Pacientes</h2>
+        <button class="btn ghost small" type="button" data-nav="home">← Inicio</button>
       </div>
-      <div class="form-actions">
-        <button class="btn ghost" type="button" data-nav="home">← Atrás</button>
-        <button class="btn ghost" id="btn-history" type="button" disabled>Ver historial</button>
-        <button class="btn blue" id="btn-start-therapy" type="button" disabled>Iniciar terapia</button>
-      </div>
+      <div class="searchbox"><input id="search-input" placeholder="Buscar por ID (p. ej. AST-0003 o solo 3)" autocomplete="off"><span class="search-ico">⌕</span></div>
+      <div class="table-wrap"><table class="lista">
+        <thead><tr><th>ID</th><th>Sexo</th><th>Edad</th><th>GMFCS</th><th>Sesiones</th><th>Última sesión</th><th></th></tr></thead>
+        <tbody id="pac-body"></tbody>
+      </table></div>
+      <p class="muted" id="pac-vacio" hidden>No hay pacientes con ese ID.</p>
     </div>
   </section>
 
-  <!-- ========== SESIÓN ========== -->
-  <section id="view-session" class="view" hidden>
-    <div class="session-head card">
-      <div>
-        <h2 id="s-name">—</h2>
-        <p class="muted" id="s-dob">—</p>
-      </div>
-      <div class="timer"><span class="muted">Tiempo de sesión</span><b id="s-time">00:00</b></div>
-    </div>
-
-    <!-- Calibración basal y sesión: las hace el atril (ESP32) -->
-    <div class="card" id="cal-card">
-      <div class="row-between">
-        <h3 id="cal-title">Calibración basal en el atril</h3>
-        <span class="badge" id="atril-badge">—</span>
-      </div>
-      <details class="more" id="meta-box" open>
-        <summary>Datos de la sesión</summary>
-        <div class="grid3 session-meta">
-          <label>Músculo / lado de los electrodos<input id="m-electrodo" placeholder="p. ej. semiespinosos, bilateral"></label>
-          <label>Posición del niño<input id="m-posicion" placeholder="p. ej. prono sobre cuña"></label>
-          <label>Fisioterapeuta<input id="m-fisio"></label>
-        </div>
-        <label>Notas de la sesión<input id="m-notas"></label>
-      </details>
-
-      <p class="callout" id="cal-msg" hidden></p>
-      <div class="form-actions left" id="cal-msg-actions" hidden>
-        <button class="btn" id="btn-resume" type="button">Reanudar el atril</button>
-      </div>
-
-      <!-- Mientras el atril registra el RMS basal (empieza solo al encontrar el tope o con «Recalibrar») -->
-      <div class="cue rest" id="cue" hidden>
-        <div class="cue-title">REGISTRO BASAL</div>
-        <div class="cue-text">Cabeza apoyada y estable. No pedir contracciones.</div>
-        <div class="cue-count" id="cue-count"></div>
-        <div class="bar"><div id="cue-bar"></div></div>
-        <p class="cue-note" id="cue-note"></p>
-      </div>
-
-      <div id="cal-result" hidden>
-        <p><b id="cal-result-title">Calibración basal.</b> <span class="muted" id="cal-result-sub"></span></p>
-        <div class="cal-grid" id="cal-values"></div>
-        <ul class="warnings" id="cal-warnings"></ul>
-      </div>
-
-      <div id="attach" hidden>
-        <p>El atril ya está en sesión con esta calibración. Pulsa para empezar a registrar los datos del paciente.</p>
-        <div class="form-actions left">
-          <button class="btn primary" id="btn-attach" type="button">▶ Registrar la sesión desde ahora</button>
-          <button class="btn ghost" id="btn-attach-cal" type="button">Recalibrar primero</button>
-        </div>
-      </div>
-
-      <div id="run-ctrl" hidden>
-        <p class="muted small-text" id="cal-compact"></p>
-        <div class="form-actions left">
-          <button class="btn" id="btn-pause" type="button">Pausa</button>
-          <button class="btn ghost" id="btn-thr-down" type="button" title="Factor de la SD − 0.5">Umbral −</button>
-          <button class="btn ghost" id="btn-thr-up" type="button" title="Factor de la SD + 0.5">Umbral +</button>
-          <button class="btn ghost" id="btn-recal" type="button">Recalibrar</button>
-          <button class="btn ghost" id="btn-invert" type="button" title="Cambia qué estado del EMG cuenta como cabeza abajo">Invertir abajo / arriba</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Música del atril (DFPlayer) -->
-    <div class="card" id="mus-card">
-      <div class="row-between">
-        <h3>Música del atril</h3>
-        <span class="badge" id="mus-now">—</span>
-      </div>
-      <p class="muted small-text">En la microSD, carpeta <b>/01</b>: las pistas 001–003 suenan con la <b>cabeza abajo</b> y las 004–006 con la
-        <b>cabeza arriba</b>. Cada vez que el niño <b>sube la cabeza</b> suena el aviso <b>/ADVERT/0001.mp3</b> y luego sigue la canción.</p>
-      <div class="grid2">
-        <label>Canción con la cabeza ABAJO<select id="mus-abajo"></select></label>
-        <label>Canción con la cabeza ARRIBA<select id="mus-arriba"></select></label>
-      </div>
-      <p class="muted small-text" id="mus-estado"></p>
-    </div>
-
-    <!-- Señal EMG del Arduino -->
+  <!-- ========== EXPEDIENTE DEL PACIENTE ========== -->
+  <section id="view-patient" class="view" hidden>
     <div class="card">
       <div class="row-between">
-        <h3>Señal EMG del Arduino (tiempo real)</h3>
-        <div class="legend">
-          <span><i class="sw sw-signal"></i>EMG filtrada</span>
-          <span><i class="sw sw-valid"></i>Activación (RMS sobre U_on)</span>
-          <span><i class="sw sw-cal"></i>Calibración basal</span>
-          <label class="inline">Ventana
-            <select id="win-sel"><option value="10">10 s</option><option value="15" selected>15 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
-          </label>
+        <div><h2 class="id-grande" id="p-id">AST-0000</h2><p class="muted" id="p-datos"></p></div>
+        <div class="form-actions">
+          <button class="btn ghost small" type="button" data-nav="patients">← Pacientes</button>
+          <button class="btn ghost small" id="btn-p-excel" type="button">⬇ Excel de todas las sesiones</button>
+          <button class="btn" id="btn-p-start" type="button">▶ Iniciar terapia</button>
         </div>
       </div>
-      <canvas id="live" class="live"></canvas>
-      <p class="muted small-text" id="emg-note">Muestras crudas a 1000 Hz; aquí se filtran (pasa altas 20 Hz y red 60 Hz con armónicos) solo para verlas.</p>
     </div>
-
-    <!-- RMS que usa el atril -->
     <div class="card">
-      <div class="row-between">
-        <h3>RMS que recibe el atril (cada 100 ms)</h3>
-        <div class="legend">
-          <span><i class="sw sw-env"></i>Mediana 0.5 s (la que decide)</span>
-          <span><i class="sw sw-signal"></i>RMS</span>
-          <span><i class="sw sw-thr"></i>U_on / U_off</span>
-          <span><i class="sw sw-rest"></i>Reposo</span>
-          <span><i class="sw sw-valid"></i>Activación</span>
-          <span><i class="sw sw-used"></i>Usado en la calibración</span>
-        </div>
-      </div>
-      <canvas id="rms" class="rms"></canvas>
-      <div class="readouts" id="readouts"></div>
-      <div class="gauge-row"><span class="muted">Nivel (100 % = en U_on)</span>
-        <div class="gauge"><div id="gauge-fill"></div><div id="gauge-mark"></div></div>
-        <b id="gauge-val">—</b></div>
-    </div>
-
-    <!-- Métricas -->
-    <div class="kpis">
-      <div class="kpi"><span id="k-count-label">Veces cabeza abajo</span><b id="k-count">0</b><small id="k-disc"></small></div>
-      <div class="kpi"><span id="k-active-label">Tiempo con la cabeza abajo</span><b id="k-active">0.0 s</b><small id="k-pct"></small></div>
-      <div class="kpi"><span>Episodio más largo</span><b id="k-max">0.0 s</b><small id="k-cur"></small></div>
-      <div class="kpi"><span>RMS medio de las activaciones</span><b id="k-rms">—</b><small id="k-rms-sub">mV (RMS sobre el umbral)</small></div>
-      <div class="kpi"><span>Tiempo total de sesión</span><b id="k-time">00:00</b><small id="k-cal"></small></div>
-    </div>
-
-    <!-- Tabla -->
-    <div class="card">
-      <h3>Activaciones detectadas por el atril (RMS sobre U_on)</h3>
-      <div class="table-wrap">
-        <table id="act-table">
-          <thead><tr><th>Activación</th><th>Inicio</th><th>Duración (s)</th><th>RMS medio (mV)</th></tr></thead>
-          <tbody id="act-body"><tr><td colspan="4" class="muted">Sin activaciones todavía.</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Mensajes del atril -->
-    <details class="card" id="log-card">
-      <summary><b>Mensajes del atril</b> <span class="muted small-text">(los mismos del monitor serie del ESP32)</span></summary>
-      <pre id="log" class="log"></pre>
-    </details>
-
-    <div class="form-actions bottom">
-      <button class="btn ghost" id="btn-csv" type="button">Guardar datos en CSV</button>
-      <button class="btn danger" id="btn-finish" type="button">Finalizar terapia</button>
-    </div>
-  </section>
-
-  <!-- ========== HISTORIAL ========== -->
-  <section id="view-history" class="view" hidden>
-    <div class="card">
-      <div class="row-between">
-        <div><h2 id="h-name">—</h2><p class="muted" id="h-sub"></p></div>
-        <div class="form-actions left">
-          <button class="btn ghost" id="btn-hist-csv" type="button">Exportar historial CSV</button>
-          <button class="btn ghost" data-nav="search" type="button">← Pacientes</button>
-        </div>
-      </div>
+      <h3>Resumen general</h3>
+      <div class="kpis" id="p-resumen"></div>
+      <p class="tendencia" id="p-tendencia"></p>
     </div>
     <div class="card">
       <div class="row-between">
         <h3>Progreso entre sesiones</h3>
-        <label class="inline">Métrica
+        <label class="inline">Ver
           <select id="h-metric">
-            <option value="pctActivo">% del tiempo con activación (RMS sobre el umbral)</option>
-            <option value="maxContrS">Episodio más largo (s)</option>
-            <option value="medContrS">Duración media de los episodios (s)</option>
-            <option value="activaciones">N.º de activaciones</option>
-            <option value="tiempoActivoS">Tiempo activo válido total (s)</option>
-            <option value="rmsMedio">RMS medio de las activaciones (mV)</option>
+            <option value="pctArriba">% del tiempo con la cabeza erguida</option>
+            <option value="caidasMin">Caídas de cabeza por minuto</option>
+            <option value="caidaMasLargaS">Caída de cabeza más larga (s)</option>
+            <option value="duracionMin">Duración de la terapia (min)</option>
           </select>
         </label>
       </div>
       <div class="chart-wrap"><canvas id="prog" class="prog"></canvas><div id="prog-tip" class="tip" hidden></div></div>
-      <p id="h-summary" class="summary"></p>
-      <p class="muted small-text">Línea punteada = tendencia. El % de tiempo y la contracción más larga son las más comparables entre sesiones
-        de distinta duración. Ten en cuenta que la colocación de electrodos y la calibración cambian de una sesión a otra.</p>
     </div>
     <div class="card">
       <h3>Sesiones</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Fecha</th><th>Duración</th><th>Activ.</th><th>T. activo (s)</th><th>% activo</th><th>Máx (s)</th><th>RMS medio (mV)</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Fisioterapeuta</th><th>Duración</th><th>Umbral (mV)</th><th>Cabeza erguida</th><th>Cabeza caída</th><th>Caídas</th><th></th></tr></thead>
         <tbody id="h-body"></tbody>
       </table></div>
+      <p class="muted" id="h-vacio" hidden>Todavía no hay sesiones registradas.</p>
     </div>
     <div class="card" id="ses-card" hidden>
-      <div class="row-between"><h3 id="ses-titulo">Señal de la sesión</h3><button class="btn small ghost" id="ses-cerrar" type="button">Cerrar</button></div>
+      <div class="row-between"><h3 id="ses-titulo">Sesión</h3>
+        <div class="form-actions"><button class="btn small ghost" id="ses-excel" type="button">⬇ Excel</button><button class="btn small ghost" id="ses-cerrar" type="button">Cerrar</button></div></div>
+      <div class="kpis" id="ses-kpis"></div>
+      <p id="ses-obs"></p>
       <p class="muted small-text" id="ses-txt"></p>
       <canvas id="ses-senal" class="rms"></canvas>
     </div>
     <div class="card">
-      <h3><label for="h-notas">Notas de la fisioterapeuta</label></h3>
-      <p class="muted small-text">Se guardan con este paciente.</p>
-      <textarea id="h-notas" rows="4"></textarea>
+      <h3><label for="h-notas">Notas del paciente</label></h3>
+      <textarea id="h-notas" rows="3"></textarea>
       <div class="form-actions left"><button class="btn small" id="btn-h-notas" type="button">Guardar notas</button> <span class="muted small-text" id="h-notas-ok"></span></div>
+    </div>
+  </section>
+
+  <!-- ========== ANTES DE COMENZAR ========== -->
+  <section id="view-start" class="view" hidden>
+    <div class="card form-card">
+      <h2>Nueva sesión · <span class="id-tag" id="st-id"></span></h2>
+      <label>Fisioterapeuta responsable *<input id="st-fisio" list="st-fisios" placeholder="Nombre de quien dirige la sesión" autocomplete="off"><datalist id="st-fisios"></datalist></label>
+      <ol class="pasos">
+        <li>Coloca los electrodos y enciende el sensor y el atril.</li>
+        <li>Acomoda al niño con la <b>cabeza apoyada y tranquila</b>.</li>
+        <li>Pulsa <b>Comenzar</b>: ASTRA se calibra durante 10 segundos y la sesión empieza sola.</li>
+      </ol>
+      <div class="estado-grande" id="st-estado"></div>
+      <div class="form-actions">
+        <button class="btn ghost" id="st-atras" type="button">← Atrás</button>
+        <button class="btn big" id="st-comenzar" type="button">▶ Comenzar</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== TERAPIA EN CURSO ========== -->
+  <section id="view-live" class="view" hidden>
+    <div class="card vivo">
+      <div class="row-between">
+        <div><h2>ASTRA | Terapia en curso</h2><p class="muted" id="lv-paciente"></p></div>
+        <span class="pill" id="lv-sistema">—</span>
+      </div>
+      <hr>
+      <div class="vivo-top">
+        <div><span class="muted">Postura estimada</span><b class="postura" id="lv-postura">—</b></div>
+        <div><span class="muted">Tiempo de sesión</span><b class="reloj" id="lv-tiempo">00:00</b></div>
+      </div>
+      <div class="calibrando" id="lv-cal" hidden>
+        <b id="lv-cal-titulo">Calibrando…</b>
+        <span id="lv-cal-txt">Mantén la cabeza del niño apoyada y quieta.</span>
+        <div class="bar"><div id="lv-cal-bar"></div></div>
+      </div>
+      <h3>Señal EMG en tiempo real</h3>
+      <canvas id="live" class="live"></canvas>
+      <div class="vivo-kpis">
+        <div class="kpi"><span>Tiempo cabeza abajo</span><b id="lv-abajo">00:00</b></div>
+        <div class="kpi"><span>Episodios de cabeza abajo</span><b id="lv-caidas">0</b></div>
+      </div>
+      <p class="pie" id="lv-pie"></p>
+      <div class="form-actions">
+        <div class="form-actions left">
+          <button class="btn ghost" id="lv-pausa" type="button">❚❚ Pausar</button>
+          <button class="btn ghost" id="lv-recal" type="button" title="Si el niño cambió de posición o se movieron los electrodos">↻ Volver a calibrar</button>
+        </div>
+        <button class="btn danger" id="lv-fin" type="button">■ Finalizar sesión</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== FIN DE LA SESIÓN ========== -->
+  <section id="view-end" class="view" hidden>
+    <div class="card form-card">
+      <h2>Sesión terminada · <span class="id-tag" id="en-id"></span></h2>
+      <p class="muted" id="en-sub"></p>
+      <div class="kpis" id="en-kpis"></div>
+      <label>Observaciones de la sesión (opcional)<textarea id="en-obs" rows="3" placeholder="p. ej. toleró bien, se distrajo al final, se cambió de posición…"></textarea></label>
+      <div class="form-actions">
+        <button class="btn ghost danger-text" id="en-descartar" type="button">Descartar</button>
+        <div class="form-actions left">
+          <button class="btn ghost" id="en-excel" type="button">⬇ Descargar Excel</button>
+          <button class="btn big" id="en-guardar" type="button">Guardar sesión</button>
+        </div>
+      </div>
     </div>
   </section>
 </main>
 
 <!-- ========== AJUSTES ========== -->
 <dialog id="dlg-settings">
-  <form method="dialog" id="form-settings">
+  <form method="dialog">
     <h2>Ajustes</h2>
-    <div id="settings-fields" class="grid3"></div>
+    <h3>Música del atril</h3>
+    <p class="muted small-text" id="mus-estado"></p>
+    <div class="grid2">
+      <label>Canción con la cabeza ARRIBA<select id="mus-arriba"></select></label>
+      <label>Canción con la cabeza ABAJO<select id="mus-abajo"></select></label>
+    </div>
+    <label>Volumen <b id="vol-val">—</b><input type="range" id="vol" min="0" max="30" step="1"></label>
     <hr>
     <h3>Datos</h3>
     <div class="form-actions left">
-      <button class="btn ghost" type="button" id="btn-backup">Descargar respaldo (JSON)</button>
-      <button class="btn ghost" type="button" id="btn-restore">Importar respaldo…</button>
+      <button class="btn ghost small" type="button" id="btn-backup">Descargar respaldo</button>
+      <button class="btn ghost small" type="button" id="btn-restore">Importar respaldo…</button>
       <input type="file" id="file-restore" accept=".json" hidden>
-      <button class="btn ghost" type="button" id="btn-subir" hidden>Subir al servidor los datos guardados en este navegador</button>
+      <button class="btn ghost small" type="button" id="btn-subir" hidden>Subir datos guardados en este navegador</button>
     </div>
+    <hr>
     <div class="form-actions">
-      <button class="btn ghost" value="cancel" type="submit">Cancelar</button>
-      <button class="btn primary" id="btn-save-settings" type="button">Guardar</button>
+      <button class="btn ghost small" type="button" id="btn-sim">Modo demostración (sin equipo)</button>
+      <button class="btn" value="cancel" type="submit">Listo</button>
     </div>
   </form>
 </dialog>
@@ -346,6 +250,7 @@
 <script src="js/atril.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/charts.js"></script>
+<script src="js/excel.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

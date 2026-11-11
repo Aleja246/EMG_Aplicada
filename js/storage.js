@@ -53,8 +53,14 @@
     sessionsFor(pid) {
       return Store.sessions().filter(s => s.patientId === pid).sort((a, b) => a.fecha.localeCompare(b.fecha));
     },
+    /** Siguiente ID de paciente: AST-0001, AST-0002… */
+    nextCodigo() {
+      const n = Store.patients().reduce((m, x) => Math.max(m, parseInt(String(x.codigo || '').replace(/\D/g, ''), 10) || 0), 0) + 1;
+      return 'AST-' + String(n).padStart(4, '0');
+    },
     savePatient(p) {
       if (!p.id) { p.id = uid(); p.creado = new Date().toISOString(); }
+      if (!p.codigo) p.codigo = Store.nextCodigo();   // ID con el que se identifica al paciente (sin nombre)
       if (remoto.activo) {
         const i = remoto.pacientes.findIndex(x => x.id === p.id); if (i >= 0) remoto.pacientes[i] = p; else remoto.pacientes.push(p);
         pedir('POST', '/api/pacientes', p).catch(avisarError);

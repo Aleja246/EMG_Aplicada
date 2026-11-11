@@ -65,6 +65,9 @@
     async musica(lista, p) {
       try { await this.be.musica(lista, p); return true; } catch (e) { return false; }
     }
+    async volumen(v) {
+      try { await this.be.volumen(v); return true; } catch (e) { return false; }
+    }
     stop() { this.run = false; this.be.stop(); this._set('disconnected'); }
   }
 
@@ -92,7 +95,7 @@
       this.nActiv = 0; this.tActMs = 0; this.sid = 0; this.msSes = 0; this.msSesIni = 0;
       this.tCambio = 0; this.abajoAntes = false; this.tIniAbajo = 0; this.tUltCancion = -1e9; this.cancion = 4; this.orden = 0;
       this.mus = { abajo: [1, 2, 3], arriba: [4, 5, 6], idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
-        tAviso: 0, tPista: 0, subio: false, reiniciar: false, tLista: performance.now() + 2300, tCmd: 0 };
+        tAviso: 0, tPista: 0, subio: false, reiniciar: false, tLista: performance.now() + 2300, tCmd: 0, vol: 15 };
       this.tPrev = performance.now();
       this._msg('=== ASTRA - atril v5.1 (simulado) ===');
       this._msg('>> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).');
@@ -256,6 +259,7 @@
       if (this.mus.sonando && this.mus.lista === lista) this.mus.reiniciar = true;
       return Promise.resolve({ ok: true });
     }
+    volumen(v) { this.mus.vol = Math.max(0, Math.min(30, Math.round(v))); this._msg('>> Volumen: ' + this.mus.vol + ' de 30'); return Promise.resolve({ ok: true }); }
     _velE() {
       if (this.modo === 'SESION' && this._datosOK() && this._abajo()) {
         const k = Math.min((this._ms() - this.tCambio) / C.T_ACEL, 1);
@@ -279,7 +283,7 @@
         sid: this.sid, nAct: this.nActiv, tAct: r1(this.tActMs / 1000), tSes: r1(this.msSes / 1000), velE: this._velE(),
         cancion: this.cancion, orden: this.orden, malas: 0, rssi: -40,
         musica: { carpeta: 1, abajo: this.mus.abajo.slice(), arriba: this.mus.arriba.slice(), sonando: this.mus.sonando ? 1 : 0,
-          lista: this.mus.lista, pista: this.cancion, aviso: this.mus.aviso ? 1 : 0, avisoPista: 1 },
+          lista: this.mus.lista, pista: this.cancion, aviso: this.mus.aviso ? 1 : 0, avisoPista: 1, vol: this.mus.vol },
         bn: this.nBlq, b: pick(this.blq, this.nBlq, q.b),
         an: this.nAct, acts: pick(this.acts, this.nAct, q.a),
         ln: this.nLog, logs: pick(this.logs, this.nLog, q.l)
@@ -301,7 +305,8 @@
       this.parser = new EMG.PacketParser(arr => h.onSamples(arr));
       const link = this;
       this.emg = { kind: 'servidor', get lost() { return link.parser.lost; }, stop() { link.stop(); } };
-      this.atril = { kind: 'servidor', cmd: c => link._enviar({ type: 'cmd', c }), musica: (l, p) => link._enviar({ type: 'musica', l, p }), stop() { link.stop(); } };
+      this.atril = { kind: 'servidor', cmd: c => link._enviar({ type: 'cmd', c }), musica: (l, p) => link._enviar({ type: 'musica', l, p }),
+        volumen: v => link._enviar({ type: 'volumen', v }), stop() { link.stop(); } };
       this._conectar();
     }
     _conectar() {

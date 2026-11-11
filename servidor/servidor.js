@@ -86,6 +86,7 @@ function mensajeDePagina(m) {
   if (m.type === 'cmd' && /^[cprh+\-xio]$/.test(m.c || '')) aAtril('C ' + m.c);
   else if (m.type === 'musica' && (m.l === 'abajo' || m.l === 'arriba') && Array.isArray(m.p) && m.p.length === 3 &&
            m.p.every(v => Number.isInteger(v) && v >= 1 && v <= 255)) aAtril('M ' + m.l + ' ' + m.p.join(','));
+  else if (m.type === 'volumen' && Number.isInteger(m.v) && m.v >= 0 && m.v <= 30) aAtril('V ' + m.v);
 }
 
 /* ---------------- Arduino: TCP 9001, paquetes binarios ---------------- */
@@ -217,8 +218,13 @@ async function api(req, res, u) {
     if (!id && m === 'GET') return json(res, 200, { pacientes: pacientes.map(resumenPaciente) });
     if (!id && m === 'POST') {
       const p = await cuerpo(req);
-      if (!p.nombres || !p.apellidos) return json(res, 400, { error: 'Faltan nombre y apellidos' });
+      delete p.nombres; delete p.apellidos; delete p.nacimiento;      // confidencialidad: nunca se guardan nombres
       p.id = idValido(p.id) ? p.id : uid(); p.creado = p.creado || new Date().toISOString();
+      // ID del paciente (AST-0001, AST-0002...): único; si falta o ya lo tiene otro, se asigna el siguiente
+      if (!/^AST-\d{4,}$/.test(p.codigo || '') || pacientes.some(x => x.codigo === p.codigo && x.id !== p.id)) {
+        const n = Math.max(0, ...pacientes.map(x => +(String(x.codigo || '').split('-')[1]) || 0)) + 1;
+        p.codigo = 'AST-' + String(n).padStart(4, '0');
+      }
       const i = pacientes.findIndex(x => x.id === p.id); if (i >= 0) pacientes[i] = p; else pacientes.push(p);
       escribir('pacientes.json', pacientes); return json(res, 200, { paciente: p });
     }

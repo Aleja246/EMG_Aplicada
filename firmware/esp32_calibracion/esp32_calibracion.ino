@@ -54,9 +54,10 @@
 //     mensajes nuevos del monitor serie. El servidor lo pasa a la pagina.
 //   - Recibe lineas del servidor:  "C x"            = tecla x del monitor serie
 //                                  "M abajo 1,2,3"  = pistas de una lista
-//   - Las listas elegidas en la pagina se guardan en la memoria del ESP32
-//     (Preferences): al volver a encender siguen igual, con o sin pagina.
-//     Si la lista que cambias es la que suena, empieza ya con la nueva.
+//                                  "V 20"           = volumen (0 a 30)
+//   - Las listas y el volumen elegidos en la pagina se guardan en la memoria
+//     del ESP32 (Preferences): al volver a encender siguen igual, con o sin
+//     pagina. Si la lista que cambias es la que suena, empieza ya con la nueva.
 //   - La red corre en el nucleo 0; motores, luz, musica y deteccion siguen en
 //     el nucleo 1: la pagina nunca los frena. Sin WiFi el atril funciona igual.
 //   - Para la pagina se numera cada sesion (sube al terminar cada
@@ -241,7 +242,7 @@ const char *RED_CLAVE = "astra2026";      // <-- su clave
 const char *SERVIDOR_IP = "";             // p. ej. "192.168.1.50"; vacio = buscarlo solo
 const uint16_t PUERTO_SERVIDOR = 9002;
 const uint16_t PUERTO_AVISO    = 9999;
-const char *VERSION_ATRIL = "7";
+const char *VERSION_ATRIL = "7.1";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -357,6 +358,8 @@ uint32_t nActLista = 0;
 QueueHandle_t colaCmd = NULL;       // comandos de la pagina -> loop
 struct PedidoMusica { uint8_t abajo; uint8_t p[3]; };
 QueueHandle_t colaMusica = NULL;    // listas de musica de la pagina -> loop
+QueueHandle_t colaVolumen = NULL;   // volumen de la pagina -> loop
+int volumen = VOLUMEN;              // volumen en uso (0 a 30); VOLUMEN es el de fabrica
 bool reiniciarLista = false;        // la lista que suena cambio: empezar ya con la nueva
 Preferences prefs;
 volatile int8_t avisoWifi = 0;      // 1/-1 red, 2/-2 servidor (lo imprime el loop)
@@ -459,6 +462,7 @@ void cargarListas() {
   uint8_t a[PISTAS_POR_LISTA], b[PISTAS_POR_LISTA];
   prefs.begin("astra", false);
   size_t na = prefs.getBytes("abajo", a, sizeof a), nb = prefs.getBytes("arriba", b, sizeof b);
+  volumen = constrain((int)prefs.getUChar("vol", VOLUMEN), 0, 30);
   prefs.end();
   if (na == sizeof a && a[0] && a[1] && a[2]) for (int k = 0; k < PISTAS_POR_LISTA; k++) pistasAbajo[k] = a[k];
   if (nb == sizeof b && b[0] && b[1] && b[2]) for (int k = 0; k < PISTAS_POR_LISTA; k++) pistasArriba[k] = b[k];
@@ -477,6 +481,17 @@ void aplicarMusica(const PedidoMusica &m) {
   if (!configurarPistas(m.abajo, m.p[0], m.p[1], m.p[2])) return;
   guardarLista(m.abajo);
   if (musicaSonando && (bool)m.abajo == listaAbajoSonando) reiniciarLista = true;
+}
+
+// Volumen pedido por la pagina (0 a 30): se aplica ya y se guarda
+void aplicarVolumen(int v) {
+  volumen = constrain(v, 0, 30);
+  dfEnviar(0x06, volumen);
+  ultimoCmdMusica = millis();
+  prefs.begin("astra", false);
+  prefs.putUChar("vol", (uint8_t)volumen);
+  prefs.end();
+  Log.printf(">> Volumen: %d de 30\n", volumen);
 }
 
 // Toca una pista de la lista de cabeza abajo / arriba (carpeta /01).
@@ -833,6 +848,8 @@ void leerComandos() {
   while (colaCmd && xQueueReceive(colaCmd, &c, 0) == pdTRUE) ejecutarComando(c);
   PedidoMusica m;
   while (colaMusica && xQueueReceive(colaMusica, &m, 0) == pdTRUE) aplicarMusica(m);
+  uint8_t vol;
+  while (colaVolumen && xQueueReceive(colaVolumen, &vol, 0) == pdTRUE) aplicarVolumen(vol);
 }
 
 void revisarBoot() {
@@ -938,7 +955,7 @@ void actualizarModo() {
   // Reenvio del volumen (el DFPlayer pierde la configuracion si se queda sin energia)
   if (dfVolumenEn && (long)(ahora - dfVolumenEn) >= 0) {
     dfVolumenEn = 0;
-    dfEnviar(0x06, VOLUMEN);
+    dfEnviar(0x06, volumen);
   }
 
   // Respuestas del DFPlayer (fin de pista / fin del aviso)
@@ -1164,9 +1181,9 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":%d",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
      lineasMalas, (int)WiFi.RSSI());
-  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d],\"arriba\":[%d,%d,%d],\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d}",
+  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d],\"arriba\":[%d,%d,%d],\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d,\"vol\":%d}",
      CARPETA_MUSICA, pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasArriba[0], pistasArriba[1], pistasArriba[2],
-     musicaSonando ? 1 : 0, listaAbajoSonando ? "abajo" : "arriba", cancion, avisoSonando ? 1 : 0, PISTA_AVISO);
+     musicaSonando ? 1 : 0, listaAbajoSonando ? "abajo" : "arriba", cancion, avisoSonando ? 1 : 0, PISTA_AVISO, volumen);
   ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
   for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%.1f,%d]" : "[%ld,%.1f,%d]", (long)br[i], bm[i], bf[i]);
   ja("],\"an\":%lu,\"acts\":[", (unsigned long)na);
@@ -1189,6 +1206,9 @@ void lineaDelServidor(const char *l) {
       PedidoMusica m = {(uint8_t)(!strcmp(lista, "abajo") ? 1 : 0), {(uint8_t)a, (uint8_t)b, (uint8_t)c}};
       if (colaMusica) xQueueSend(colaMusica, &m, 0);
     }
+  } else if (l[0] == 'V' && l[1] == ' ') {
+    int v = atoi(l + 2);
+    if (v >= 0 && v <= 30 && l[2] >= '0' && l[2] <= '9') { uint8_t b = (uint8_t)v; if (colaVolumen) xQueueSend(colaVolumen, &b, 0); }
   }
 }
 
@@ -1260,7 +1280,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v7 (sonido + servidor de la pagina) ===");
+  Serial.println("=== ASTRA - atril v7.1 (sonido + servidor de la pagina) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
@@ -1284,6 +1304,7 @@ void setup() {
   idArranque = (uint32_t)random(1, 2000000000);
   colaCmd = xQueueCreate(16, sizeof(char));
   colaMusica = xQueueCreate(4, sizeof(PedidoMusica));
+  colaVolumen = xQueueCreate(4, sizeof(uint8_t));
   if (USAR_WIFI) xTaskCreatePinnedToCore(tareaRed, "red", 8192, NULL, 1, NULL, 0);  // nucleo 0
 
   if (USAR_PARO && digitalRead(PIN_PARO) == LOW) {
