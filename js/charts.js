@@ -215,5 +215,60 @@
     }
   }
 
+  /* ACTIVACIÓN, como el Serial Plotter: el RMS que el Arduino manda al atril (SinArm, 1 cada 100 ms),
+   * el nivel que compara el atril (mediana de 1.3 s) y el umbral vigente (de caída o de subida).
+   * Sombreado: cuando el atril dice "cabeza abajo". Escala automática del mínimo al máximo, como el plotter. */
+  class ActChart {
+    constructor(canvas) { this.c = canvas; this.lo = 0; this.hi = 0; this.setWindow(15); }
+    setWindow(s) { this.win = s; this.N = Math.round(s * 10); this.v = []; this.m = []; this.u = []; this.ab = []; }
+    push(v, m, u, abajo) {
+      this.v.push(v); this.m.push(m); this.u.push(u > 0 ? u : NaN); this.ab.push(abajo ? 1 : 0);
+      if (this.v.length > this.N) { this.v.shift(); this.m.shift(); this.u.shift(); this.ab.shift(); }
+    }
+    draw() {
+      const { ctx, w, h } = fit(this.c);
+      if (!w || !h) return;
+      const L = 52, R = 10, T = 8, B = 24, W = w - L - R, H = h - T - B, n = this.v.length;
+      ctx.clearRect(0, 0, w, h);
+      // escala: del mínimo al máximo (sin los picos sueltos), con el umbral siempre a la vista
+      let lo = Infinity, hi = -Infinity;
+      if (n) {
+        const ord = this.v.slice().sort((a, b) => a - b), p98 = ord[Math.min(n - 1, Math.floor(n * 0.98))];
+        lo = ord[0]; hi = p98;
+        for (let i = 0; i < n; i++) { if (this.m[i] < lo) lo = this.m[i]; if (this.m[i] > hi) hi = this.m[i]; if (this.u[i] > hi) hi = this.u[i]; }
+      }
+      if (!(hi > lo)) { lo = 0; hi = 10; }
+      const pad = Math.max(1, (hi - lo) * 0.15); lo = Math.max(0, lo - pad); hi = hi + pad;
+      if (!this.hi) { this.lo = lo; this.hi = hi; }
+      this.lo += (lo - this.lo) * 0.2; this.hi += (hi - this.hi) * 0.2;
+      const Y = v => T + H - ((Math.max(this.lo, Math.min(this.hi, v)) - this.lo) / (this.hi - this.lo)) * H;
+      const X = i => L + (i + this.N - n) * W / Math.max(1, this.N - 1);
+      ctx.fillStyle = css('--amber-bg');
+      const paso1 = W / Math.max(1, this.N - 1);
+      for (let i = 0; i < n; i++) {                    // un rectángulo por cada tramo con la cabeza abajo
+        if (!this.ab[i] || (i && this.ab[i - 1])) continue;
+        let j = i; while (j + 1 < n && this.ab[j + 1]) j++;
+        const x0 = Math.max(L, X(i) - paso1 / 2), x1 = Math.min(L + W, X(j) + paso1 / 2);
+        ctx.fillRect(x0, T, x1 - x0, H);
+      }
+      const paso = (this.hi - this.lo) / 4, dec = this.hi - this.lo < 10 ? 1 : 0;
+      axes(ctx, L, T, W, H, this.win, [0, 1, 2, 3, 4].map(k => [Y(this.lo + k * paso), (this.lo + k * paso).toFixed(dec)]), 'mV');
+      const linea = (arr, color, ancho, guiones) => {
+        ctx.strokeStyle = color; ctx.lineWidth = ancho; ctx.setLineDash(guiones || []); ctx.lineJoin = 'round'; ctx.beginPath();
+        let dentro = false;
+        for (let i = 0; i < n; i++) {
+          const v = arr[i];
+          if (!(v === v)) { dentro = false; continue; }
+          if (dentro) ctx.lineTo(X(i), Y(v)); else { ctx.moveTo(X(i), Y(v)); dentro = true; }
+        }
+        ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+      };
+      linea(this.u, css('--amber'), 1.5, [6, 4]);      // umbral vigente
+      linea(this.v, css('--signal'), 1.6);             // RMS (como el Serial Plotter)
+      linea(this.m, css('--star'), 2.6);               // lo que compara el atril
+    }
+  }
+
+  EMG.ActChart = ActChart;
   EMG.LiveChart = LiveChart; EMG.RmsChart = RmsChart; EMG.ProgressChart = ProgressChart; EMG.dibujarSesion = dibujarSesion;
 })();

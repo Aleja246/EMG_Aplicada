@@ -179,9 +179,15 @@
         <div class="bar"><div id="lv-cal-bar"></div></div>
       </div>
       <div class="row-between graf-cab">
-        <div><h3>Señal EMG en tiempo real</h3>
-          <p class="leyenda" title="Línea amarilla: RMS de ~100 ms, como en el Serial Plotter"><span class="linea-act"></span> activación (RMS)</p></div>
-        <div class="zoom" role="group" aria-label="Zoom de la gráfica">
+        <h3>Señal EMG en tiempo real</h3>
+        <div class="seg" role="group" aria-label="Qué mostrar">
+          <button class="btn small ghost on" id="vista-act" type="button">Activación</button>
+          <button class="btn small ghost" id="vista-cruda" type="button">Señal cruda</button>
+        </div>
+      </div>
+      <div class="row-between graf-cab">
+        <p class="leyenda" id="leyenda"></p>
+        <div class="zoom" id="zoom" role="group" aria-label="Zoom de la gráfica" hidden>
           <button class="btn small ghost" id="zoom-menos" type="button" aria-label="Alejar">−</button>
           <button class="btn small ghost" id="zoom-auto" type="button">Auto</button>
           <button class="btn small ghost" id="zoom-mas" type="button" aria-label="Acercar">+</button>
@@ -198,7 +204,7 @@
           <button class="btn ghost" id="lv-pausa" type="button">❚❚ Pausar</button>
           <button class="btn ghost" id="lv-recal" type="button" title="Si el niño cambió de posición o se movieron los electrodos">↻ Recalibrar</button>
         </div>
-        <button class="btn danger" id="lv-fin" type="button">■ Finalizar sesión</button>
+        <button class="btn danger" id="lv-fin" type="button" title="Finalizar la sesión">■ Finalizar</button>
       </div>
     </div>
   </section>
@@ -264,6 +270,7 @@
 
 <div id="toast" class="toast" hidden></div>
 
+<script src="js/version.js"></script>
 <script src="js/dsp.js"></script>
 <script src="js/sources.js"></script>
 <script src="js/atril.js"></script>

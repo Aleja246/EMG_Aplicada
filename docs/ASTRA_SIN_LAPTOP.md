@@ -39,7 +39,7 @@ Con esta versión **no se necesita laptop, Node.js, internet ni GitHub Pages** d
 | | Qué cambió | Qué NO cambió |
 |---|---|---|
 | **Arduino** `firmware/arduino_emg_ap/arduino_emg_ap.ino` (v5.1-AP) | Tu `arduino_emg.ino` v5 con cambios solo en la red y en **qué muestras entran al RMS**:<br>• Se une a la red ASTRA (clave en `credenciales.h`); el atril está fijo en `192.168.4.1`. `WiFi.setTimeout(0)`: unirse a la red ya no detiene el `loop` (antes hasta 10 s).<br>• **Las muestras tomadas mientras el WiFi transmite se apartan del RMS** (el del opto y el del Serial Plotter). Cada transmisión hace que el módulo WiFi consuma corriente de golpe, y como el ADC mide contra los 5 V de la placa, esas lecturas salen movidas. Los filtros siguen recibiendo todas las muestras. **Sin WiFi el RMS es exactamente el de siempre.**<br>• El WiFi transmite justo **después** de cada línea del opto, 10 veces por segundo (antes 25), para que el atril reciba el RMS a tiempo. Si un envío tarda más de 60 ms, la señal en vivo descansa 3 s; el opto nunca se pausa.<br>• Solo transmite la señal cuando hay una página abierta mirándola (lo decide el atril). | Muestreo de 1000 Hz, A0, filtros (60 Hz y armónicos), bloques de 100 ms, opto (Serial1, 9600, `"640\n"`), formato del Serial Plotter (`Bruto`, `Sin60`, `SinArm`). |
-| **ESP32** `firmware/esp32_atril_ap/esp32_atril_ap.ino` (v8.2) | Se generó **desde tu firmware original** (v5 con sonido, en `herramientas/firmware/`) con las adaptaciones ya probadas del v7.1 y una parte de red nueva: red ASTRA, página desde LittleFS, señal del Arduino por WiFi y WebSocket.<br>**Calibración (v8.1):**<br>• El reposo y su dispersión se calculan con **mediana y MAD** en lugar de media y DE: un movimiento, una risa o un espasmo breve durante los 10 s ya no sube el umbral.<br>• Umbral de activación = reposo + el mayor de **3 DE**, **2 mV** o **20 % del reposo** (antes 2 DE o 2 mV, demasiado pegado al ruido).<br>• **Sensibilidad** elegible en la página (ver sección 4).<br>**Detección de la subida (v8.2):** el atril mide el nivel de la señal **con la cabeza arriba** (mediana de los últimos 3 s) y lo vuelve a aprender 1 s cada vez que la cabeza sube. Una caída es subir sobre **ese** nivel, y la cabeza "subió" cuando la señal baja al 40 % del camino entre ese nivel y el pico de la caída. Antes, si el niño sostenía la cabeza con más fuerza que al calibrar, tras la primera caída el atril se quedaba en "cabeza abajo".<br>**Canciones (v8.2):** por defecto, cabeza arriba = pistas 001–003 y cabeza abajo = 004–006. | Pines, orden de bobinas, velocidades, aceleraciones, límites, microswitch, 10 s de calibración con el primer segundo descartado, mediana de 0,5 s, umbral de relajación (60 %), confirmaciones de 300 ms, detección cabeza arriba/abajo, luz, DFPlayer, listas, avisos, PARO, BOOT y todos los comandos del monitor serie (`+` y `-` siguen ajustando el factor). |
+| **ESP32** `firmware/esp32_atril_ap/esp32_atril_ap.ino` (v8.3) | Se generó **desde tu firmware original** (v5 con sonido, en `herramientas/firmware/`) con las adaptaciones ya probadas del v7.1 y una parte de red nueva: red ASTRA, página desde LittleFS, señal del Arduino por WiFi y WebSocket.<br>**Calibración (v8.1):**<br>• El reposo y su dispersión se calculan con **mediana y MAD** en lugar de media y DE: un movimiento, una risa o un espasmo breve durante los 10 s ya no sube el umbral.<br>• Umbral de activación = reposo + el mayor de **3 DE**, **2 mV** o **20 % del reposo** (antes 2 DE o 2 mV, demasiado pegado al ruido).<br>• **Sensibilidad** elegible en la página (ver sección 4).<br>**Detección de la subida (v8.2):** el atril mide el nivel de la señal **con la cabeza arriba** (mediana de los últimos 3 s) y lo vuelve a aprender 1 s cada vez que la cabeza sube. Una caída es subir sobre **ese** nivel, y la cabeza "subió" cuando la señal baja al 40 % del camino entre ese nivel y el pico de la caída. Antes, si el niño sostenía la cabeza con más fuerza que al calibrar, tras la primera caída el atril se quedaba en "cabeza abajo".<br>**Canciones (v8.2):** por defecto, cabeza arriba = pistas 001–003 y cabeza abajo = 004–006.<br>**Detección con poco contraste (v8.3, probada con los valores de tu Serial Plotter):** el nivel que compara el atril es la **mediana de 1,3 s** (antes 0,5 s): quita el vaivén y los picos o espasmos de menos de ~0,6 s. Retraso típico: ~1 s. Al subir la cabeza espera 0,8 s antes de reaprender el nivel de arriba, y solo guarda valores claramente de arriba.<br>**Página dentro del firmware (v8.3):** `pagina_web.h`. | Pines, orden de bobinas, velocidades, aceleraciones, límites, microswitch, 10 s de calibración con el primer segundo descartado, mediana de 0,5 s, umbral de relajación (60 %), confirmaciones de 300 ms, detección cabeza arriba/abajo, luz, DFPlayer, listas, avisos, PARO, BOOT y todos los comandos del monitor serie (`+` y `-` siguen ajustando el factor). |
 | **Página** | La sirve el ESP32. Los registros se guardan en el navegador (IndexedDB). El registro pide solo sexo, edad en años, GMFCS y diagnóstico opcional. Canciones: «Canción 1, 2 y 3» para cada posición. Sensibilidad por paciente. Diagnóstico de conexión en Ajustes. En la gráfica no se dibujan las muestras apartadas por el WiFi. | Diseño, pantallas, terapia en vivo, expediente, progreso, Excel, volumen y modo demostración. |
 
 ---
@@ -99,34 +99,37 @@ La clave **no** se sube a GitHub. En **cada una** de estas dos carpetas:
 Si no creas `credenciales.h`, se usa la clave de ejemplo `CAMBIA-ESTA-CLAVE`. Funciona, pero es pública:
 cámbiala.
 
-### 3.5 Cargar el ESP32 (atril)
-1. Conecta el ESP32 por USB y abre `firmware/esp32_atril_ap/esp32_atril_ap.ino`.
+### 3.5 Cargar el ESP32 (atril) — la página va DENTRO del programa
+Desde la v8.3 la página está incluida en el programa del atril (`pagina_web.h`): **ya no hace falta subir LittleFS**
+y la página siempre es la de esa versión.
+
+1. **Usa la carpeta completa** `firmware/esp32_atril_ap/` del proyecto descargado. Junto a `esp32_atril_ap.ino`
+   tienen que estar **`pagina_web.h`** y tu **`credenciales.h`**.
+   - Ábrela con *Archivo → Abrir…* eligiendo `esp32_atril_ap.ino` dentro de esa carpeta.
+   - **No** uses *Guardar como* ni pegues el código en un sketch nuevo: el IDE crea otra carpeta (por ejemplo
+     `esp32_atril_ap.ino/esp32_atril_ap.ino.ino`) **sin** `pagina_web.h`, y entonces el atril sirve una página vieja
+     de LittleFS. Esa fue la causa de la gráfica con «miles de mV» y de las canciones volteadas.
+   - Si actualizas desde una versión anterior, **reemplaza la carpeta entera** (conserva solo tu `credenciales.h`).
 2. *Herramientas*:
    - **Placa:** `ESP32 Dev Module`
    - **Partition Scheme:** `No OTA (2MB APP/2MB SPIFFS)` (también sirve `Default 4MB with spiffs (1.2MB APP/1.5MB SPIFFS)`)
    - **Puerto:** el del ESP32
 3. Pulsa **Subir**. Si se queda en `Connecting...`, mantén presionado **BOOT** hasta que empiece.
 
-### 3.6 Subir la página al ESP32 (LittleFS)
-La página ya viene preparada en `firmware/esp32_atril_ap/data/` (10 archivos comprimidos, 53 KB).
-
-1. **Cierra el Monitor Serie** (si está abierto, la subida falla).
-2. Con el mismo sketch abierto y la **misma** *Partition Scheme* del paso anterior, presiona
-   **Ctrl + Shift + P** y elige **`Upload LittleFS to Pico/ESP8266/ESP32`**.
-3. Espera a que diga que terminó.
-
-Hay que repetir este paso **solo** si cambias la página, si cambias la *Partition Scheme* o si borras la flash
-del ESP32. Subir el sketch **no** borra la página.
+### 3.6 (Opcional) LittleFS
+Solo se usa si falta `pagina_web.h` junto al `.ino`. En ese caso la página se toma de `data/` (súbela con
+**Ctrl + Shift + P → `Upload LittleFS to Pico/ESP8266/ESP32`**, con el Monitor Serie cerrado y la misma
+*Partition Scheme*). Si la página de LittleFS es de otra versión, la página muestra un aviso rojo.
 
 ### 3.7 Comprobar el atril
 Abre el **Monitor Serie a 115200 baudios** («Sin ajuste de línea») y presiona **EN/RST**. Debe decir:
 ```
-=== ASTRA - atril v8 (sonido + red ASTRA + pagina en 192.168.4.1) ===
->> Pagina: 10 archivos (53 KB en RAM). RAM libre: ... KB
+=== ASTRA - atril v8.3 (sonido + red ASTRA + pagina en 192.168.4.1) ===
+>> Pagina incluida en el firmware (version 8.3, 11 archivos): no hace falta subir LittleFS. RAM libre: ... KB
 >> Red WiFi "ASTRA" lista. En el celular: unete a la red y abre http://192.168.4.1
 >> Pagina web lista.
 ```
-Si dice `LittleFS no tiene la pagina`, repite el paso 3.6.
+Si en cambio dice `Pagina de LittleFS, version ...`, falta `pagina_web.h` junto al `.ino` (vuelve al paso 3.5).
 
 ### 3.8 Cargar el Arduino (sensor)
 1. Conecta el Arduino UNO R4 WiFi por USB y abre `firmware/arduino_emg_ap/arduino_emg_ap.ino`.
@@ -214,10 +217,15 @@ Una computadora con WiFi se usa igual: se une a la red ASTRA y abre `http://192.
   ~0,3 s) se ignoran; los más largos pueden contar como una caída breve.
 
 ### La gráfica en vivo
-- La línea **amarilla** es la **activación** (RMS de ~100 ms), igual que `SinArm` en el Serial Plotter: sube claramente
-  en cada contracción. Debajo, en verde agua, está la señal EMG filtrada.
-- La escala se ajusta sola (**Auto**) sin que un pico suelto la aplaste. El semiespinoso de la cabeza da señales
-  pequeñas: si no se aprecia bien, usa **+** para acercar (×2, ×4…) y **−** para alejar. El zoom se recuerda en ese celular.
+- **Activación** (la vista de siempre): es **lo mismo que el Serial Plotter** (`SinArm`), el RMS que el Arduino
+  manda al atril cada 100 ms, en mV.
+  - La línea **amarilla** es el nivel que compara el atril (mediana de 1,3 s).
+  - La línea **punteada** es el umbral vigente: de caída con la cabeza arriba, de subida con la cabeza abajo.
+  - El sombreado marca cuándo el atril detecta **cabeza abajo**.
+  - La escala va del mínimo al máximo, como el plotter.
+  - Esta vista no depende de la señal en vivo por WiFi (viene del atril).
+- **Señal cruda**: la señal EMG filtrada (1000 muestras/s) con la línea de activación encima. Tiene zoom
+  (**−**, **Auto**, **+**). Las muestras tomadas mientras el WiFi del Arduino transmite no se dibujan.
 
 ## 5. Dónde se guardan los pacientes y las sesiones
 
@@ -281,6 +289,7 @@ También puedes abrir `http://192.168.4.1/estado.json`.
 |---|---|
 | No aparece la red **ASTRA** | ¿El atril está encendido? En el monitor serie del ESP32 (115200) debe decir `Red WiFi "ASTRA" lista`. Si dice `No se pudo crear la red WiFi`, la clave de `credenciales.h` debe tener de 8 a 63 caracteres. |
 | El celular se une pero la página no abre | Escribe `http://192.168.4.1` completo (sin `https`). Android: elige «Mantener conexión» y apaga los datos móviles. Cierra la VPN si tienes una. |
+| La gráfica muestra **miles de mV** y mucho «ruido», o las canciones salen volteadas | El atril está sirviendo una **página vieja**. Carga el atril desde la carpeta completa `firmware/esp32_atril_ap/` con `pagina_web.h` (paso 3.5). La página nueva muestra un aviso rojo si no corresponde al programa del atril. |
 | La página dice «LittleFS no tiene la página» / «todavía no tiene la página» | Repite el paso 3.6 (Upload LittleFS) con la misma *Partition Scheme* con la que subiste el sketch. |
 | Arriba dice **«Sin conexión con el atril»** | El celular se salió de la red ASTRA (a veces vuelve solo a otra red con internet). Vuelve a unirte a ASTRA. La página se reconecta sola. |
 | **«Sensor sin conexión»** / no se ve la señal EMG | Monitor serie del Arduino (250000): ¿dice `WiFi conectado a ASTRA`? Si no, la clave de `credenciales.h` del Arduino no es igual a la del atril. ¿Dice `Conectado al servidor`? Si no, ¿el atril está encendido? El Arduino reintenta solo. |
@@ -336,12 +345,12 @@ También puedes abrir `http://192.168.4.1/estado.json`.
   `red` con prioridad 1 y el servidor web con prioridad 3. El `loop` con motores, luz, música, detección y PARO
   sigue solo en el **núcleo 1**. Se comunican con colas (comandos, música, volumen, avisos) y con copias
   protegidas por candado; la red nunca cambia el estado del atril directamente.
-- **Flash:** la página (53 KB) se copia **a la RAM al encender**, antes de mover los motores. Durante la terapia
-  no se lee la flash: leerla detiene un instante el otro núcleo. Solo se escribe la flash al cambiar la música o
-  el volumen, igual que en el v7.1.
-- **RAM:** 53 KB de la página + unos 8 KB del estado + las pilas de las tareas (8 KB la de red, 6 KB la del
-  servidor). La memoria libre real se ve en el diagnóstico y en el monitor serie al encender. Si algún archivo no
-  cupiera, se lee de la flash en pedazos y se avisa.
+- **Flash:** la página (58 KB comprimida) está **dentro del programa** (`pagina_web.h`, constantes en la flash del
+  programa que el ESP32 lee por su caché, como el código). No usa LittleFS ni las operaciones de flash que detienen
+  un instante el otro núcleo. Solo se escribe la flash al cambiar la música o el volumen, igual que en el v7.1. Con la
+  página de LittleFS (si falta `pagina_web.h`), esta se copia a la RAM al encender, antes de mover los motores.
+- **RAM:** unos 8 KB del estado y las pilas de las tareas (8 KB la de red, 6 KB la del servidor); la página no ocupa
+  RAM. La memoria libre real se ve en el diagnóstico y en el monitor serie al encender.
 - **Sockets:** 8 conexiones para el servidor (+3 internas) + Arduino + aviso UDP = 14 de los 16 de lwIP.
   Como máximo hay 3 páginas en vivo.
 - **Arduino y WiFi:** el Arduino transmite la señal solo cuando hay una página abierta, justo después de cada línea
@@ -375,6 +384,9 @@ compiladores del ESP32 y del UNO R4 están bloqueadas en este entorno):
 | **v5.1-AP, ruido del WiFi** (modelo: cada envío mueve unos mV la lectura de A0 durante ~3 ms) | Tu código de diagnóstico sin WiFi: reposo 4,6 mV, contraste de una contracción 7,2 veces. **v5-AP:** reposo 6,8 mV (+48 %), contraste 5,0. **v5.1-AP:** reposo 5,2 mV, contraste 6,4. La magnitud real depende de tu placa: el diagnóstico la mide. |
 | **v5.1-AP, WiFi lento** (1 de cada 15 envíos se atasca 400 ms) | Esperas de más de 200 ms sin RMS en el atril: v5-AP 22 (una de 509 ms, que dispara «sin datos»); **v5.1-AP 5, ninguna de 500 ms** |
 | **v8.1, calibración con niño con PC** (3 casos aleatorios: 8 caídas reales, algunas débiles, y 8 espasmos breves; a veces se mueve durante la calibración) | Firmware original: si se mueve al calibrar, umbral ≈ 47 mV y detecta **0–1 de 8**; si está quieto, **3–8 falsas alarmas**. **v8.1: 8 de 8 siempre, 2–3 falsas alarmas** |
+| **v8.3 con TUS valores del Serial Plotter** (cabeza arriba 15–22 mV con picos breves de hasta 42; cabeza abajo sostenida 18–29 mV; 7 casos, 140 caídas) | Tu original: cuenta caídas y subidas de más (parpadea), 13 falsas y 19 picos breves tomados como caída en 100 caídas. v8.2: pierde subidas (53 s equivocado en 100 caídas). **v8.3: 140 de 140 caídas, 1 falsa, 0 picos, 4 s equivocado en total, ~1 s de retraso** |
+| v8.3, niño con PC con espasmos (10 casos, 80 caídas) | 80 de 80, 0 falsas |
+| v8.3 sin LittleFS (sin carpeta `data/`) | El atril sirve la página desde el firmware; una página de otra versión muestra el aviso rojo |
 | **v8.2, subir y bajar la cabeza** (10 ciclos; calibrado con la cabeza apoyada a 15 mV; cabeza arriba sostenida a 20, 24 o 28 mV; abajo a 40–45 mV) | Original y v8.1: detectan la primera caída y se quedan en "abajo" (**0 de 10 subidas**). **v8.2: se equivoca solo el primer ciclo (~4 s) y luego 9 de 9 caídas y 9 de 9 subidas.** Calibrado con la cabeza arriba (arriba 30, abajo 38 mV, diferencia de solo 27 %): 9–10 de 10 |
 | v8.2, niño con PC (caídas débiles y espasmos) | 8 de 8 caídas, 0–1 falsas alarmas (v8.1: 2–3) |
 | v8.2 contra tu original, mismo escenario | Mismos mensajes del monitor serie salvo la calibración; los comandos al DFPlayer cambian solo por el nuevo orden de las canciones (arriba 001–003, abajo 004–006) |

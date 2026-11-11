@@ -81,7 +81,7 @@
    * =================================================================== */
   const C = {
     CAL_MS: 10000, DESC_MS: 1000, MIN_MUESTRAS: 20, CV_MAX: 0.5, K_INICIAL: 3, MARGEN: 2, OFF: 0.6,
-    N_MED: 5, CONFIRMAR: 300, HOLGURA: 50, WATCHDOG: 500, V_LENTO: 600, V_RAPIDO: 1000, T_ACEL: 2000,
+    N_MED: 13, CONFIRMAR: 300, HOLGURA: 50, WATCHDOG: 500, V_LENTO: 600, V_RAPIDO: 1000, T_ACEL: 2000,
     N_CANCIONES: 3, ABAJO_MIN: 1000, ENTRE_CANCIONES: 5000
   };
 
