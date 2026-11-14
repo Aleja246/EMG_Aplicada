@@ -15,16 +15,16 @@
     return { ctx, w, h };
   }
 
-  /* Señal EMG + envolvente en tiempo real (buffer circular, mín/máx por columna de píxeles). */
+  /* Señal EMG cruda del Arduino (filtrada) en tiempo real: buffer circular, mín/máx por columna de píxeles.
+   * flag por muestra: 2 = activación (o ARRIBA en calibración), 1 = fase de calibración midiendo. */
   class LiveChart {
-    constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.thr = null; this.setWindow(15); }
+    constructor(canvas, fs) { this.c = canvas; this.fs = fs; this.ymax = 0.2; this.zoom = 1; this.setWindow(15); }
     setWindow(s) {
       this.win = s; this.N = Math.round(s * this.fs);
-      this.sig = new Float32Array(this.N); this.env = new Float32Array(this.N);
-      this.flag = new Uint8Array(this.N); this.w = 0;
+      this.sig = new Float32Array(this.N); this.flag = new Uint8Array(this.N); this.w = 0;
     }
-    push(x, env, flag) {
-      this.sig[this.w] = x; this.env[this.w] = env; this.flag[this.w] = flag;
+    push(x, flag) {
+      this.sig[this.w] = x; this.flag[this.w] = flag;
       if (++this.w >= this.N) this.w = 0;
     }
     draw() {
@@ -33,63 +33,138 @@
       const L = 52, R = 10, T = 8, B = 24, W = w - L - R, H = h - T - B;
       ctx.clearRect(0, 0, w, h);
       const cols = Math.max(1, Math.floor(W)), N = this.N;
-      const mn = new Float32Array(cols), mx = new Float32Array(cols), ev = new Float32Array(cols), fl = new Uint8Array(cols);
+      const mn = new Float32Array(cols), mx = new Float32Array(cols), fl = new Uint8Array(cols);
       let target = 0.02;
       for (let c = 0; c < cols; c++) {
         const i0 = Math.floor(c * N / cols), i1 = Math.max(i0 + 1, Math.floor((c + 1) * N / cols));
-        let lo = 0, hi = 0, f = 0, e = 0;
+        let lo = Infinity, hi = -Infinity, f = 0;
         for (let i = i0; i < i1; i++) {
           const j = (this.w + i) % N, v = this.sig[j];
-          if (v < lo) lo = v; if (v > hi) hi = v;
+          if (v < lo) lo = v; if (v > hi) hi = v;               // NaN (muestra apartada) no cuenta
           if (this.flag[j] > f) f = this.flag[j];
-          e = this.env[j];
         }
-        mn[c] = lo; mx[c] = hi; ev[c] = e; fl[c] = f;
-        target = Math.max(target, -lo, hi, e);
+        if (lo === Infinity) { lo = c ? mn[c - 1] : 0; hi = c ? mx[c - 1] : 0; }   // columna sin muestras validas: como la anterior
+        mn[c] = lo; mx[c] = hi; fl[c] = f;
       }
-      target *= 1.15;
-      this.ymax = target > this.ymax ? target : this.ymax - (this.ymax - target) * 0.03;
-      const Y = v => T + H / 2 - (v / this.ymax) * (H / 2);
+      // Escala ROBUSTA: el 98 % de las columnas cabe; un pico suelto (movimiento, cable) no aplasta la señal.
+      // Lo que se pasa del borde se recorta. El zoom (botones − / +) multiplica sobre esto.
+      const picos = new Float32Array(cols);
+      for (let c = 0; c < cols; c++) picos[c] = Math.max(-mn[c], mx[c]);
+      picos.sort();
+      target = Math.max(target, picos[Math.min(cols - 1, Math.floor(cols * 0.98))] * 1.25) / this.zoom;
+      this.ymax = target > this.ymax ? this.ymax + (target - this.ymax) * 0.3 : this.ymax - (this.ymax - target) * 0.05;
+      const Y = v => T + H / 2 - (Math.max(-this.ymax, Math.min(this.ymax, v)) / this.ymax) * (H / 2);
+      // Línea de ACTIVACIÓN: RMS de ~100 ms de la señal (como el Serial Plotter)
+      const porCol = N / cols, env = new Float32Array(cols), anchoEnv = Math.max(1, Math.round(0.1 * this.fs / porCol));
+      const e2 = new Float32Array(cols), en = new Float32Array(cols);
+      for (let c = 0; c < cols; c++) {
+        const i0 = Math.floor(c * N / cols), i1 = Math.max(i0 + 1, Math.floor((c + 1) * N / cols));
+        for (let i = i0; i < i1; i++) { const v = this.sig[(this.w + i) % N]; if (v === v) { e2[c] += v * v; en[c]++; } }
+      }
+      for (let c = 0; c < cols; c++) {
+        let s = 0, n = 0;
+        for (let k = Math.max(0, c - anchoEnv + 1); k <= c; k++) { s += e2[k]; n += en[k]; }
+        env[c] = n ? Math.sqrt(s / n) : (c ? env[c - 1] : 0);
+      }
 
-      // franjas de activación (verde = válida, ámbar = candidata)
       for (let c = 0; c < cols; c++) {
         if (!fl[c]) continue;
         ctx.fillStyle = fl[c] === 2 ? css('--green-bg') : css('--amber-bg');
         ctx.fillRect(L + c, T, 1, H);
       }
-      // rejilla y ejes
-      ctx.strokeStyle = css('--grid'); ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui';
-      ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
-      for (const f of [-1, -0.5, 0, 0.5, 1]) {
-        const y = Y(f * this.ymax); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + W, y); ctx.stroke();
-        ctx.fillText((f * this.ymax).toFixed(this.ymax < 1 ? 2 : 1), L - 6, y);
-      }
-      ctx.save(); ctx.translate(12, T + H / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
-      ctx.fillText('mV', 0, 0); ctx.restore();
-      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      for (let s = 0; s <= this.win; s += this.win > 20 ? 10 : 5) {
-        const x = L + W - (s / this.win) * W;
-        ctx.fillText(s === 0 ? '0 s' : '-' + s + ' s', x, T + H + 6);
-      }
-      // señal filtrada
-      ctx.strokeStyle = css('--signal'); ctx.beginPath();
+      axes(ctx, L, T, W, H, this.win, [-1, -0.5, 0, 0.5, 1].map(f => [Y(f * this.ymax), (f * this.ymax).toFixed(this.ymax < 10 ? 2 : 0)]), 'mV');
+      ctx.strokeStyle = css('--signal'); ctx.globalAlpha = 0.75; ctx.beginPath();
       for (let c = 0; c < cols; c++) { ctx.moveTo(L + c + 0.5, Y(mn[c])); ctx.lineTo(L + c + 0.5, Y(mx[c]) - 0.5); }
-      ctx.stroke();
-      // umbral
-      if (this.thr) {
-        ctx.setLineDash([6, 4]); ctx.strokeStyle = css('--amber'); ctx.beginPath();
-        for (const s of [1, -1]) { const y = Y(s * this.thr); ctx.moveTo(L, y); ctx.lineTo(L + W, y); }
-        ctx.stroke(); ctx.setLineDash([]);
+      ctx.stroke(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = css('--star'); ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.beginPath();
+      for (let c = 0; c < cols; c++) { const y = Y(env[c]); if (c) ctx.lineTo(L + c + 0.5, y); else ctx.moveTo(L + 0.5, y); }
+      ctx.stroke(); ctx.lineWidth = 1;
+    }
+  }
+
+  function axes(ctx, L, T, W, H, win, ticks, unit) {
+    ctx.strokeStyle = css('--grid'); ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui';
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.lineWidth = 1;
+    for (const [y, label] of ticks) { ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + W, y); ctx.stroke(); ctx.fillText(label, L - 6, y); }
+    ctx.save(); ctx.translate(12, T + H / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
+    ctx.fillText(unit, 0, 0); ctx.restore();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let s = 0; s <= win; s += win > 20 ? 10 : 5) {
+      const x = L + W - (s / win) * W;
+      ctx.fillText(s === 0 ? '0 s' : '-' + s + ' s', x, T + H + 6);
+    }
+  }
+
+  /* RMS que recibe el atril (un valor cada 100 ms) y su mediana de 0.5 s (la que se compara con los umbrales).
+   * flag por bloque: 1 = sobre el umbral (activación), 2 = bloque usado por la calibración basal. */
+  class RmsChart {
+    constructor(canvas) { this.c = canvas; this.ymax = 50; this.lines = {}; this.setWindow(15); }
+    setWindow(s) { this.win = s; this.N = Math.round(s * 10); this.v = new Float32Array(this.N).fill(NaN); this.m = new Float32Array(this.N).fill(NaN); this.f = new Uint8Array(this.N); this.w = 0; }
+    push(v, flag, med) { this.v[this.w] = v; this.m[this.w] = med === undefined ? NaN : med; this.f[this.w] = flag; if (++this.w >= this.N) this.w = 0; }
+    draw() {
+      const { ctx, w, h } = fit(this.c);
+      if (!w || !h) return;
+      const L = 52, R = 10, T = 8, B = 24, W = w - L - R, H = h - T - B, N = this.N;
+      ctx.clearRect(0, 0, w, h);
+      let target = 20;
+      for (let i = 0; i < N; i++) if (this.v[i] > target) target = this.v[i];
+      for (const k in this.lines) if (this.lines[k] > target) target = this.lines[k];
+      target *= 1.15;
+      this.ymax = target > this.ymax ? target : this.ymax - (this.ymax - target) * 0.05;
+      const X = i => L + (i + 0.5) * W / N, Y = v => T + H - (v / this.ymax) * H, bw = Math.max(1, W / N);
+      for (let i = 0; i < N; i++) {
+        const f = this.f[(this.w + i) % N];
+        if (!f) continue;
+        ctx.fillStyle = f === 1 ? css('--green-bg') : css('--blue-bg');
+        ctx.fillRect(L + i * W / N, T, bw + 0.5, H);
       }
-      // envolvente (espejada)
-      ctx.strokeStyle = css('--primary'); ctx.lineWidth = 2.5;
-      for (const s of [1, -1]) {
-        ctx.beginPath();
-        for (let c = 0; c < cols; c++) { const y = Y(s * ev[c]); c ? ctx.lineTo(L + c, y) : ctx.moveTo(L + c, y); }
+      axes(ctx, L, T, W, H, this.win, [0, 0.25, 0.5, 0.75, 1].map(f => [Y(f * this.ymax), Math.round(f * this.ymax)]), 'mV');
+      const dash = (v, color, d) => {
+        if (!(v > 0)) return;
+        ctx.setLineDash(d); ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(L + W, Y(v)); ctx.stroke(); ctx.setLineDash([]);
+      };
+      dash(this.lines.reposo, css('--muted'), [2, 3]);
+      dash(this.lines.uoff, css('--amber'), [3, 3]);
+      dash(this.lines.uon, css('--amber'), [8, 4]);
+      const linea = (arr, color, width) => {
+        ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
+        let pen = false;
+        for (let i = 0; i < N; i++) {
+          const v = arr[(this.w + i) % N];
+          if (!isFinite(v)) { pen = false; continue; }
+          pen ? ctx.lineTo(X(i), Y(v)) : ctx.moveTo(X(i), Y(v)); pen = true;
+        }
         ctx.stroke();
-      }
+      };
+      linea(this.v, css('--signal'), 1.2);       // RMS de cada bloque
+      linea(this.m, css('--primary'), 2.4);      // mediana de 0.5 s
       ctx.lineWidth = 1;
     }
+  }
+
+  /* Señal guardada de una sesión (RMS y mediana cada 100 ms) con sus umbrales y las activaciones sombreadas. */
+  function dibujarSesion(canvas, datos, umbrales) {
+    const { ctx, w, h } = fit(canvas);
+    if (!w || !h) return;
+    const L = 52, R = 10, T = 8, B = 24, W = w - L - R, H = h - T - B;
+    ctx.clearRect(0, 0, w, h);
+    if (!datos.length) return;
+    const t0 = datos[0].t, t1 = Math.max(t0 + 1, datos[datos.length - 1].t);
+    let ymax = Math.max(20, umbrales.uon || 0, ...datos.map(d => d.rms)) * 1.1;
+    const X = t => L + (t - t0) / (t1 - t0) * W, Y = v => T + H - (v / ymax) * H;
+    ctx.fillStyle = css('--green-bg');
+    for (let i = 0; i < datos.length; i++) if (datos[i].act) ctx.fillRect(X(datos[i].t), T, Math.max(1, W / datos.length + 0.5), H);
+    ctx.strokeStyle = css('--grid'); ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (const f of [0, 0.25, 0.5, 0.75, 1]) { const y = Y(f * ymax); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + W, y); ctx.stroke(); ctx.fillText(Math.round(f * ymax), L - 6, y); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    const paso = [10, 30, 60, 120, 300, 600].find(p => (t1 - t0) / p <= 8) || 600;
+    for (let s = Math.ceil(t0 / paso) * paso; s <= t1; s += paso) ctx.fillText(Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0'), X(s), T + H + 6);
+    const linea = (k, color, ancho) => { ctx.strokeStyle = color; ctx.lineWidth = ancho; ctx.beginPath(); datos.forEach((d, i) => i ? ctx.lineTo(X(d.t), Y(d[k])) : ctx.moveTo(X(d.t), Y(d[k]))); ctx.stroke(); };
+    linea('rms', css('--signal'), 1); linea('med', css('--primary'), 2);
+    ctx.setLineDash([8, 4]); ctx.strokeStyle = css('--amber'); ctx.lineWidth = 1.5;
+    for (const v of [umbrales.uon, umbrales.uoff]) if (v > 0) { ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(L + W, Y(v)); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.lineWidth = 1;
   }
 
   /* Progreso entre sesiones: puntos + línea de tendencia (regresión lineal). */
@@ -140,5 +215,5 @@
     }
   }
 
-  EMG.LiveChart = LiveChart; EMG.ProgressChart = ProgressChart;
+  EMG.LiveChart = LiveChart; EMG.RmsChart = RmsChart; EMG.ProgressChart = ProgressChart; EMG.dibujarSesion = dibujarSesion;
 })();
