@@ -511,7 +511,7 @@
       $('lv-cal-txt').textContent = c.pasos === 2 && c.fase === 1
         ? 'Paso 2 de 2: ahora baja la cabeza del niño y mantenla abajo (luz verde).'
         : c.pasos === 2 ? 'Paso 1 de 2: cabeza del niño arriba, mirando las estrellas, y quieta (luz azul).'
-        : 'Mantén la cabeza del niño arriba, en la postura de la terapia, y quieta.';
+        : 'Deja la cabeza del niño como la tenga (caída, apoyada o ladeada). No le pidas que la levante.';
       $('lv-cal-bar').style.width = (100 * (1 - c.restante / c.total)) + '%';
     } else if (!rec) {
       const esperando = equipoListo() || sim;

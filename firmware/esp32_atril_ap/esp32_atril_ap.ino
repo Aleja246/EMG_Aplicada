@@ -1,6 +1,6 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v8.3 SIN LAPTOP (sonido + red ASTRA + pagina web)
+//  ASTRA - Firmware del atril (ESP32) v8.4 SIN LAPTOP (sonido + red ASTRA + pagina web)
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
@@ -9,7 +9,11 @@
 //  Que hace:
 //   1. ARRANQUE: las estrellas buscan el microswitch; ahi queda la posicion 0
 //      y empieza su ciclo (como motor_endstop.ino). El lazy susan gira desde el encendido.
-//   2. CALIBRANDO (v8.3). TODO el movil avisa que esta calibrando: estrellas y
+//   2. CALIBRANDO. v8.4: por defecto 10 s en REPOSO con la cabeza como el nino la
+//      tenga (caida, apoyada o ladeada), sin pedirle que la mueva ni la levante.
+//      Umbral = reposo + max(3 SD robusta, 2 mV, 20 %), FIJO toda la sesion.
+//      Lo de abajo es la calibracion de 2 pasos (CAL_DOS_POSICIONES = true).
+//      v8.3: TODO el movil avisa que esta calibrando: estrellas y
 //      lazy susan se detienen, la musica se calla y la luz "respira" despacio.
 //      En 2 pasos (CAL_DOS_POSICIONES = true):
 //       a) 7 s CABEZA ARRIBA, mirando las estrellas y quieta (luz AZUL).
@@ -30,7 +34,10 @@
 //        300 ms. Con la calibracion de 2 pasos los dos umbrales son FIJOS.
 //        (Con la basal, como en v8.2: U_on sigue al nivel con la cabeza ARRIBA
 //        de los ultimos 3 s y termina al 40 % del camino entre ese nivel y el pico.)
-//      - CABEZA ABAJO = RMS SOBRE el umbral (ABAJO_ES_ACTIVIDAD; x lo invierte).
+//      - v8.4: RMS SOBRE el umbral = INTENTO DE LEVANTAR = CABEZA ARRIBA durante el
+//        intento y T_SOSTEN_MS (4 s) despues; luego vuelve a CABEZA ABAJO (el
+//        movil se pone llamativo otra vez). ABAJO_ES_ACTIVIDAD = true (o x)
+//        regresa a la suposicion anterior: RMS alto = cabeza abajo.
 //      - Estrellas: giran hasta pisar el microswitch y cambian de sentido, sin
 //        parar. v8.3: PASO COMPLETO de verdad (antes el comentario decia paso
 //        completo pero el motor iba en medio paso) y velocidades en rpm del eje:
@@ -92,6 +99,9 @@
 //  v8.2: la deteccion aprende el nivel con la cabeza arriba (3 s) y suelta al
 //   40 % del camino al pico; listas de musica por defecto ABAJO 4-6 / ARRIBA 1-3;
 //   estrellas 600 (lento) a 1000 (cabeza abajo) pasos/s.
+//  v8.4: el pico del EMG es el intento de LEVANTAR la cabeza (antes se tomaba como
+//   cabeza abajo); la cabeza cuenta arriba 4 s despues de cada intento; calibracion
+//   en reposo sin pedir nada al nino y umbrales fijos.
 //  v8.3: estrellas en paso completo y en rpm (mas fuerza y mas contraste, se
 //   ajustan en vivo); todo el movil muestra la calibracion (quieto, en silencio,
 //   luz que respira) y calibracion en 2 pasos (cabeza arriba y cabeza abajo) con
@@ -225,7 +235,8 @@ const float MARGEN_REL_INICIAL = 0.20f; // v8.1: el umbral queda al menos 20 % s
 const float SENS_K[3]   = {2.0f, 3.0f, 4.0f};
 const float SENS_REL[3] = {0.10f, 0.20f, 0.35f};
 // v8.3: calibracion en 2 pasos y como se ve el movil al calibrar
-const bool  CAL_DOS_POSICIONES  = true;   // false = solo 10 s basales con la cabeza arriba (v8.2)
+const bool  CAL_DOS_POSICIONES  = false;  // v8.4: false = 10 s en reposo, sin pedir nada al nino (recomendado)
+                                          // true = 2 pasos, cabeza arriba y abajo (solo si puede hacerlo a voluntad)
 const bool  CAL_POLARIDAD_AUTO  = true;   // decide solo si cabeza abajo = RMS alto o bajo
 const unsigned long CAL_FASE_MS = 7000;   // duracion de cada paso (arriba y abajo)
 const float SENS_FRAC[3] = {0.35f, 0.50f, 0.65f};   // umbral entre arriba (0) y abajo (1), por sensibilidad
@@ -286,10 +297,20 @@ const float BRILLO_MIN_FRAC      = 0.15;   // brillo con la cabeza arriba (fracc
 //           en color lila; al contraer esperan 1.5 s y bajan rapido.
 //   false = CONTRAER: la logica original del documento.
 const bool PREMIO_AL_RELAJAR = true;     // (se conserva; lo que manda ahora es ABAJO_ES_ACTIVIDAD)
-// Con los semiespinosos, al BAJAR la cabeza el musculo trabaja para sostenerla,
-// asi que el RMS SUBE: RMS sobre el umbral = CABEZA ABAJO.
-// Si en otro montaje resulta al reves, pon false (o escribe x en el monitor).
-const bool ABAJO_ES_ACTIVIDAD = true;
+// v8.4: el pico del EMG es el ESFUERZO DE LEVANTAR la cabeza (asi sale en las pruebas
+// y en los ninos con hipotonia la cabeza cae sin actividad). Por eso:
+//   false = RMS sobre el umbral = intento de levantar = CABEZA ARRIBA (recomendado).
+//   true  = la suposicion anterior (un adulto que sostiene la cabeza inclinada
+//           trabaja con los extensores, asi que ahi el RMS sube con la cabeza abajo).
+// Tambien se invierte en vivo con x.
+const bool ABAJO_ES_ACTIVIDAD = false;
+// v8.4: despues de un intento de levantar, la cabeza se cuenta ARRIBA este tiempo
+// aunque el musculo ya se relajo (el EMG casero ve el esfuerzo de subir, no la
+// postura). Despues vuelve a CABEZA ABAJO y el movil se pone llamativo otra vez.
+const unsigned long T_SOSTEN_MS = 4000;
+// v8.4: false = umbrales FIJOS de la calibracion (recomendado para estos ninos).
+// true = el umbral sigue el nivel de los ultimos 3 s fuera de un intento (v8.2).
+const bool UMBRAL_ADAPTATIVO = false;
 const int  LILA_R = 80, LILA_G = 0, LILA_B = 128;   // color del premio al relajar (0..128)
 const unsigned long T_BRILLO_RELAJADO = 2000;      // ms con la cabeza abajo hasta el maximo de la luz
 
@@ -317,7 +338,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.3";
+const char *VERSION_ATRIL = "8.4";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -332,6 +353,7 @@ long vueltasEndstop = 0;
 long pasosHoming = 0;
 bool abajoEsActividad = ABAJO_ES_ACTIVIDAD;
 unsigned long tCambioCabeza = 0;     // cuando cambio por ultima vez arriba <-> abajo
+unsigned long tFinIntento = 0;       // v8.4: fin del ultimo intento de levantar (0 = sin sosten en curso)
 bool abajoAntes = false;
 bool cambiarCancion = false;         // la cabeza acaba de SUBIR: falta tocar el aviso ADVERT
 unsigned long tInicioAbajo = 0, tUltimoCambioCancion = 0;
@@ -524,7 +546,20 @@ float rpmDe(float pps) { return pps * 60.0f / pasosVueltaE(); }
 
 // CABEZA ABAJO segun el estado del EMG (ver ABAJO_ES_ACTIVIDAD)
 // v8.3: con la calibracion de 2 pasos "activo" ya es cabeza abajo (el RMS suba o baje)
-bool cabezaAbajo() { return (abajoEsActividad || calDosPos) ? activo : !activo; }
+// v8.4: si la actividad es el intento de levantar, la cabeza sigue ARRIBA durante el
+// intento y T_SOSTEN_MS despues (tFinIntento != 0).
+bool cabezaAbajo() {
+  if (abajoEsActividad || calDosPos) return activo;
+  return !activo && tFinIntento == 0;
+}
+
+// v8.4: al acabarse el sosten, la cabeza vuelve a contarse ABAJO (la luz sube despacio desde aqui)
+void actualizarSosten() {
+  if (!activo && tFinIntento && millis() - tFinIntento >= T_SOSTEN_MS) {
+    tFinIntento = 0;
+    tCambioCabeza = millis();
+  }
+}
 
 // Comando directo al DFPlayer (10 bytes). No espera respuesta, asi los
 // motores nunca se detienen esperando al reproductor.
@@ -720,7 +755,8 @@ void imprimirCalibracion() {
 void terminarActivacion(unsigned long fin) {
   if (activo) {
     activo = false;
-    tCambioCabeza = millis();          // cambia de cabeza abajo <-> arriba
+    if (abajoEsActividad || calDosPos || T_SOSTEN_MS == 0) tCambioCabeza = millis();   // cambia de cabeza abajo <-> arriba
+    else tFinIntento = max(millis(), 1UL);   // v8.4: la cabeza sigue ARRIBA T_SOSTEN_MS mas
     unsigned long dur = fin - tInicioActivo;
     tiempoActivoTotal += dur;
     float rmsMedio = nRmsAct ? sumaRmsAct / nRmsAct : 0;
@@ -813,8 +849,8 @@ void iniciarCalibracion() {
     Log.printf(">>  1) CABEZA ARRIBA, mirando las estrellas y quieta: %lu s (luz azul).\n", CAL_FASE_MS / 1000);
     Log.printf(">>  2) Despues CABEZA ABAJO y sostenida: %lu s (luz verde).\n", CAL_FASE_MS / 1000);
   } else {
-    Log.println(">> CALIBRACION BASAL: cabeza apoyada y estable durante 10 s (luz azul).");
-    Log.println(">> Se descartan los primeros 1.5 s; no hagas contracciones voluntarias.");
+    Log.println(">> CALIBRACION EN REPOSO, 10 s (luz azul): la cabeza como el nino la tenga");
+    Log.println(">> (caida, apoyada o ladeada). No le pidas que la levante. Se descartan 1.5 s.");
   }
 }
 
@@ -822,11 +858,14 @@ void iniciarSesion() {
   modo = SESION;
   activo = false;
   tSobre = tBajo = 0;
+  tFinIntento = 0;                         // v8.4: la sesion empieza con la cabeza ABAJO
   tCambioCabeza = millis();
   abajoAntes = cabezaAbajo();              // empezar la sesion no cambia la cancion
   cambiarCancion = false;
   Log.println();
   Log.println(">> SESION: cabeza abajo = estrellas rapidas, luz brillante y colores rapidos.");
+  if (!abajoEsActividad && !calDosPos)
+    Log.printf(">> Cada intento de levantar (RMS sobre el umbral) cuenta como CABEZA ARRIBA y %.0f s mas.\n", T_SOSTEN_MS / 1000.0f);
 }
 
 // v8.3: con el nivel de cabeza arriba (ya en reposo / sdReposo) y el de cabeza abajo
@@ -957,17 +996,20 @@ void procesarRms(int mv) {
   // Histeresis + confirmacion en el tiempo
   // v8.3: con la calibracion de 2 pasos los umbrales son FIJOS y, si con la cabeza abajo el
   // RMS BAJA (alReves), "activo" = cabeza abajo = RMS bajo el umbral. Con la basal, como v8.2.
+  // v8.4: sin UMBRAL_ADAPTATIVO los umbrales de la calibracion basal tambien son fijos.
   bool alReves = calDosPos && !abajoEsActividad;
+  bool fijo = calDosPos || !UMBRAL_ADAPTATIVO;
   if (!activo) {
-    float uOnAhora = calDosPos ? (alReves ? umbralOff : umbralOn) : umbralOnAhora();
-    uAhoraPub = uOnAhora; uSueltaPub = 0; arribaPub = calDosPos ? nivArriba : nivelArribaActual();
+    float uOnAhora = calDosPos ? (alReves ? umbralOff : umbralOn) : fijo ? umbralOn : umbralOnAhora();
+    uAhoraPub = uOnAhora; uSueltaPub = 0; arribaPub = calDosPos ? nivArriba : fijo ? reposo : nivelArribaActual();
     bool entra = alReves ? rmsSuave <= uOnAhora : rmsSuave >= uOnAhora;
-    if (entra && (calDosPos || nArriba >= 10)) {   // v8.2: con la basal primero aprende 1 s
+    if (entra && (fijo || nArriba >= 10)) {   // v8.2: con la adaptativa primero aprende 1 s
       if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; msSesionIni = msSesion; }
       sumaRmsAct += mv; nRmsAct++;
       if (ahora - tSobre + HOLGURA_MS >= T_CONFIRMAR) {
         activo = true;
-        baseAct = nivelArribaActual(); uOnAct = uOnAhora; picoAct = rmsSuave;   // v8.2
+        baseAct = fijo ? reposo : nivelArribaActual(); uOnAct = uOnAhora; picoAct = rmsSuave;   // v8.2
+        tFinIntento = 0;                                   // v8.4: un intento nuevo durante el sosten
         tInicioActivo = tSobre;
         tCambioCabeza = ahora;                             // cambia de cabeza abajo <-> arriba
         nActivaciones++;
@@ -983,7 +1025,7 @@ void procesarRms(int mv) {
       sumaCola += mv; nCola++;
       if (ahora - tBajo + HOLGURA_MS >= T_CONFIRMAR) {
         terminarActivacion(tBajo);
-        nArriba = 0; iArriba = 0;                  // v8.2: la cabeza acaba de subir: aprende 1 s ese nivel
+        if (!fijo) { nArriba = 0; iArriba = 0; }   // v8.2: con la adaptativa, aprende 1 s el nivel nuevo
       }
     } else {
       if (tBajo) { sumaRmsAct += sumaCola; nRmsAct += nCola; tBajo = 0; }  // fue una baja corta
@@ -1074,6 +1116,7 @@ void ejecutarComando(char c) {
       case 'h': if (modo != PARO) iniciarArranque(); break;      // vuelve a buscar el microswitch
       case 'x':                                                  // invierte que estado es "cabeza abajo"
         abajoEsActividad = !abajoEsActividad;
+        tFinIntento = 0;                                      // v8.4
         tCambioCabeza = millis();
         abajoAntes = cabezaAbajo();
         Log.printf(">> Ahora CABEZA ABAJO = RMS %s el umbral. Si queda bien, pon ABAJO_ES_ACTIVIDAD = %s.\n",
@@ -1176,6 +1219,7 @@ void actualizarModo() {
     datosAntes = ok;
     if (!ok) {
       cerrarActivacion(tUltimoDato);                 // no cuenta el tiempo sin senal
+      tFinIntento = 0;                               // v8.4
       ventanaN = 0;                                  // la mediana empieza de nuevo
       Log.println("!! Sin datos del Arduino: estrellas y planetas quietos hasta que vuelvan.");
     } else {
@@ -1190,6 +1234,8 @@ void actualizarModo() {
     Log.printf(">> Ahora CABEZA ABAJO y sostenida: %lu s (luz verde).\n", CAL_FASE_MS / 1000);
   }
   if (modo == CALIBRANDO && ahora - tCal >= calDuracion()) terminarCalibracion();
+
+  if (modo == SESION) actualizarSosten();   // v8.4
 
   // Musica: siempre sonando (menos en PARO). Lista de cabeza abajo / arriba y
   // aviso ADVERT cada vez que SUBE la cabeza.
@@ -1963,7 +2009,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v8.3 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
+  Serial.println("=== ASTRA - atril v8.4 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);

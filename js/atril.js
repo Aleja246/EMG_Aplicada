@@ -94,7 +94,7 @@
       this.calibrado = false; this.reposo = 100; this.sd = 10; this.k = C.K_INICIAL; this.uon = 300; this.uoff = 200;
       this.tCal = 0; this.nRep = 0; this.sR = 0; this.s2R = 0; this.calN = 0; this.pocos = false; this.inestable = false;
       this.ventana = []; this.rms = 0; this.med = 0; this.hayDatos = false; this.tDato = -1e9; this.datosAntes = false;
-      this.activo = false; this.tSobre = 0; this.tBajo = 0; this.tIni = 0; this.nivel = 0; this.abajoAct = true;
+      this.activo = false; this.tSobre = 0; this.tBajo = 0; this.tIni = 0; this.nivel = 0; this.abajoAct = false; this.tFinInt = 0;
       this.sumaAct = 0; this.nRmsAct = 0; this.sumaCola = 0; this.nCola = 0;
       this.nActiv = 0; this.tActMs = 0; this.sid = 0; this.msSes = 0; this.msSesIni = 0;
       this.tCambio = 0; this.abajoAntes = false; this.tIniAbajo = 0; this.tUltCancion = -1e9; this.cancion = 4; this.orden = 0;
@@ -111,7 +111,7 @@
     _msg(t) { this.logs.push(t); if (this.logs.length > 24) this.logs.shift(); this.nLog++; }
     _ms() { return performance.now(); }
     _datosOK() { return this.hayDatos && this._ms() - this.tDato < C.WATCHDOG; }
-    _abajo() { return this.abajoAct ? this.activo : !this.activo; }
+    _abajo() { return this.abajoAct ? this.activo : (!this.activo && !this.tFinInt); }   // v8.4: intento = arriba y 4 s mas
     _umbrales() { this.uon = this.reposo + Math.max(this.k * this.sd, C.MARGEN, (this.rel || 0.2) * this.reposo); this.uoff = this.reposo + C.OFF * (this.uon - this.reposo); }
     sensibilidad(n) {     // como el atril v8.1: 1 mas sensible, 2 normal, 3 menos sensible
       if (!(n >= 1 && n <= 3)) return Promise.resolve({ ok: false });
@@ -129,7 +129,8 @@
     }
     _terminarActivacion(fin) {
       if (this.activo) {
-        this.activo = false; this.tCambio = this._ms();
+        this.activo = false;
+        if (this.abajoAct) this.tCambio = this._ms(); else this.tFinInt = Math.max(this._ms(), 1);   // v8.4
         const dur = fin - this.tIni; this.tActMs += dur;
         const rmsMedio = this.nRmsAct ? this.sumaAct / this.nRmsAct : 0;
         this._msg('   Activacion #' + this.nActiv + ': ' + (dur / 1000).toFixed(1) + ' s, RMS medio ' + Math.round(rmsMedio) + ' mV');
@@ -147,7 +148,7 @@
       this._msg('>> Se descarta el primer segundo; no hagas contracciones voluntarias.');
     }
     _iniciarSesion() {
-      this.modo = 'SESION'; this.activo = false; this.tSobre = this.tBajo = 0; this.tCambio = this._ms(); this.abajoAntes = this._abajo();
+      this.modo = 'SESION'; this.activo = false; this.tFinInt = 0; this.tSobre = this.tBajo = 0; this.tCambio = this._ms(); this.abajoAntes = this._abajo();
       this._msg('>> SESION: cabeza abajo = estrellas rapidas, luz brillante y colores rapidos.');
     }
     _terminarCalibracion() {
@@ -175,7 +176,7 @@
           break;
         case 'h': this._cerrar(); this.modo = 'ARRANQUE'; this.tArr = this._ms(); this._msg('>> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).'); break;
         case 'x':
-          this.abajoAct = !this.abajoAct; this.tCambio = this._ms(); this.abajoAntes = this._abajo();
+          this.abajoAct = !this.abajoAct; this.tFinInt = 0; this.tCambio = this._ms(); this.abajoAntes = this._abajo();
           this._msg('>> Ahora CABEZA ABAJO = RMS ' + (this.abajoAct ? 'SOBRE' : 'BAJO') + ' el umbral. Si queda bien, pon ABAJO_ES_ACTIVIDAD = ' + this.abajoAct + '.');
           break;
         case '+': if (this.calibrado) { this.k = Math.min(this.k + 0.5, 8); this._umbrales(); this._imprimir(); } break;
@@ -204,7 +205,7 @@
           if (this.med >= this.uon) {
             if (!this.tSobre) { this.tSobre = ahora; this.sumaAct = 0; this.nRmsAct = 0; this.msSesIni = this.msSes; }
             this.sumaAct += mv; this.nRmsAct++;
-            if (ahora - this.tSobre + C.HOLGURA >= C.CONFIRMAR) { this.activo = true; this.tIni = this.tSobre; this.tCambio = ahora; this.nActiv++; this.tBajo = 0; }
+            if (ahora - this.tSobre + C.HOLGURA >= C.CONFIRMAR) { this.tFinInt = 0; this.activo = true; this.tIni = this.tSobre; this.tCambio = ahora; this.nActiv++; this.tBajo = 0; }
           } else this.tSobre = 0;
         } else if (this.med < this.uoff) {
           if (!this.tBajo) { this.tBajo = ahora; this.sumaCola = 0; this.nCola = 0; }
@@ -233,6 +234,7 @@
         if (this.calibrado) this._iniciarSesion(); else this._iniciarCalibracion();
       }
       if (this.modo === 'CALIBRANDO' && ahora - this.tCal >= C.CAL_MS) this._terminarCalibracion();
+      if (!this.activo && this.tFinInt && ahora - this.tFinInt >= 4000) { this.tFinInt = 0; this.tCambio = ahora; }   // v8.4
       this._musica(ahora, ok);
     }
     // Igual que la musica del firmware v6: dos listas (cabeza abajo / arriba) y el aviso al subir la cabeza.
