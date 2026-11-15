@@ -1,33 +1,43 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v8 SIN LAPTOP (sonido + red ASTRA + pagina web)
+//  ASTRA - Firmware del atril (ESP32) v8.2 SIN LAPTOP (sonido + red ASTRA + pagina web)
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
-//  Entrada: el Arduino UNO R4 (diagnostico_emg_enlace.ino) manda por el
+//  Entrada: el Arduino UNO R4 WiFi (arduino_emg_ap.ino, v5.1-AP) manda por el
 //  opto, cada 100 ms, una linea con el RMS en milivoltios ("640\n").
 //
 //  Que hace:
 //   1. ARRANQUE: las estrellas buscan el microswitch; ahi queda la posicion 0
 //      y empieza su ciclo (como motor_endstop.ino). El lazy susan gira desde el encendido.
-//   2. CALIBRANDO: 10 s de RMS basal con la cabeza apoyada (luz azul).
-//      Descarta el primer segundo. U_on = R + 2 SD (minimo +2 mV), sobre la
-//      MEDIANA de 0.5 s (quita saltos sueltos: el umbral queda mas cerca del basal);
+//   2. CALIBRANDO: 10 s de RMS basal con la cabeza arriba, en la postura de la
+//      terapia (luz azul). Descarta el primer segundo. Sobre la MEDIANA de 0.5 s
+//      (quita saltos sueltos) calcula el reposo R = MEDIANA de esos valores y la
+//      dispersion SD = 1.4826 x MAD (mediana y MAD, no media y desviacion: un
+//      movimiento o espasmo breve ya no sube el umbral).
+//      U_on = R + el mayor de: k x SD (k = 3), 2 mV o 20 % de R (margen minimo).
 //      U_off = R + 0.6 (U_on - R). Sin contracciones solicitadas.
 //      Termina a los 10 s por reloj; si la senal es inestable solo avisa.
 //      Las estrellas ya van y vienen, lento.
+//      La sensibilidad de la pagina cambia k y el margen: 1 = 2 SD / 10 %,
+//      2 = 3 SD / 20 % (normal), 3 = 4 SD / 35 %.
 //   3. SESION:
-//      - Activacion: RMS suave sobre U_on por 300 ms. Termina: bajo U_off
-//        por 300 ms.
+//      - Activacion (umbral dinamico, v8.2): RMS suave sobre el umbral de caida
+//        por 300 ms. Ese umbral = nivel "cabeza arriba" actual + el mismo margen
+//        (nunca menor que U_on). El nivel de arriba es la mediana de los ultimos
+//        3 s fuera de una activacion y se reaprende 1 s cada vez que la cabeza
+//        sube. Termina (cabeza arriba) cuando la senal baja al 40 % del camino
+//        entre el nivel de arriba y el pico de la caida, o bajo U_off, por 300 ms.
 //      - CABEZA ABAJO = RMS SOBRE el umbral (ABAJO_ES_ACTIVIDAD; x lo invierte).
 //      - Estrellas (paso completo, como motor_endstop.ino): giran hasta pisar
 //        el endstop, regresan a 0, giran al otro lado, pisan, regresan... sin
-//        parar. CABEZA ABAJO: aceleran de 200 a 600 pasos/s en 2 s. ARRIBA: 200.
+//        parar. CABEZA ABAJO: aceleran de V_ESTRELLAS_LENTO a V_ESTRELLAS_RAPIDO
+//        (600 -> 1000 pasos/s) en 2 s. ARRIBA: V_ESTRELLAS_LENTO (600 pasos/s).
 //      - Lazy susan: gira siempre desde el encendido; solo el PARO lo detiene.
 //      - Luz: CABEZA ABAJO = brillo maximo y cambia de color rapido (vuelta en
 //        4 s). CABEZA ARRIBA = tenue (15 %) y casi quieta (vuelta en 40 s).
 //      - Musica: siempre sonando desde el encendido, desde la carpeta /01 de la
-//        microSD con DOS listas de 3 pistas: CABEZA ABAJO (001-003) y CABEZA
-//        ARRIBA (004-006). Al cambiar la cabeza cambia de lista (siguiente pista);
+//        microSD con DOS listas de 3 pistas: CABEZA ABAJO (004-006) y CABEZA
+//        ARRIBA (001-003). Al cambiar la cabeza cambia de lista (siguiente pista);
 //        al terminar una pista sigue la siguiente de la misma lista. Cada vez que
 //        SUBE la cabeza suena el aviso /ADVERT/0001.mp3 y luego sigue la pista.
 //   4. Seguridad: sin datos validos por 500 ms las estrellas pasan a lento y
@@ -108,6 +118,23 @@
 //   y bajan sin parar entre fondo y tope: rapido (700) con el musculo relajado,
 //   lento (250) activo. Orden de bobinas configurable, USAR_TOPE, y el arranque
 //   ya no espera al DFPlayer.
+//  v8.1 (calibracion robusta y sensibilidad):
+//   - Reposo y dispersion con MEDIANA y MAD (SD = 1.4826 x MAD) en lugar de
+//     media y desviacion: un movimiento o espasmo breve durante los 10 s de
+//     calibracion ya no sube el umbral.
+//   - U_on = R + el mayor de: 3 SD (antes 2), 2 mV o 20 % de R (nuevo).
+//   - Sensibilidad 1 / 2 / 3 elegible desde la pagina (2 SD-10 %, 3 SD-20 %,
+//     4 SD-35 %); se aplica al momento, sin recalibrar. La pagina tambien puede
+//     pedir al Arduino que no transmita la senal en vivo (orden "senal").
+//  v8.2 (deteccion de la subida de la cabeza):
+//   - Umbral de caida dinamico: se mide el nivel con la cabeza ARRIBA (mediana
+//     de 3 s fuera de una activacion, se reaprende 1 s al subir la cabeza) y la
+//     caida es subir sobre ESE nivel + el margen. La subida se detecta al bajar
+//     al 40 % del camino entre ese nivel y el pico de la caida (o bajo U_off).
+//     Antes, si el nino sostenia la cabeza con mas fuerza que al calibrar, el
+//     atril se quedaba en "cabeza abajo" tras la primera caida.
+//   - Orden de las canciones por defecto: CABEZA ARRIBA = 001-003 y CABEZA ABAJO
+//     = 004-006.
 //  Para probar motores, luz, microswitch y opto por separado: prueba_atril.ino
 // =====================================================================
 
@@ -210,8 +237,8 @@ const unsigned long PAUSA_SONIDO = 3000;  // ms minimos entre sonidos
 //   /01/001.mp3 ... /01/006.mp3   canciones
 //   /ADVERT/0001.mp3               aviso "subio la cabeza"
 // Hay DOS listas de 3 pistas (numero de archivo dentro de /01):
-//   CABEZA ABAJO  -> pistasAbajo   (por defecto 001, 002, 003)
-//   CABEZA ARRIBA -> pistasArriba  (por defecto 004, 005, 006)
+//   CABEZA ABAJO  -> pistasAbajo   (por defecto 004, 005, 006)
+//   CABEZA ARRIBA -> pistasArriba  (por defecto 001, 002, 003)
 // Al cambiar la cabeza de posicion, pasa a la SIGUIENTE pista de la otra lista.
 // Cuando una pista termina, sigue la siguiente de la misma lista.
 // Cada vez que SUBE la cabeza suena /ADVERT/0001.mp3 encima de la musica y, al
