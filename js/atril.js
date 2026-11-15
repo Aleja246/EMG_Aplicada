@@ -111,7 +111,7 @@
     _msg(t) { this.logs.push(t); if (this.logs.length > 24) this.logs.shift(); this.nLog++; }
     _ms() { return performance.now(); }
     _datosOK() { return this.hayDatos && this._ms() - this.tDato < C.WATCHDOG; }
-    _abajo() { return this.abajoAct ? this.activo : (!this.activo && !this.tFinInt); }   // v8.4: intento = arriba y 4 s mas
+    _abajo() { return this.abajoAct ? this.activo : (!this.activo && !this.tFinInt); }   // v8.4: intento = arriba y 8 s mas
     _umbrales() { this.uon = this.reposo + Math.max(this.k * this.sd, C.MARGEN, (this.rel || 0.2) * this.reposo); this.uoff = this.reposo + C.OFF * (this.uon - this.reposo); }
     sensibilidad(n) {     // como el atril v8.1: 1 mas sensible, 2 normal, 3 menos sensible
       if (!(n >= 1 && n <= 3)) return Promise.resolve({ ok: false });
@@ -234,7 +234,7 @@
         if (this.calibrado) this._iniciarSesion(); else this._iniciarCalibracion();
       }
       if (this.modo === 'CALIBRANDO' && ahora - this.tCal >= C.CAL_MS) this._terminarCalibracion();
-      if (!this.activo && this.tFinInt && ahora - this.tFinInt >= 4000) { this.tFinInt = 0; this.tCambio = ahora; }   // v8.4
+      if (!this.activo && this.tFinInt && ahora - this.tFinInt >= 8000) { this.tFinInt = 0; this.tCambio = ahora; }   // v8.4
       this._musica(ahora, ok);
     }
     // Igual que la musica del firmware v6: dos listas (cabeza abajo / arriba) y el aviso al subir la cabeza.

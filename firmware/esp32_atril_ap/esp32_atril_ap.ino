@@ -1,6 +1,6 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v8.4 SIN LAPTOP (sonido + red ASTRA + pagina web)
+//  ASTRA - Firmware del atril (ESP32) v8.5 SIN LAPTOP (sonido + red ASTRA + pagina web)
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
@@ -35,7 +35,7 @@
 //        (Con la basal, como en v8.2: U_on sigue al nivel con la cabeza ARRIBA
 //        de los ultimos 3 s y termina al 40 % del camino entre ese nivel y el pico.)
 //      - v8.4: RMS SOBRE el umbral = INTENTO DE LEVANTAR = CABEZA ARRIBA durante el
-//        intento y T_SOSTEN_MS (4 s) despues; luego vuelve a CABEZA ABAJO (el
+//        intento y T_SOSTEN_MS (8 s) despues; luego vuelve a CABEZA ABAJO (el
 //        movil se pone llamativo otra vez). ABAJO_ES_ACTIVIDAD = true (o x)
 //        regresa a la suposicion anterior: RMS alto = cabeza abajo.
 //      - Estrellas: giran hasta pisar el microswitch y cambian de sentido, sin
@@ -44,8 +44,10 @@
 //        CABEZA ABAJO 14 rpm, ARRIBA 4 rpm (mas contraste). Se ajustan en vivo.
 //      - Lazy susan: gira siempre desde el encendido; solo el PARO lo detiene
 //        (v8.3: y se queda quieto mientras calibra, con CAL_DETENER_MOTORES).
-//      - Luz: CABEZA ABAJO = brillo maximo y cambia de color rapido (vuelta en
-//        4 s). CABEZA ARRIBA = tenue (15 %) y casi quieta (vuelta en 40 s).
+//      - Luz (v8.5): CABEZA ABAJO = color calido que respira despacio. CABEZA
+//        ARRIBA = arcoiris lento y brillante (premio). Sin senal: rojo tenue.
+//      - v8.5, pistas: 004-006 (cabeza abajo) = canciones TRANQUILAS;
+//        001-003 (cabeza arriba) = canciones DINAMICAS, el premio.
 //      - Musica: siempre sonando desde el encendido, desde la carpeta /01 de la
 //        microSD con DOS listas de 3 pistas: CABEZA ABAJO (004-006) y CABEZA
 //        ARRIBA (001-003); la pagina puede cambiarlas. Al cambiar la cabeza cambia de lista (siguiente pista);
@@ -99,6 +101,7 @@
 //  v8.2: la deteccion aprende el nivel con la cabeza arriba (3 s) y suelta al
 //   40 % del camino al pico; listas de musica por defecto ABAJO 4-6 / ARRIBA 1-3;
 //   estrellas 600 (lento) a 1000 (cabeza abajo) pasos/s.
+//  v8.5: luz calida en reposo y arcoiris lento como premio; sosten de 8 s.
 //  v8.4: el pico del EMG es el intento de LEVANTAR la cabeza (antes se tomaba como
 //   cabeza abajo); la cabeza cuenta arriba 4 s despues de cada intento; calibracion
 //   en reposo sin pedir nada al nino y umbrales fijos.
@@ -290,6 +293,14 @@ const unsigned long T_ENTRE_CANCIONES = 5000; // tiempo minimo entre cambios de 
 const float PERIODO_COLOR_LENTO  = 40000;  // ms por vuelta de colores con la CABEZA ARRIBA (casi quieta)
 const float PERIODO_COLOR_RAPIDO = 4000;   // ms por vuelta con la CABEZA ABAJO (no bajar de ~3000)
 const float BRILLO_MIN_FRAC      = 0.15;   // brillo con la cabeza arriba (fraccion de BRILLO_MAX)
+// v8.5: luz por estado (LUZ_POR_ESTADO = false vuelve a la luz anterior).
+//   CABEZA ABAJO (reposo): color CALIDO fijo que "respira" despacio.
+//   CABEZA ARRIBA (premio): ARCOIRIS lento y brillante.
+const bool  LUZ_POR_ESTADO      = true;
+const int   CALIDO_R = 128, CALIDO_G = 40, CALIDO_B = 0;   // naranja calido (0..128). Mas amarillo: sube G
+const float PERIODO_RESPIRA_MS  = 5000;    // ms por respiracion en reposo (no bajar de ~1000)
+const float RESPIRA_MIN_FRAC    = 0.45;    // brillo minimo de la respiracion (fraccion del color calido)
+const float PERIODO_ARCOIRIS_MS = 15000;   // ms por vuelta de colores con la cabeza arriba (no bajar de ~3000)
 
 // ------------------------- Enlace y paro ------------------------------
 // Que premia el atril:
@@ -307,7 +318,7 @@ const bool ABAJO_ES_ACTIVIDAD = false;
 // v8.4: despues de un intento de levantar, la cabeza se cuenta ARRIBA este tiempo
 // aunque el musculo ya se relajo (el EMG casero ve el esfuerzo de subir, no la
 // postura). Despues vuelve a CABEZA ABAJO y el movil se pone llamativo otra vez.
-const unsigned long T_SOSTEN_MS = 4000;
+const unsigned long T_SOSTEN_MS = 8000;   // v8.5: 8 s, para que la cancion de premio alcance a sonar
 // v8.4: false = umbrales FIJOS de la calibracion (recomendado para estos ninos).
 // true = el umbral sigue el nivel de los ultimos 3 s fuera de un intento (v8.2).
 const bool UMBRAL_ADAPTATIVO = false;
@@ -338,7 +349,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.4";
+const char *VERSION_ATRIL = "8.5";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -863,7 +874,8 @@ void iniciarSesion() {
   abajoAntes = cabezaAbajo();              // empezar la sesion no cambia la cancion
   cambiarCancion = false;
   Log.println();
-  Log.println(">> SESION: cabeza abajo = estrellas rapidas, luz brillante y colores rapidos.");
+  Log.println(">> SESION: cabeza abajo = estrellas rapidas, luz calida y cancion tranquila;");
+  Log.println(">>         cabeza arriba = estrellas lentas, arcoiris lento y cancion de premio.");
   if (!abajoEsActividad && !calDosPos)
     Log.printf(">> Cada intento de levantar (RMS sobre el umbral) cuenta como CABEZA ARRIBA y %.0f s mas.\n", T_SOSTEN_MS / 1000.0f);
 }
@@ -1401,8 +1413,22 @@ void actualizarLuz() {
     case PAUSA:      r = 15; g = 15; b = 15; break;
     case PARO:       break;                                         // apagada
     case SESION:
-      if (!datosOK())               { r = 40; g = 10; }             // ambar: sin senal
-      else {
+      if (!datosOK())               { r = 25; }                     // v8.5: rojo tenue fijo = sin senal (el ambar ahora es el reposo)
+      else if (LUZ_POR_ESTADO) {
+        if (cabezaAbajo()) {                       // reposo: calido que respira
+          float resp = 0.5f - 0.5f * cosf(6.2832f * fmodf((float)(ahora - tCambioCabeza), PERIODO_RESPIRA_MS) / PERIODO_RESPIRA_MS);
+          float br = RESPIRA_MIN_FRAC + (1.0f - RESPIRA_MIN_FRAC) * resp;
+          r = CALIDO_R * br; g = CALIDO_G * br; b = CALIDO_B * br;
+        } else {                                   // premio: arcoiris lento y brillante
+          faseColor += 20.0f / PERIODO_ARCOIRIS_MS;
+          if (faseColor >= 1.0f) faseColor -= 1.0f;
+          float h = faseColor * 3.0f; int seg = (int)h; float f = h - seg;
+          if (seg == 0)      { r = 1 - f; g = f;     b = 0; }
+          else if (seg == 1) { r = 0;     g = 1 - f; b = f; }
+          else               { r = f;     g = 0;     b = 1 - f; }
+          r *= BRILLO_MAX; g *= BRILLO_MAX; b *= BRILLO_MAX;
+        }
+      } else {
         // k = 0 con actividad; sube de 0 a 1 en los primeros 5 s por debajo del umbral
         float k = cabezaAbajo() ? min((float)(ahora - tCambioCabeza) / T_BRILLO_RELAJADO, 1.0f) : 0.0f;
         float periodo = PERIODO_COLOR_LENTO + (PERIODO_COLOR_RAPIDO - PERIODO_COLOR_LENTO) * k;
@@ -2009,7 +2035,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v8.4 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
+  Serial.println("=== ASTRA - atril v8.5 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
