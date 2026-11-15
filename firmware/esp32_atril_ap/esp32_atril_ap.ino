@@ -1,33 +1,37 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v8 SIN LAPTOP (sonido + red ASTRA + pagina web)
+//  ASTRA - Firmware del atril (ESP32) v8.2 SIN LAPTOP (sonido + red ASTRA + pagina web)
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
-//  Entrada: el Arduino UNO R4 (diagnostico_emg_enlace.ino) manda por el
+//  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
 //  opto, cada 100 ms, una linea con el RMS en milivoltios ("640\n").
 //
 //  Que hace:
 //   1. ARRANQUE: las estrellas buscan el microswitch; ahi queda la posicion 0
 //      y empieza su ciclo (como motor_endstop.ino). El lazy susan gira desde el encendido.
 //   2. CALIBRANDO: 10 s de RMS basal con la cabeza apoyada (luz azul).
-//      Descarta el primer segundo. U_on = R + 2 SD (minimo +2 mV), sobre la
-//      MEDIANA de 0.5 s (quita saltos sueltos: el umbral queda mas cerca del basal);
+//      Descarta el primer segundo. Reposo = MEDIANA de las medianas de 0.5 s y
+//      SD robusta = 1.4826 x MAD (no les afecta un movimiento breve).
+//      U_on = R + max(k x SD, 2 mV, margen relativo x R); por defecto k = 3 y
+//      margen 20 % (sensibilidad 1/2/3 en la pagina: k 2/3/4, margen 10/20/35 %).
 //      U_off = R + 0.6 (U_on - R). Sin contracciones solicitadas.
 //      Termina a los 10 s por reloj; si la senal es inestable solo avisa.
 //      Las estrellas ya van y vienen, lento.
 //   3. SESION:
-//      - Activacion: RMS suave sobre U_on por 300 ms. Termina: bajo U_off
-//        por 300 ms.
+//      - Activacion: RMS suave sobre U_on por 300 ms. U_on se calcula sobre el
+//        nivel con la cabeza ARRIBA de los ultimos 3 s (v8.2; aprende ese
+//        nivel 1 s antes de detectar). Termina al bajar al 40 % del camino
+//        entre ese nivel y el pico (o bajo U_off, lo que sea mayor) por 300 ms.
 //      - CABEZA ABAJO = RMS SOBRE el umbral (ABAJO_ES_ACTIVIDAD; x lo invierte).
 //      - Estrellas (paso completo, como motor_endstop.ino): giran hasta pisar
 //        el endstop, regresan a 0, giran al otro lado, pisan, regresan... sin
-//        parar. CABEZA ABAJO: aceleran de 200 a 600 pasos/s en 2 s. ARRIBA: 200.
+//        parar. CABEZA ABAJO: aceleran de 600 a 1000 pasos/s en 2 s. ARRIBA: 600.
 //      - Lazy susan: gira siempre desde el encendido; solo el PARO lo detiene.
 //      - Luz: CABEZA ABAJO = brillo maximo y cambia de color rapido (vuelta en
 //        4 s). CABEZA ARRIBA = tenue (15 %) y casi quieta (vuelta en 40 s).
 //      - Musica: siempre sonando desde el encendido, desde la carpeta /01 de la
-//        microSD con DOS listas de 3 pistas: CABEZA ABAJO (001-003) y CABEZA
-//        ARRIBA (004-006). Al cambiar la cabeza cambia de lista (siguiente pista);
+//        microSD con DOS listas de 3 pistas: CABEZA ABAJO (004-006) y CABEZA
+//        ARRIBA (001-003); la pagina puede cambiarlas. Al cambiar la cabeza cambia de lista (siguiente pista);
 //        al terminar una pista sigue la siguiente de la misma lista. Cada vez que
 //        SUBE la cabeza suena el aviso /ADVERT/0001.mp3 y luego sigue la pista.
 //   4. Seguridad: sin datos validos por 500 ms las estrellas pasan a lento y
@@ -68,6 +72,15 @@
 //     deteccion en el nucleo 1 (loop): la pagina nunca los frena. Sin WiFi,
 //     sin Arduino por WiFi o sin celular, el atril funciona igual.
 //   - Los mensajes (Log.print...) salen por el monitor serie Y a la pagina.
+//
+//  v8.1: calibracion robusta (mediana y MAD), margen relativo del umbral y
+//   sensibilidad 1/2/3 elegible en la pagina; el Arduino solo manda la senal
+//   cruda por WiFi cuando hay una pagina mirandola.
+//  v8.2: la deteccion aprende el nivel con la cabeza arriba (3 s) y suelta al
+//   40 % del camino al pico; listas de musica por defecto ABAJO 4-6 / ARRIBA 1-3;
+//   estrellas 600 (lento) a 1000 (cabeza abajo) pasos/s.
+//  Compilacion: struct ArchivoWeb; (declaracion adelantada) evita el error
+//   "'ArchivoWeb' does not name a type" del Arduino IDE 2.
 //
 //  Cambios v2 respecto a v1 (mismas reglas del documento):
 //   - Buscar el tope siempre va a 400 pasos/s (en v1, despues de una bajada,
@@ -119,7 +132,7 @@
 #include <esp_http_server.h>
 #include <esp_heap_caps.h>
 #include <stdarg.h>
-
+struct ArchivoWeb;
 // ------------------------- Pines (esquematico) -------------------------
 // Motor de giro (J4):      IN1..IN4 = IO23, IO22, IO21, IO19
 // Motor de estrellas (J3): IN1..IN4 = IO18, IO17, IO16, IO4
@@ -210,8 +223,8 @@ const unsigned long PAUSA_SONIDO = 3000;  // ms minimos entre sonidos
 //   /01/001.mp3 ... /01/006.mp3   canciones
 //   /ADVERT/0001.mp3               aviso "subio la cabeza"
 // Hay DOS listas de 3 pistas (numero de archivo dentro de /01):
-//   CABEZA ABAJO  -> pistasAbajo   (por defecto 001, 002, 003)
-//   CABEZA ARRIBA -> pistasArriba  (por defecto 004, 005, 006)
+//   CABEZA ABAJO  -> pistasAbajo   (por defecto 004, 005, 006)
+//   CABEZA ARRIBA -> pistasArriba  (por defecto 001, 002, 003)
 // Al cambiar la cabeza de posicion, pasa a la SIGUIENTE pista de la otra lista.
 // Cuando una pista termina, sigue la siguiente de la misma lista.
 // Cada vez que SUBE la cabeza suena /ADVERT/0001.mp3 encima de la musica y, al
