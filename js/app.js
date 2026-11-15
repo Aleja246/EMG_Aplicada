@@ -508,7 +508,10 @@
       const c = st.cal;
       $('lv-cal').className = 'calibrando';
       $('lv-cal-titulo').textContent = 'Calibrando · ' + Math.ceil(c.restante) + ' s';
-      $('lv-cal-txt').textContent = 'Mantén la cabeza del niño arriba, en la postura de la terapia, y quieta.';
+      $('lv-cal-txt').textContent = c.pasos === 2 && c.fase === 1
+        ? 'Paso 2 de 2: ahora baja la cabeza del niño y mantenla abajo (luz verde).'
+        : c.pasos === 2 ? 'Paso 1 de 2: cabeza del niño arriba, mirando las estrellas, y quieta (luz azul).'
+        : 'Mantén la cabeza del niño arriba, en la postura de la terapia, y quieta.';
       $('lv-cal-bar').style.width = (100 * (1 - c.restante / c.total)) + '%';
     } else if (!rec) {
       const esperando = equipoListo() || sim;

@@ -1,6 +1,6 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v8.2 SIN LAPTOP (sonido + red ASTRA + pagina web)
+//  ASTRA - Firmware del atril (ESP32) v8.3 SIN LAPTOP (sonido + red ASTRA + pagina web)
 //  La senal sEMG controla los actuadores.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
@@ -9,24 +9,34 @@
 //  Que hace:
 //   1. ARRANQUE: las estrellas buscan el microswitch; ahi queda la posicion 0
 //      y empieza su ciclo (como motor_endstop.ino). El lazy susan gira desde el encendido.
-//   2. CALIBRANDO: 10 s de RMS basal con la cabeza apoyada (luz azul).
-//      Descarta el primer segundo. Reposo = MEDIANA de las medianas de 0.5 s y
-//      SD robusta = 1.4826 x MAD (no les afecta un movimiento breve).
-//      U_on = R + max(k x SD, 2 mV, margen relativo x R); por defecto k = 3 y
-//      margen 20 % (sensibilidad 1/2/3 en la pagina: k 2/3/4, margen 10/20/35 %).
-//      U_off = R + 0.6 (U_on - R). Sin contracciones solicitadas.
-//      Termina a los 10 s por reloj; si la senal es inestable solo avisa.
-//      Las estrellas ya van y vienen, lento.
+//   2. CALIBRANDO (v8.3). TODO el movil avisa que esta calibrando: estrellas y
+//      lazy susan se detienen, la musica se calla y la luz "respira" despacio.
+//      En 2 pasos (CAL_DOS_POSICIONES = true):
+//       a) 7 s CABEZA ARRIBA, mirando las estrellas y quieta (luz AZUL).
+//       b) 7 s CABEZA ABAJO y sostenida (luz VERDE).
+//      De cada paso descarta los primeros 1.5 s (el movimiento de la cabeza) y
+//      toma la MEDIANA y la SD robusta (1.4826 x MAD) de las medianas de 0.5 s.
+//      El umbral queda ENTRE los dos niveles: a 35/50/65 % del camino de arriba
+//      hacia abajo (sensibilidad 1/2/3), con 20 % de histeresis para volver.
+//      Si con la cabeza abajo el RMS BAJA (p. ej. la cabeza cae sin esfuerzo),
+//      lo detecta solo (CAL_POLARIDAD_AUTO). Si los dos niveles no se
+//      distinguen, avisa y usa el umbral basal con el nivel de cabeza arriba:
+//      U_on = R + max(k x SD, 2 mV, margen relativo x R), k = 3, margen 20 %.
+//      Con CAL_DOS_POSICIONES = false: solo 10 s basales con la cabeza arriba.
+//      Sonidos opcionales en la microSD: /02/001.mp3 al empezar ("mira las
+//      estrellas") y /02/002.mp3 al pasar a cabeza abajo. Si no estan: silencio.
 //   3. SESION:
-//      - Activacion: RMS suave sobre U_on por 300 ms. U_on se calcula sobre el
-//        nivel con la cabeza ARRIBA de los ultimos 3 s (v8.2; aprende ese
-//        nivel 1 s antes de detectar). Termina al bajar al 40 % del camino
-//        entre ese nivel y el pico (o bajo U_off, lo que sea mayor) por 300 ms.
+//      - Activacion: RMS suave sobre U_on por 300 ms; termina bajo U_off por
+//        300 ms. Con la calibracion de 2 pasos los dos umbrales son FIJOS.
+//        (Con la basal, como en v8.2: U_on sigue al nivel con la cabeza ARRIBA
+//        de los ultimos 3 s y termina al 40 % del camino entre ese nivel y el pico.)
 //      - CABEZA ABAJO = RMS SOBRE el umbral (ABAJO_ES_ACTIVIDAD; x lo invierte).
-//      - Estrellas (paso completo, como motor_endstop.ino): giran hasta pisar
-//        el endstop, regresan a 0, giran al otro lado, pisan, regresan... sin
-//        parar. CABEZA ABAJO: aceleran de 600 a 1000 pasos/s en 2 s. ARRIBA: 600.
-//      - Lazy susan: gira siempre desde el encendido; solo el PARO lo detiene.
+//      - Estrellas: giran hasta pisar el microswitch y cambian de sentido, sin
+//        parar. v8.3: PASO COMPLETO de verdad (antes el comentario decia paso
+//        completo pero el motor iba en medio paso) y velocidades en rpm del eje:
+//        CABEZA ABAJO 14 rpm, ARRIBA 4 rpm (mas contraste). Se ajustan en vivo.
+//      - Lazy susan: gira siempre desde el encendido; solo el PARO lo detiene
+//        (v8.3: y se queda quieto mientras calibra, con CAL_DETENER_MOTORES).
 //      - Luz: CABEZA ABAJO = brillo maximo y cambia de color rapido (vuelta en
 //        4 s). CABEZA ARRIBA = tenue (15 %) y casi quieta (vuelta en 40 s).
 //      - Musica: siempre sonando desde el encendido, desde la carpeta /01 de la
@@ -39,9 +49,12 @@
 //
 //  Comandos (monitor serie a 115200, "Sin ajuste de linea"):
 //   c = recalibrar   p = pausa / seguir   r = reanudar tras el paro
-//   h = volver a buscar el microswitch   + / - = factor SD   i = info
-//   x = invertir que estado del EMG es "cabeza abajo"
+//   h = volver a buscar el microswitch   + / - = umbral mas alto / mas bajo
+//   i = info   x = invertir que estado del EMG es "cabeza abajo"
 //   o = probar la siguiente combinacion del lazy susan (6: orden x medio/completo)
+//   m = estrellas en medio paso / paso completo (v8.3; vuelve a buscar el tope)
+//   > / < = estrellas +1 / -1 rpm con la CABEZA ABAJO (v8.3)
+//   ) / ( = estrellas +1 / -1 rpm con la CABEZA ARRIBA (v8.3)
 //  Boton BOOT de la placa: recalibrar (o reanudar tras el paro).
 //
 //  Placa: "ESP32 Dev Module". Biblioteca: AccelStepper (el DFPlayer se maneja
@@ -79,6 +92,10 @@
 //  v8.2: la deteccion aprende el nivel con la cabeza arriba (3 s) y suelta al
 //   40 % del camino al pico; listas de musica por defecto ABAJO 4-6 / ARRIBA 1-3;
 //   estrellas 600 (lento) a 1000 (cabeza abajo) pasos/s.
+//  v8.3: estrellas en paso completo y en rpm (mas fuerza y mas contraste, se
+//   ajustan en vivo); todo el movil muestra la calibracion (quieto, en silencio,
+//   luz que respira) y calibracion en 2 pasos (cabeza arriba y cabeza abajo) con
+//   el umbral entre los dos niveles, umbrales fijos y polaridad automatica.
 //  Compilacion: struct ArchivoWeb; (declaracion adelantada) evita el error
 //   "'ArchivoWeb' does not name a type" del Arduino IDE 2.
 //
@@ -159,8 +176,15 @@ const char *NOMBRE_ORDEN_P[N_ORDENES_P] = {"medio paso, IN1 IN3 IN2 IN4", "medio
   "paso completo, IN1 IN4 IN2 IN3"};
 int ordenP = ORDEN_PLANETAS;
 AccelStepper *planetas = &planetasOrden[ORDEN_PLANETAS];
-// Estrellas: paso completo, orden IN1, IN3, IN2, IN4 (igual que motor_endstop.ino)
-AccelStepper estrellas(AccelStepper::HALF4WIRE, 18, ORDEN_B_ESTRELLAS ? 17 : 16, ORDEN_B_ESTRELLAS ? 16 : 17, 4, false);
+// Estrellas, orden IN1, IN3, IN2, IN4. v8.3: dos modos; se elige con
+// ESTRELLAS_PASO_COMPLETO (o en vivo con la tecla m). Antes el comentario decia
+// "paso completo" pero el motor iba en MEDIO paso: con los mismos pasos/s giraba
+// a la mitad de velocidad y con menos fuerza que en paso completo.
+const bool ESTRELLAS_PASO_COMPLETO = true;
+AccelStepper estrellasModo[2] = {
+  AccelStepper(AccelStepper::HALF4WIRE, 18, ORDEN_B_ESTRELLAS ? 17 : 16, ORDEN_B_ESTRELLAS ? 16 : 17, 4, false),   // 0: medio paso
+  AccelStepper(AccelStepper::FULL4WIRE, 18, ORDEN_B_ESTRELLAS ? 17 : 16, ORDEN_B_ESTRELLAS ? 16 : 17, 4, false)};  // 1: paso completo
+AccelStepper *estrellas = &estrellasModo[ESTRELLAS_PASO_COMPLETO ? 1 : 0];
 
 const int PIN_ROJO  = 25;   // LEDR -> ULN2803 I1 + I2
 const int PIN_VERDE = 33;   // LEDG -> ULN2803 I3 + I4
@@ -180,14 +204,17 @@ const int DF_TX     = 26;   // RX del DFPlayer (por R5 de 1k)
 // el endstop, regresa a 0... y asi sin parar. El endstop SOLO actua sobre las estrellas.
 const int  SENTIDO_INICIAL = 1;      // +1 = hacia un lado, -1 = hacia el otro
 const long MUY_LEJOS       = 1000000L;   // objetivo "infinito": gira hasta pisar el endstop
-// Arranque (como antes): al encender buscan el microswitch y ahi queda la posicion 0
-const int  V_HOMING_E      = 200;        // pasos completos/s al buscar el microswitch
-                                         // (= los 400 medios pasos/s del arranque de la V3)
-const long HOMING_MAX_PASOS = 20000;     // si no lo encuentra en estos pasos, sigue sin el
-// Velocidades en pasos completos por segundo (el 28BYJ-48 aguanta hasta ~600-700)
-const int  V_ESTRELLAS_RAPIDO = 1000;  // con la CABEZA ABAJO
-const int  V_ESTRELLAS_LENTO  = 600;  // con la CABEZA ARRIBA, calibrando o sin datos
-const int  ACELERACION   = 1500;    // pasos/s^2: que tan rapido arranca, frena y cambia de sentido
+// v8.3: velocidades en VUELTAS POR MINUTO del eje (rpm): valen igual en medio paso
+// y en paso completo. Velocidad de las estrellas = rpm x pi x diametro del eje / 60.
+// El 28BYJ-48 de 5 V llega a ~15 rpm sin carga; con carga y un eje mas grueso (mas
+// fuerza necesaria) llega a menos. Si VIBRA, zumba o se salta pasos: baja las rpm.
+// Antes: 1000 MEDIOS pasos/s = 14.7 rpm, justo en el limite del motor.
+const float RPM_HOMING_E         = 3;    // al buscar el microswitch (como antes)
+const float HOMING_MAX_VUELTAS   = 5;    // si no lo encuentra en estas vueltas, sigue sin el
+const float RPM_ESTRELLAS_RAPIDO = 14;   // con la CABEZA ABAJO (en vivo: > y <)
+const float RPM_ESTRELLAS_LENTO  = 4;    // con la CABEZA ARRIBA o sin datos (en vivo: ) y ()
+const float ACEL_ESTRELLAS_RPM_S = 30;   // rpm por segundo: que tan rapido arranca, frena y cambia de sentido
+const float DIAMETRO_EJE_MM      = 0;    // pon el diametro del eje (mm) y el monitor dira la velocidad en cm/s
 const int  V_PLANETAS    = 400;    // pasos/s (~1.8 rpm, una vuelta del eje en ~34 s). Hasta ~400 si quieres mas rapido
 const int  ACEL_PLANETAS = 200;    // pasos/s^2: arranque suave del lazy susan
 
@@ -197,6 +224,17 @@ const float MARGEN_REL_INICIAL = 0.20f; // v8.1: el umbral queda al menos 20 % s
 // v8.1: sensibilidad elegida en la pagina -> {k, margen relativo}
 const float SENS_K[3]   = {2.0f, 3.0f, 4.0f};
 const float SENS_REL[3] = {0.10f, 0.20f, 0.35f};
+// v8.3: calibracion en 2 pasos y como se ve el movil al calibrar
+const bool  CAL_DOS_POSICIONES  = true;   // false = solo 10 s basales con la cabeza arriba (v8.2)
+const bool  CAL_POLARIDAD_AUTO  = true;   // decide solo si cabeza abajo = RMS alto o bajo
+const unsigned long CAL_FASE_MS = 7000;   // duracion de cada paso (arriba y abajo)
+const float SENS_FRAC[3] = {0.35f, 0.50f, 0.65f};   // umbral entre arriba (0) y abajo (1), por sensibilidad
+const float CAL_HISTERESIS      = 0.20f;  // para volver a "cabeza arriba" hay que regresar 20 % mas
+const float CAL_SEP_MIN         = 3.0f;   // arriba y abajo deben separarse al menos 3 SD robustas...
+const float CAL_SEP_REL_MIN     = 0.15f;  // ...y al menos 15 % del nivel mas bajo
+const bool  CAL_DETENER_MOTORES = true;   // estrellas y lazy susan quietos mientras calibra
+const bool  CAL_SILENCIO        = true;   // la musica se calla mientras calibra
+const int   CARPETA_CAL         = 2;      // /02/001.mp3 al empezar, /02/002.mp3 al bajar la cabeza (0 = sin sonidos)
 const int N_CAL_MAX = 160;              // v8.1: bloques que se guardan para la mediana (10 s = ~90)
 const int N_ARRIBA = 30;                // v8.2: 3 s de medianas para el nivel con la cabeza arriba
 const float SUELTA_FRAC = 0.40f;        // v8.2: termina al bajar al 40 % del camino arriba -> pico
@@ -209,7 +247,7 @@ const unsigned long WATCHDOG_MS = 500;  // sin datos por mas de esto -> todo se 
 const int   N_MEDIANA           = 5;    // la senal que se compara es la MEDIANA de los ultimos
                                         // 5 bloques (0.5 s): quita los saltos sueltos del ruido
 const unsigned long CAL_MS = 10000;          // 10 s de RMS basal (por reloj: nunca se traba)
-const unsigned long CAL_DESCARTAR_MS = 1000;  // se descarta el primer segundo
+const unsigned long CAL_DESCARTAR_MS = 1500;  // se descartan los primeros 1.5 s (de cada paso)
 const int CAL_MIN_MUESTRAS = 20;              // minimo de bloques para aceptar la calibracion
 const float CAL_CV_MAX = 0.50f;        // si SD/media pasa esto, AVISA (ya no detiene el atril)
 
@@ -253,7 +291,7 @@ const bool PREMIO_AL_RELAJAR = true;     // (se conserva; lo que manda ahora es 
 // Si en otro montaje resulta al reves, pon false (o escribe x en el monitor).
 const bool ABAJO_ES_ACTIVIDAD = true;
 const int  LILA_R = 80, LILA_G = 0, LILA_B = 128;   // color del premio al relajar (0..128)
-const unsigned long T_BRILLO_RELAJADO = 2000;      // ms con la cabeza abajo hasta el maximo (luz y estrellas)
+const unsigned long T_BRILLO_RELAJADO = 2000;      // ms con la cabeza abajo hasta el maximo de la luz
 
 const bool USAR_PARO = false;      // pon true cuando el divisor del paro (R6, R7) este conectado
 const bool EMG_INVERTIDO = false;  // pon true si el opto invierte (aviso "!! Llegan bytes ...")
@@ -279,7 +317,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.2";
+const char *VERSION_ATRIL = "8.3";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -336,6 +374,15 @@ int nArriba = 0, iArriba = 0;
 float baseAct = 0, uOnAct = 0, picoAct = 0;   // v8.2: de la activacion en curso
 volatile float uAhoraPub = 0, uSueltaPub = 0, arribaPub = 0;   // v8.2: para la pagina (los calcula el loop)
 float umbralOn = 300, umbralOff = 200;
+// v8.3: calibracion en 2 pasos
+float calValsB[N_CAL_MAX];              // medianas con la CABEZA ABAJO
+int nAbajoCal = 0;
+bool calDosPos = false;                 // los umbrales vienen de la calibracion de 2 pasos
+float nivArriba = 0, sdArriba = 0, nivAbajo = 0, sdAbajo = 0, calSep = 0;
+float fracUmbral = 0.50f;               // donde queda el umbral entre arriba (0) y abajo (1)
+int calAudio = 0;                       // 0 callar la musica, 1 sonido de inicio, 2 sonido de abajo, 3 nada
+bool calAvisoAbajo = false;
+float rpmRapido = RPM_ESTRELLAS_RAPIDO, rpmLento = RPM_ESTRELLAS_LENTO;   // estrellas (se ajustan en vivo)
 
 // --- Deteccion ---
 bool activo = false;
@@ -465,8 +512,19 @@ bool datosOK() {
   return hayDatos && (millis() - tUltimoDato) < WATCHDOG_MS;
 }
 
+// v8.3: duracion de la calibracion y en que paso va (0 = cabeza arriba, 1 = cabeza abajo)
+unsigned long calDuracion() { return CAL_DOS_POSICIONES ? 2 * CAL_FASE_MS : CAL_MS; }
+int calFase() { return (CAL_DOS_POSICIONES && millis() - tCal >= CAL_FASE_MS) ? 1 : 0; }
+
+// v8.3: estrellas en rpm del eje (iguales en medio paso y en paso completo)
+bool pasoCompletoE() { return estrellas == &estrellasModo[1]; }
+float pasosVueltaE() { return pasoCompletoE() ? 2038.0f : 4076.0f; }   // 28BYJ-48: caja de 63.68:1
+float ppsE(float rpm) { return rpm * pasosVueltaE() / 60.0f; }        // rpm del eje -> pasos/s
+float rpmDe(float pps) { return pps * 60.0f / pasosVueltaE(); }
+
 // CABEZA ABAJO segun el estado del EMG (ver ABAJO_ES_ACTIVIDAD)
-bool cabezaAbajo() { return abajoEsActividad ? activo : !activo; }
+// v8.3: con la calibracion de 2 pasos "activo" ya es cabeza abajo (el RMS suba o baje)
+bool cabezaAbajo() { return (abajoEsActividad || calDosPos) ? activo : !activo; }
 
 // Comando directo al DFPlayer (10 bytes). No espera respuesta, asi los
 // motores nunca se detienen esperando al reproductor.
@@ -578,7 +636,7 @@ void leerDFPlayer() {
 
 void bobinasE(bool on) {
   if (on == bobinasEstrellas) return;
-  if (on) estrellas.enableOutputs(); else estrellas.disableOutputs();
+  if (on) estrellas->enableOutputs(); else estrellas->disableOutputs();
   bobinasEstrellas = on;
 }
 
@@ -589,14 +647,14 @@ void bobinasP(bool on) {
 }
 
 void detenerEstrellasYa() {
-  estrellas.setCurrentPosition(estrellas.currentPosition());  // alto inmediato, conserva la posicion
+  estrellas->setCurrentPosition(estrellas->currentPosition());  // alto inmediato, conserva la posicion
   bobinasE(false);
 }
 
-// Frenado suave (800 pasos/s^2). Si ya estan quietas, cancela cualquier destino.
+// Frenado suave (con ACEL_ESTRELLAS_RPM_S). Si ya estan quietas, cancela cualquier destino.
 void frenarEstrellas() {
-  if (estrellas.speed() == 0) estrellas.moveTo(estrellas.currentPosition());
-  else estrellas.stop();
+  if (estrellas->speed() == 0) estrellas->moveTo(estrellas->currentPosition());
+  else estrellas->stop();
 }
 
 // v8.1: mediana de v[0..n) o, con abs = true, mediana de |v - centro| (MAD)
@@ -622,6 +680,14 @@ float umbralSueltaAhora() {
 void guardarArriba(float v) { histArriba[iArriba] = v; iArriba = (iArriba + 1) % N_ARRIBA; if (nArriba < N_ARRIBA) nArriba++; }
 
 void calcularUmbrales() {
+  if (calDosPos) {                     // v8.3: entre los dos niveles medidos
+    float d = nivAbajo - nivArriba;    // negativo si con la cabeza abajo el RMS baja
+    float uAbajo  = nivArriba + fracUmbral * d;                               // entra a cabeza abajo
+    float uArriba = nivArriba + max(fracUmbral - CAL_HISTERESIS, 0.05f) * d;  // vuelve a cabeza arriba
+    umbralOn  = max(uAbajo, uArriba);  // "activo" = RMS sobre umbralOn
+    umbralOff = min(uAbajo, uArriba);
+    return;
+  }
   umbralOn = reposo + max(max(umbralK * sdReposo, MARGEN_MIN_MV), margenRel * reposo);   // v8.1: + margen relativo
   umbralOff = reposo + UMBRAL_OFF_FACTOR * (umbralOn - reposo);
 }
@@ -629,11 +695,22 @@ void calcularUmbrales() {
 void imprimirCalibracion() {
   Log.println();
   Log.println("---- Calibracion ----");
-  Log.printf("Reposo: %.0f mV (SD %.1f)\n", reposo, sdReposo);
-  Log.printf("Umbral de activacion: %.1f mV (mediana + %.1f SD robusta, minimo +%.0f %%; sensibilidad %d)\n", umbralOn, umbralK, margenRel * 100, sensibilidad);
-  Log.printf("Umbral de relajacion: %.0f mV\n", umbralOff);
+  if (calDosPos) {                     // v8.3
+    Log.printf("Cabeza ARRIBA: %.0f mV (SD %.1f) | cabeza ABAJO: %.0f mV (SD %.1f) | separacion: %.0f SD\n",
+               nivArriba, sdArriba, nivAbajo, sdAbajo, calSep);
+    Log.printf("Cabeza abajo = RMS %s. Umbral al %.0f %% del camino de arriba hacia abajo (sensibilidad %d)\n",
+               abajoEsActividad ? "ALTO" : "BAJO", fracUmbral * 100, sensibilidad);
+    Log.printf("Pasa a CABEZA ABAJO en %.1f mV y vuelve a CABEZA ARRIBA en %.1f mV\n",
+               abajoEsActividad ? umbralOn : umbralOff, abajoEsActividad ? umbralOff : umbralOn);
+  } else {
+    Log.printf("Reposo: %.0f mV (SD %.1f)\n", reposo, sdReposo);
+    Log.printf("Umbral de activacion: %.1f mV (mediana + %.1f SD robusta, minimo +%.0f %%; sensibilidad %d)\n", umbralOn, umbralK, margenRel * 100, sensibilidad);
+    Log.printf("Umbral de relajacion: %.0f mV\n", umbralOff);
+  }
   Log.printf("Activaciones: %d | tiempo activo total: %.1f s | lineas danadas: %lu\n",
                 nActivaciones, tiempoActivoTotal / 1000.0f, lineasMalas);
+  Log.printf("Estrellas: %s, %.0f rpm cabeza abajo / %.0f rpm cabeza arriba\n",
+             pasoCompletoE() ? "paso completo" : "medio paso", rpmRapido, rpmLento);
   Log.println("---------------------");
 }
 
@@ -671,7 +748,7 @@ void iniciarCalibracion();
 // Estrellas: la posicion actual es 0 y empiezan a girar (como motor_endstop.ino)
 void empezarAGirarE() {
   bobinasE(true);
-  estrellas.moveTo((long)sentidoE * MUY_LEJOS);
+  estrellas->moveTo((long)sentidoE * MUY_LEJOS);
   estadoE = E_GIRANDO;
   endstopArmado = false;             // se arma hasta que el endstop este suelto
   Log.printf("   Estrellas: girando hacia el lado %s\n", sentidoE > 0 ? "POSITIVO" : "NEGATIVO");
@@ -688,8 +765,8 @@ void iniciarArranque() {
   pasosHoming = 0;
   sentidoE = SENTIDO_INICIAL;
   bobinasE(true);
-  estrellas.setMaxSpeed(V_HOMING_E);
-  estrellas.setSpeed(SENTIDO_INICIAL * V_HOMING_E);
+  estrellas->setMaxSpeed(ppsE(RPM_HOMING_E));
+  estrellas->setSpeed(SENTIDO_INICIAL * ppsE(RPM_HOMING_E));
   velE = 0;
   dfVolumenEn = millis() + 2000;     // el DFPlayer pudo reiniciarse (paro): reenvia el volumen
   tMusicaLista = millis() + 2300;    // y despues vuelve a poner la musica
@@ -701,11 +778,11 @@ void iniciarArranque() {
 // Termina el arranque (como la V3): posicion 0 en el microswitch y las estrellas
 // se ALEJAN de el (sentido contrario al de la busqueda); luego sigue su ciclo.
 void terminarArranque() {
-  estrellas.setCurrentPosition(0);
+  estrellas->setCurrentPosition(0);
   sentidoE = -SENTIDO_INICIAL;
-  velE = V_ESTRELLAS_LENTO;
-  estrellas.setMaxSpeed(velE);
-  estrellas.setAcceleration(ACELERACION);
+  velE = ppsE(rpmLento);
+  estrellas->setMaxSpeed(velE);
+  estrellas->setAcceleration(ppsE(ACEL_ESTRELLAS_RPM_S));
   empezarAGirarE();                  // espera a soltar el microswitch antes de contar el siguiente
   if (calibrado) iniciarSesion(); else iniciarCalibracion();
 }
@@ -714,6 +791,7 @@ void terminarArranque() {
 void aplicarSensibilidad(int n) {
   if (n < 1 || n > 3) return;
   sensibilidad = n; umbralK = SENS_K[n - 1]; margenRel = SENS_REL[n - 1];
+  fracUmbral = SENS_FRAC[n - 1];                       // v8.3
   Log.printf(">> Sensibilidad %d (%s)\n", n, n == 1 ? "mas sensible" : n == 2 ? "normal" : "menos sensible");
   if (calibrado) { calcularUmbrales(); imprimirCalibracion(); }
 }
@@ -723,12 +801,21 @@ void iniciarCalibracion() {
   modo = CALIBRANDO;
   tCal = millis();
   nReposo = 0;
+  nAbajoCal = 0;                              // v8.3
+  calAvisoAbajo = false;
+  calAudio = CAL_SILENCIO ? 0 : 3;
   nArriba = 0; iArriba = 0;                   // v8.2: el nivel de arriba se vuelve a medir
   sumaReposo = suma2Reposo = 0.0;
   pistaPendiente = 0;
   Log.println();
-  Log.println(">> CALIBRACION BASAL: cabeza apoyada y estable durante 10 s (luz azul).");
-  Log.println(">> Se descarta el primer segundo; no hagas contracciones voluntarias.");
+  if (CAL_DOS_POSICIONES) {
+    Log.println(">> CALIBRACION en 2 pasos. El movil se queda quieto y en silencio.");
+    Log.printf(">>  1) CABEZA ARRIBA, mirando las estrellas y quieta: %lu s (luz azul).\n", CAL_FASE_MS / 1000);
+    Log.printf(">>  2) Despues CABEZA ABAJO y sostenida: %lu s (luz verde).\n", CAL_FASE_MS / 1000);
+  } else {
+    Log.println(">> CALIBRACION BASAL: cabeza apoyada y estable durante 10 s (luz azul).");
+    Log.println(">> Se descartan los primeros 1.5 s; no hagas contracciones voluntarias.");
+  }
 }
 
 void iniciarSesion() {
@@ -740,6 +827,40 @@ void iniciarSesion() {
   cambiarCancion = false;
   Log.println();
   Log.println(">> SESION: cabeza abajo = estrellas rapidas, luz brillante y colores rapidos.");
+}
+
+// v8.3: con el nivel de cabeza arriba (ya en reposo / sdReposo) y el de cabeza abajo
+// decide el umbral y la polaridad. Si no se distinguen, se queda el umbral basal.
+void revisarDosPosiciones() {
+  nivArriba = reposo; sdArriba = sdReposo;
+  int nB = min(nAbajoCal, N_CAL_MAX);
+  if (nB < CAL_MIN_MUESTRAS) {
+    Log.printf("!! Solo %d bloques con la cabeza abajo: se usa el umbral basal. Repite con c o BOOT.\n", nB);
+    return;
+  }
+  nivAbajo = medianaDe(calValsB, nB, 0.0f, false);
+  sdAbajo = max(1.4826f * medianaDe(calValsB, nB, nivAbajo, true), 0.5f);
+  float sep = fabsf(nivAbajo - nivArriba);
+  float ruido = max(sdArriba, sdAbajo);
+  calSep = sep / ruido;
+  if (sep < CAL_SEP_MIN * ruido || sep < MARGEN_MIN_MV || sep < CAL_SEP_REL_MIN * min(nivArriba, nivAbajo)) {
+    Log.printf("!! Cabeza ARRIBA (%.0f mV) y cabeza ABAJO (%.0f mV) casi no se distinguen.\n", nivArriba, nivAbajo);
+    Log.println("!! Se usa el umbral basal. Revisa los electrodos o baja la cabeza mas marcado y recalibra (c o BOOT).");
+    return;
+  }
+  calDosPos = true;
+  bool abajoAlto = nivAbajo > nivArriba;
+  if (abajoAlto != abajoEsActividad) {
+    if (CAL_POLARIDAD_AUTO) {
+      abajoEsActividad = abajoAlto;
+      Log.printf(">> Con la cabeza abajo el RMS %s: ahora CABEZA ABAJO = RMS %s el umbral.\n",
+                 abajoAlto ? "SUBE" : "BAJA", abajoAlto ? "SOBRE" : "BAJO");
+    } else {
+      Log.println("!! Con la cabeza abajo el RMS va al reves de ABAJO_ES_ACTIVIDAD: revisa o escribe x.");
+    }
+  }
+  reposo = min(nivArriba, nivAbajo);         // el nivel mas bajo (grafica y 'nivel')
+  sdReposo = abajoAlto ? sdArriba : sdAbajo;
 }
 
 void terminarCalibracion() {
@@ -763,6 +884,8 @@ void terminarCalibracion() {
       Log.println("!! RMS basal inestable (variacion > 50 % de la media). Revisa electrodos;");
       Log.println("!! el atril sigue funcionando. Puedes recalibrar con c o BOOT.");
     }
+    calDosPos = false;                         // v8.3
+    if (CAL_DOS_POSICIONES) revisarDosPosiciones();
   }
   calibrado = true;
   calcularUmbrales();
@@ -806,13 +929,21 @@ void procesarRms(int mv) {
   tUltimoDato = ahora;
 
   if (modo == CALIBRANDO) {
-    // Se calibra sobre la misma mediana que se compara despues (el primer segundo no cuenta)
+    // Se calibra sobre la misma mediana que se compara despues (el inicio de cada paso no cuenta)
     bool usado = false;
-    if (ahora - tCal >= CAL_DESCARTAR_MS && ventanaN == N_MEDIANA) {
-      sumaReposo += rmsSuave;
-      suma2Reposo += (double)rmsSuave * rmsSuave;
-      if (nReposo < N_CAL_MAX) calVals[nReposo] = rmsSuave;   // v8.1
-      nReposo++;
+    unsigned long t = ahora - tCal;
+    bool pasoAbajo = CAL_DOS_POSICIONES && t >= CAL_FASE_MS;     // v8.3: segundo paso
+    unsigned long t0 = pasoAbajo ? CAL_FASE_MS : 0;
+    if (t - t0 >= CAL_DESCARTAR_MS && ventanaN == N_MEDIANA) {
+      if (pasoAbajo) {
+        if (nAbajoCal < N_CAL_MAX) calValsB[nAbajoCal] = rmsSuave;
+        nAbajoCal++;
+      } else {
+        sumaReposo += rmsSuave;
+        suma2Reposo += (double)rmsSuave * rmsSuave;
+        if (nReposo < N_CAL_MAX) calVals[nReposo] = rmsSuave;   // v8.1
+        nReposo++;
+      }
       usado = true;
     }
     guardarBloque(mv, rmsSuave, usado ? 2 : 0);
@@ -824,10 +955,14 @@ void procesarRms(int mv) {
   nivel = constrain((rmsSuave - reposo) / max(umbralOn - reposo, 1.0f), 0.0f, 1.0f);
 
   // Histeresis + confirmacion en el tiempo
+  // v8.3: con la calibracion de 2 pasos los umbrales son FIJOS y, si con la cabeza abajo el
+  // RMS BAJA (alReves), "activo" = cabeza abajo = RMS bajo el umbral. Con la basal, como v8.2.
+  bool alReves = calDosPos && !abajoEsActividad;
   if (!activo) {
-    float uOnAhora = umbralOnAhora();             // v8.2: sobre el nivel actual con la cabeza arriba
-    uAhoraPub = uOnAhora; uSueltaPub = 0; arribaPub = nivelArribaActual();
-    if (rmsSuave >= uOnAhora && nArriba >= 10) {   // v8.2: primero aprende 1 s el nivel con la cabeza arriba
+    float uOnAhora = calDosPos ? (alReves ? umbralOff : umbralOn) : umbralOnAhora();
+    uAhoraPub = uOnAhora; uSueltaPub = 0; arribaPub = calDosPos ? nivArriba : nivelArribaActual();
+    bool entra = alReves ? rmsSuave <= uOnAhora : rmsSuave >= uOnAhora;
+    if (entra && (calDosPos || nArriba >= 10)) {   // v8.2: con la basal primero aprende 1 s
       if (!tSobre) { tSobre = ahora; sumaRmsAct = 0; nRmsAct = 0; msSesionIni = msSesion; }
       sumaRmsAct += mv; nRmsAct++;
       if (ahora - tSobre + HOLGURA_MS >= T_CONFIRMAR) {
@@ -841,9 +976,9 @@ void procesarRms(int mv) {
     } else { tSobre = 0; guardarArriba(rmsSuave); }   // v8.2: guarda lo que queda bajo el umbral (o todo mientras aprende)
   } else {
     if (rmsSuave > picoAct) picoAct = rmsSuave;   // v8.2
-    float uSuelta = umbralSueltaAhora();
+    float uSuelta = calDosPos ? (alReves ? umbralOn : umbralOff) : umbralSueltaAhora();   // v8.3: fijo con 2 pasos
     uSueltaPub = uSuelta;
-    if (rmsSuave < uSuelta) {                      // v8.2: antes rmsSuave < umbralOff
+    if (alReves ? rmsSuave > uSuelta : rmsSuave < uSuelta) {   // v8.2: antes rmsSuave < umbralOff
       if (!tBajo) { tBajo = ahora; sumaCola = 0; nCola = 0; }
       sumaCola += mv; nCola++;
       if (ahora - tBajo + HOLGURA_MS >= T_CONFIRMAR) {
@@ -901,6 +1036,29 @@ void cambiarOrdenPlanetas() {
                 ordenP, NOMBRE_ORDEN_P[ordenP], ordenP);
 }
 
+// v8.3: prueba en vivo medio paso / paso completo en las estrellas (vuelve a buscar el tope)
+void cambiarModoEstrellas() {
+  estrellas->disableOutputs();
+  bobinasEstrellas = false;
+  estrellas = &estrellasModo[pasoCompletoE() ? 0 : 1];
+  Log.printf(">> Estrellas en %s. Si quedan mejor, pon ESTRELLAS_PASO_COMPLETO = %s.\n",
+             pasoCompletoE() ? "PASO COMPLETO" : "MEDIO PASO", pasoCompletoE() ? "true" : "false");
+  iniciarArranque();
+}
+
+float cmS(float rpm) { return rpm * 3.14159f * DIAMETRO_EJE_MM / 600.0f; }   // rpm del eje -> cm/s
+
+// v8.3: ajusta en vivo las rpm de las estrellas (rapido = cabeza abajo)
+void ajustarRpm(bool rapido, float d) {
+  if (rapido) rpmRapido = constrain(rpmRapido + d, 2.0f, 30.0f);
+  else rpmLento = constrain(rpmLento + d, 1.0f, 30.0f);
+  rpmLento = min(rpmLento, rpmRapido);
+  Log.printf(">> Estrellas: %.0f rpm cabeza abajo / %.0f rpm cabeza arriba (%s)",
+             rpmRapido, rpmLento, pasoCompletoE() ? "paso completo" : "medio paso");
+  if (DIAMETRO_EJE_MM > 0) Log.printf(" = %.1f / %.1f cm/s", cmS(rpmRapido), cmS(rpmLento));
+  Log.printf(". Para dejarlo: RPM_ESTRELLAS_RAPIDO = %.0f y RPM_ESTRELLAS_LENTO = %.0f\n", rpmRapido, rpmLento);
+}
+
 // Comandos del monitor serie y de la pagina (todos pasan por aqui, en el loop)
 void ejecutarComando(char c) {
     switch (c) {
@@ -921,10 +1079,25 @@ void ejecutarComando(char c) {
         Log.printf(">> Ahora CABEZA ABAJO = RMS %s el umbral. Si queda bien, pon ABAJO_ES_ACTIVIDAD = %s.\n",
                       abajoEsActividad ? "SOBRE" : "BAJO", abajoEsActividad ? "true" : "false");
         break;
-      case '+': if (calibrado) { umbralK = min(umbralK + 0.5f, 8.0f); calcularUmbrales(); imprimirCalibracion(); } break;
-      case '-': if (calibrado) { umbralK = max(umbralK - 0.5f, 1.0f); calcularUmbrales(); imprimirCalibracion(); } break;
+      case '+':                                                  // umbral mas alto (menos sensible)
+        if (calibrado) {
+          if (calDosPos) fracUmbral = min(fracUmbral + 0.05f, 0.80f); else umbralK = min(umbralK + 0.5f, 8.0f);
+          calcularUmbrales(); imprimirCalibracion();
+        }
+        break;
+      case '-':                                                  // umbral mas bajo (mas sensible)
+        if (calibrado) {
+          if (calDosPos) fracUmbral = max(fracUmbral - 0.05f, 0.25f); else umbralK = max(umbralK - 0.5f, 1.0f);
+          calcularUmbrales(); imprimirCalibracion();
+        }
+        break;
       case 'i': imprimirCalibracion(); break;
       case 'o': cambiarOrdenPlanetas(); break;
+      case 'm': if (modo != PARO) cambiarModoEstrellas(); break;  // v8.3
+      case '>': ajustarRpm(true, 1); break;
+      case '<': ajustarRpm(true, -1); break;
+      case ')': ajustarRpm(false, 1); break;
+      case '(': ajustarRpm(false, -1); break;
       default: break;
     }
 }
@@ -1012,7 +1185,11 @@ void actualizarModo() {
   }
 
   // Calibracion basal: termina a los 10 s por reloj, lleguen o no todos los datos
-  if (modo == CALIBRANDO && ahora - tCal >= CAL_MS) terminarCalibracion();
+  if (modo == CALIBRANDO && calFase() == 1 && !calAvisoAbajo) {   // v8.3: segundo paso
+    calAvisoAbajo = true;
+    Log.printf(">> Ahora CABEZA ABAJO y sostenida: %lu s (luz verde).\n", CAL_FASE_MS / 1000);
+  }
+  if (modo == CALIBRANDO && ahora - tCal >= calDuracion()) terminarCalibracion();
 
   // Musica: siempre sonando (menos en PARO). Lista de cabeza abajo / arriba y
   // aviso ADVERT cada vez que SUBE la cabeza.
@@ -1030,6 +1207,21 @@ void actualizarModo() {
       if (musicaSonando) { dfEnviar(0x16, 0); musicaSonando = false; ultimoCmdMusica = ahora; }
       cambiarCancion = avisoSonando = pistaTerminada = false;
       reiniciarLista = false;
+    } else if (modo == CALIBRANDO && CAL_SILENCIO) {
+      // v8.3: silencio mientras calibra (y los sonidos de /02 si estan en la microSD).
+      // Al empezar la sesion, musicaSonando = false hace que la musica vuelva.
+      if (calAudio == 0) {
+        dfEnviar(0x16, 0);                       // detener la musica
+        musicaSonando = avisoSonando = cambiarCancion = reiniciarLista = false;
+        calAudio = 1; ultimoCmdMusica = ahora;
+      } else if (calAudio == 1) {
+        if (CARPETA_CAL > 0) dfEnviar(0x0F, (CARPETA_CAL << 8) | 1);   // /02/001.mp3
+        calAudio = 2; ultimoCmdMusica = ahora;
+      } else if (calAudio == 2 && calFase() == 1) {
+        if (CARPETA_CAL > 0) dfEnviar(0x0F, (CARPETA_CAL << 8) | 2);   // /02/002.mp3
+        calAudio = 3; ultimoCmdMusica = ahora;
+      }
+      pistaTerminada = false;                    // al terminar un sonido de /02 no sigue la musica
     } else if (!musicaSonando) {
       tocarLista(quiereAbajo, false);            // la pista actual de la lista
     } else if (modo == SESION && ok && quiereAbajo != listaAbajoSonando &&
@@ -1061,15 +1253,12 @@ void actualizarModo() {
   leerDFPlayer();
 }
 
-// Velocidad de las estrellas: CABEZA ABAJO acelera hasta V_ESTRELLAS_RAPIDO en
-// T_BRILLO_RELAJADO. Cabeza arriba, calibrando o sin datos: lento.
+// Velocidad de las estrellas (pasos/s). v8.3: CABEZA ABAJO = rpmRapido de una vez y
+// la aceleracion (ACEL_ESTRELLAS_RPM_S) hace la rampa: el cambio se nota mas rapido.
+// Cabeza arriba o sin datos: rpmLento.
 float velEstrellas() {
-  if (modo == SESION && datosOK() && cabezaAbajo()) {
-    float k = min((float)(millis() - tCambioCabeza) / T_BRILLO_RELAJADO, 1.0f);
-    float v = V_ESTRELLAS_LENTO + (V_ESTRELLAS_RAPIDO - V_ESTRELLAS_LENTO) * k;
-    return 50.0f * (int)(v / 50.0f);   // en escalones de 50 pasos/s
-  }
-  return V_ESTRELLAS_LENTO;
+  bool rapido = modo == SESION && datosOK() && cabezaAbajo();
+  return ppsE(rapido ? rpmRapido : rpmLento);
 }
 
 // Gira -> pisa el endstop -> regresa a 0 -> gira al otro lado -> pisa el endstop
@@ -1082,22 +1271,22 @@ void moverEstrellas() {
     if (topePresionado()) {
       Log.println(">> Tope encontrado. Las estrellas empiezan a subir y bajar.");
       terminarArranque();
-    } else if (estrellas.runSpeed() && ++pasosHoming > HOMING_MAX_PASOS) {
+    } else if (estrellas->runSpeed() && ++pasosHoming > (long)(HOMING_MAX_VUELTAS * pasosVueltaE())) {
       Log.println("!! No encontre el microswitch: la posicion 0 queda donde estan ahora (revisa microswitch y SENTIDO_INICIAL).");
       terminarArranque();
     }
     return;
   }
 
-  if (modo == PAUSA) {                       // en pausa frenan suave y esperan
+  if (modo == PAUSA || (modo == CALIBRANDO && CAL_DETENER_MOTORES)) {   // en pausa (y v8.3: calibrando) frenan suave y esperan
     if (!frenando) { frenarEstrellas(); frenando = true; }
   } else {
     if (frenando) {                          // al seguir, retoman lo que hacian
       frenando = false;
-      estrellas.moveTo(estadoE == E_GIRANDO ? (long)sentidoE * MUY_LEJOS : 0);
+      estrellas->moveTo(estadoE == E_GIRANDO ? (long)sentidoE * MUY_LEJOS : 0);
     }
     float v = velEstrellas();
-    if (v != velE) { velE = v; estrellas.setMaxSpeed(v); }
+    if (v != velE) { velE = v; estrellas->setMaxSpeed(v); }
 
     switch (estadoE) {
       case E_GIRANDO:
@@ -1113,7 +1302,7 @@ void moverEstrellas() {
         }
         break;
       case E_REGRESANDO:
-        if (estrellas.distanceToGo() == 0) {
+        if (estrellas->distanceToGo() == 0) {
           sentidoE = -sentidoE;              // ahora hacia el otro lado
           empezarAGirarE();
         }
@@ -1123,27 +1312,30 @@ void moverEstrellas() {
     }
   }
 
-  if (estrellas.distanceToGo() != 0) { bobinasE(true); estrellas.run(); }
+  if (estrellas->distanceToGo() != 0) { bobinasE(true); estrellas->run(); }
   else bobinasE(false);
 }
 
-// El lazy susan gira SIEMPRE desde el encendido (arranque, calibracion, sesion y
-// pausa). No depende del microswitch. Solo lo detiene el PARO.
+// El lazy susan gira desde el encendido (arranque, sesion y pausa). No depende del
+// microswitch. Lo detienen el PARO y, v8.3, la calibracion (CAL_DETENER_MOTORES).
+// v8.3: mientras calibra (CAL_DETENER_MOTORES) frena suave y se queda quieto.
 void moverPlanetas() {
-  if (modo != PARO) {
-    bobinasP(true);
-    unsigned long ahora = millis();
-    float vObj = ordenP >= 3 ? V_PLANETAS / 2.0f : (float)V_PLANETAS;   // paso completo: mitad de pasos, misma vuelta
-    if (velPlanetas < vObj && ahora - tRampaP >= 20) {   // arranque suave
-      tRampaP = ahora;
-      velPlanetas = min(velPlanetas + ACEL_PLANETAS * 0.02f, vObj);
-      planetas->setSpeed(velPlanetas);
-    }
-    planetas->runSpeed();
-  } else {
+  if (modo == PARO) {
     bobinasP(false);
     velPlanetas = 0;                 // al volver, arranca suave otra vez
+    return;
   }
+  unsigned long ahora = millis();
+  bool quieto = modo == CALIBRANDO && CAL_DETENER_MOTORES;
+  float vObj = quieto ? 0.0f : (ordenP >= 3 ? V_PLANETAS / 2.0f : (float)V_PLANETAS);   // paso completo: mitad de pasos, misma vuelta
+  if (velPlanetas != vObj && ahora - tRampaP >= 20) {    // arranque y frenado suaves
+    tRampaP = ahora;
+    float d = ACEL_PLANETAS * 0.02f;
+    velPlanetas = velPlanetas < vObj ? min(velPlanetas + d, vObj) : max(velPlanetas - d, vObj);
+    planetas->setSpeed(velPlanetas);
+  }
+  if (velPlanetas > 0) { bobinasP(true); planetas->runSpeed(); }
+  else bobinasP(false);
 }
 
 void actualizarLuz() {
@@ -1154,7 +1346,12 @@ void actualizarLuz() {
   float r = 0, g = 0, b = 0;
   switch (modo) {
     case ARRANQUE:   r = 15; g = 15; b = 15; break;                 // blanco tenue
-    case CALIBRANDO: b = 70; break;   // azul durante todo el registro basal
+    case CALIBRANDO: {   // v8.3: luz que "respira" (3 s por respiracion): AZUL = cabeza arriba, VERDE = cabeza abajo
+      float resp = 0.5f - 0.5f * cosf(6.2832f * (float)((ahora - tCal) % 3000) / 3000.0f);
+      float br = 20 + 60 * resp;     // lento y sin destellos (< 3 Hz)
+      if (calFase() == 1) g = br; else b = br;
+      break;
+    }
     case PAUSA:      r = 15; g = 15; b = 15; break;
     case PARO:       break;                                         // apagada
     case SESION:
@@ -1190,13 +1387,14 @@ void imprimirEstado() {
   if (ahora - ultimoEstado < 500) return;
   ultimoEstado = ahora;
   if (modo == SESION) {
-    Serial.printf("[SESION] RMS %4d mV, mediana %4.0f (umbral %.0f) | %s (%s umbral) | estrellas %.0f pasos/s | cancion %d%s\n",
-                  rmsUltimo, rmsSuave, umbralOn, cabezaAbajo() ? "CABEZA ABAJO" : "cabeza arriba",
-                  activo ? "sobre" : "bajo", velE, cancion, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
+    Serial.printf("[SESION] RMS %4d mV, mediana %4.0f (umbral %.0f / %.0f) | %s (%s umbral) | estrellas %.0f rpm | cancion %d%s\n",
+                  rmsUltimo, rmsSuave, umbralOn, umbralOff, cabezaAbajo() ? "CABEZA ABAJO" : "cabeza arriba",
+                  activo ? "sobre" : "bajo", rpmDe(velE), cancion, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else if (modo == CALIBRANDO) {
-    unsigned long t = millis() - tCal;
-    Serial.printf("[CALIBRANDO BASAL, quedan %.1f s] RMS %4d mV%s\n", t < CAL_MS ? (CAL_MS - t) / 1000.0f : 0.0f,
-                  rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
+    unsigned long t = millis() - tCal, total = calDuracion();
+    Serial.printf("[CALIBRANDO %s, quedan %.1f s] RMS %4d mV%s\n",
+                  !CAL_DOS_POSICIONES ? "BASAL" : calFase() ? "2/2: CABEZA ABAJO" : "1/2: CABEZA ARRIBA",
+                  t < total ? (total - t) / 1000.0f : 0.0f, rmsUltimo, datosOK() ? "" : " | SIN DATOS DEL ARDUINO");
   } else {
     Serial.printf("[%s]%s\n", NOMBRE_MODO[modo], datosOK() ? "" : " sin datos del Arduino");
   }
@@ -1264,7 +1462,8 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
   unsigned long ahora = millis();
   bool act = activo;
   unsigned long tc = ahora - tCal;
-  float restante = modo == CALIBRANDO ? (tc < CAL_MS ? (CAL_MS - tc) / 1000.0f : 0.0f) : 0.0f;
+  unsigned long calTotal = calDuracion();
+  float restante = modo == CALIBRANDO ? (tc < calTotal ? (calTotal - tc) / 1000.0f : 0.0f) : 0.0f;
 
   jl = 0; js[0] = 0;
   ja("{\"type\":\"atril\",\"st\":");
@@ -1274,10 +1473,13 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
      act ? 1 : 0, cabezaAbajo() ? 1 : 0, abajoEsActividad ? 1 : 0, (int)(nivel * 100),
      act ? (ahora - tInicioActivo) / 1000.0f : 0.0f);
   ja(",\"cal\":{\"ok\":%d,\"restante\":%.1f,\"total\":%.1f,\"desc\":%.1f,\"n\":%d,\"nMin\":%d,\"reposo\":%.1f,\"sd\":%.2f,\"cv\":%.3f,\"cvMax\":%.2f",
-     calibrado ? 1 : 0, restante, CAL_MS / 1000.0f, CAL_DESCARTAR_MS / 1000.0f, modo == CALIBRANDO ? nReposo : calN,
+     calibrado ? 1 : 0, restante, calTotal / 1000.0f, CAL_DESCARTAR_MS / 1000.0f, modo == CALIBRANDO ? nReposo : calN,
      CAL_MIN_MUESTRAS, reposo, sdReposo, reposo > 0 ? sdReposo / reposo : 0.0f, CAL_CV_MAX);
-  ja(",\"k\":%.1f,\"margen\":%.1f,\"rel\":%.2f,\"sens\":%d,\"koff\":%.2f,\"uon\":%.1f,\"uoff\":%.1f,\"pocos\":%d,\"inestable\":%d}",
+  ja(",\"k\":%.1f,\"margen\":%.1f,\"rel\":%.2f,\"sens\":%d,\"koff\":%.2f,\"uon\":%.1f,\"uoff\":%.1f,\"pocos\":%d,\"inestable\":%d",
      umbralK, MARGEN_MIN_MV, margenRel, sensibilidad, UMBRAL_OFF_FACTOR, umbralOn, umbralOff, calPocos ? 1 : 0, calInestable ? 1 : 0);
+  ja(",\"pasos\":%d,\"fase\":%d,\"dos\":%d,\"nivArriba\":%.1f,\"nivAbajo\":%.1f,\"sep\":%.1f}",   // v8.3
+     CAL_DOS_POSICIONES ? 2 : 1, modo == CALIBRANDO ? calFase() : 0, calDosPos ? 1 : 0, nivArriba, nivAbajo, calSep);
+  ja(",\"rpmE\":%.1f", rpmDe(velE));
   ja(",\"uAhora\":%.1f,\"uSuelta\":%.1f,\"arriba\":%.1f", (float)uAhoraPub, (float)uSueltaPub, (float)arribaPub);   // v8.2
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":0",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
@@ -1754,14 +1956,14 @@ void tareaRed(void *) {
 // ======================================================================
 void setup() {
   // Bobinas apagadas desde el primer instante
-  estrellas.enableOutputs(); estrellas.disableOutputs();
+  for (int k = 0; k < 2; k++) { estrellasModo[k].enableOutputs(); estrellasModo[k].disableOutputs(); }
   for (int k = 0; k < N_ORDENES_P; k++) { planetasOrden[k].enableOutputs(); planetasOrden[k].disableOutputs(); }
 
   Serial.setTxBufferSize(1024);
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v8.2 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
+  Serial.println("=== ASTRA - atril v8.3 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
@@ -1770,8 +1972,8 @@ void setup() {
   pinMode(PIN_BOOT, INPUT_PULLUP);
   pinMode(PIN_PARO, INPUT);
 
-  estrellas.setMaxSpeed(V_ESTRELLAS_LENTO);
-  estrellas.setAcceleration(ACELERACION);
+  estrellas->setMaxSpeed(ppsE(rpmLento));
+  estrellas->setAcceleration(ppsE(ACEL_ESTRELLAS_RPM_S));
   for (int k = 0; k < N_ORDENES_P; k++) planetasOrden[k].setMaxSpeed(V_PLANETAS * 2);
 
   Serial2.begin(9600, SERIAL_8N1, EMG_RX, EMG_TX, EMG_INVERTIDO);   // enlace con el Arduino

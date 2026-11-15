@@ -39,7 +39,7 @@ Con esta versión **no se necesita laptop, Node.js, internet ni GitHub Pages** d
 | | Qué cambió | Qué NO cambió |
 |---|---|---|
 | **Arduino** `firmware/arduino_emg_ap/arduino_emg_ap.ino` (v5.1-AP) | Tu `arduino_emg.ino` v5 con cambios solo en la red y en **qué muestras entran al RMS**:<br>• Se une a la red ASTRA (clave en `credenciales.h`); el atril está fijo en `192.168.4.1`. `WiFi.setTimeout(0)`: unirse a la red ya no detiene el `loop` (antes hasta 10 s).<br>• **Las muestras tomadas mientras el WiFi transmite se apartan del RMS** (el del opto y el del Serial Plotter). Cada transmisión hace que el módulo WiFi consuma corriente de golpe, y como el ADC mide contra los 5 V de la placa, esas lecturas salen movidas. Los filtros siguen recibiendo todas las muestras. **Sin WiFi el RMS es exactamente el de siempre.**<br>• El WiFi transmite justo **después** de cada línea del opto, 10 veces por segundo (antes 25), para que el atril reciba el RMS a tiempo. Si un envío tarda más de 60 ms, la señal en vivo descansa 3 s; el opto nunca se pausa.<br>• Solo transmite la señal cuando hay una página abierta mirándola (lo decide el atril). | Muestreo de 1000 Hz, A0, filtros (60 Hz y armónicos), bloques de 100 ms, opto (Serial1, 9600, `"640\n"`), formato del Serial Plotter (`Bruto`, `Sin60`, `SinArm`). |
-| **ESP32** `firmware/esp32_atril_ap/esp32_atril_ap.ino` (v8.2) | Se generó **desde tu firmware original** (v5 con sonido, en `herramientas/firmware/`) con las adaptaciones ya probadas del v7.1 y una parte de red nueva: red ASTRA, página desde LittleFS, señal del Arduino por WiFi y WebSocket.<br>**Calibración (v8.1):**<br>• El reposo y su dispersión se calculan con **mediana y MAD** en lugar de media y DE: un movimiento, una risa o un espasmo breve durante los 10 s ya no sube el umbral.<br>• Umbral de activación = reposo + el mayor de **3 DE**, **2 mV** o **20 % del reposo** (antes 2 DE o 2 mV, demasiado pegado al ruido).<br>• **Sensibilidad** elegible en la página (ver sección 4).<br>**Detección de la subida (v8.2):** el atril mide el nivel de la señal **con la cabeza arriba** (mediana de los últimos 3 s) y lo vuelve a aprender 1 s cada vez que la cabeza sube. Una caída es subir sobre **ese** nivel, y la cabeza "subió" cuando la señal baja al 40 % del camino entre ese nivel y el pico de la caída. Antes, si el niño sostenía la cabeza con más fuerza que al calibrar, tras la primera caída el atril se quedaba en "cabeza abajo".<br>**Canciones (v8.2):** por defecto, cabeza arriba = pistas 001–003 y cabeza abajo = 004–006. | Pines, orden de bobinas, velocidades, aceleraciones, límites, microswitch, 10 s de calibración con el primer segundo descartado, mediana de 0,5 s, umbral de relajación (60 %), confirmaciones de 300 ms, detección cabeza arriba/abajo, luz, DFPlayer, listas, avisos, PARO, BOOT y todos los comandos del monitor serie (`+` y `-` siguen ajustando el factor). |
+| **ESP32** `firmware/esp32_atril_ap/esp32_atril_ap.ino` (v8.3) | **v8.3:** calibración en 2 pasos (cabeza arriba y cabeza abajo; el umbral queda entre los dos niveles y la polaridad se detecta sola), todo el móvil muestra que está calibrando (quieto, en silencio, luz que respira) y estrellas en paso completo con velocidades en rpm que se ajustan en vivo (ver sección 4).<br>Se generó **desde tu firmware original** (v5 con sonido, en `herramientas/firmware/`) con las adaptaciones ya probadas del v7.1 y una parte de red nueva: red ASTRA, página desde LittleFS, señal del Arduino por WiFi y WebSocket.<br>**Calibración (v8.1):**<br>• El reposo y su dispersión se calculan con **mediana y MAD** en lugar de media y DE: un movimiento, una risa o un espasmo breve durante los 10 s ya no sube el umbral.<br>• Umbral de activación = reposo + el mayor de **3 DE**, **2 mV** o **20 % del reposo** (antes 2 DE o 2 mV, demasiado pegado al ruido).<br>• **Sensibilidad** elegible en la página (ver sección 4).<br>**Detección de la subida (v8.2):** el atril mide el nivel de la señal **con la cabeza arriba** (mediana de los últimos 3 s) y lo vuelve a aprender 1 s cada vez que la cabeza sube. Una caída es subir sobre **ese** nivel, y la cabeza "subió" cuando la señal baja al 40 % del camino entre ese nivel y el pico de la caída. Antes, si el niño sostenía la cabeza con más fuerza que al calibrar, tras la primera caída el atril se quedaba en "cabeza abajo".<br>**Canciones (v8.2):** por defecto, cabeza arriba = pistas 001–003 y cabeza abajo = 004–006. | Pines, orden de bobinas, velocidades, aceleraciones, límites, microswitch, 10 s de calibración con el primer segundo descartado, mediana de 0,5 s, umbral de relajación (60 %), confirmaciones de 300 ms, detección cabeza arriba/abajo, luz, DFPlayer, listas, avisos, PARO, BOOT y todos los comandos del monitor serie (`+` y `-` siguen ajustando el factor). |
 | **Página** | La sirve el ESP32. Los registros se guardan en el navegador (IndexedDB). El registro pide solo sexo, edad en años, GMFCS y diagnóstico opcional. Canciones: «Canción 1, 2 y 3» para cada posición. Sensibilidad por paciente. Diagnóstico de conexión en Ajustes. En la gráfica no se dibujan las muestras apartadas por el WiFi. | Diseño, pantallas, terapia en vivo, expediente, progreso, Excel, volumen y modo demostración. |
 
 ---
@@ -165,11 +165,18 @@ Desconecta los USB y deja cada placa en su power bank.
    En iPhone esto además protege los registros (ver sección 6).
 5. Arriba a la derecha debe decir **«Equipo listo»** (punto verde).
 6. **Registrar paciente** o **Buscar paciente** → **Iniciar terapia** → escribe el fisioterapeuta responsable,
-   elige la **sensibilidad** → **Comenzar**. El atril calibra 10 s (**cabeza arriba en la postura de la terapia**, quieta)
-   y la sesión empieza sola.
-   - **Normal** (recomendada): umbral = reposo + el mayor de 3 DE, 2 mV o 20 %.
-   - **Más sensible**: 2 DE o 10 %. Úsala si el atril no detecta caídas leves (niño con poca fuerza).
-   - **Menos sensible**: 4 DE o 35 %. Úsala si hay espasmos o movimientos que el atril toma por caídas.
+   elige la **sensibilidad** → **Comenzar**. El atril calibra en **2 pasos de 7 s** y la sesión empieza sola:
+   1. **Cabeza arriba**, mirando las estrellas y quieta (luz **azul** que respira).
+   2. **Cabeza abajo** y sostenida (luz **verde** que respira).
+
+   Mientras calibra, **todo el móvil lo muestra**: las estrellas y el lazy susan se detienen y la música se calla.
+   El umbral queda entre los dos niveles medidos:
+   - **Normal** (recomendada): a la mitad del camino entre cabeza arriba y cabeza abajo.
+   - **Más sensible**: al 35 % del camino. Úsala si el atril no detecta caídas leves (niño con poca fuerza).
+   - **Menos sensible**: al 65 % del camino. Úsala si hay espasmos o movimientos que el atril toma por caídas.
+
+   Si los dos pasos casi no se distinguen, el atril lo avisa y usa el umbral basal de antes (reposo + el mayor de
+   3 DE, 2 mV o 20 %; más sensible 2 DE o 10 %, menos sensible 4 DE o 35 %).
 
    La sensibilidad se guarda con cada paciente y se usa la próxima vez. También se puede cambiar durante la terapia
    en **Ajustes**.
@@ -184,7 +191,7 @@ Desconecta los USB y deja cada placa en su power bank.
 
 **Ajustes** (arriba a la derecha):
 - la canción con la cabeza arriba y con la cabeza abajo: **Canción 1, 2 o 3** (en la microSD: cabeza **arriba** = 001–003,
-  cabeza **abajo** = 004–006);
+  cabeza **abajo** = 004–006; opcional `/02/001.mp3` y `/02/002.mp3` para los pasos de la calibración);
 - el volumen (0–30): el atril lo guarda en su memoria;
 - descargar e importar respaldos;
 - el **Diagnóstico de la conexión**;
@@ -195,21 +202,41 @@ Una computadora con WiFi se usa igual: se une a la red ASTRA y abre `http://192.
 
 ---
 
+### Velocidad de las estrellas (v8.3)
+- Las velocidades van en **vueltas por minuto del eje** (rpm): cabeza abajo **14 rpm**, cabeza arriba **4 rpm**.
+  La velocidad de las estrellas es rpm × π × diámetro del eje ÷ 60 (con un eje de 20 mm, 14 rpm ≈ 1,5 cm/s).
+- El motor va en **paso completo** (más fuerza). Antes iba en medio paso aunque el comentario decía otra cosa, y los
+  1000 pasos/s eran 14,7 rpm, justo en el límite del 28BYJ-48. Por eso subir el número no lo hacía más rápido.
+- **Ajuste en vivo** por el monitor serie: `>` / `<` cabeza abajo ±1 rpm, `)` / `(` cabeza arriba ±1 rpm, `m` cambia
+  entre medio paso y paso completo (vuelve a buscar el tope). Sube hasta que el motor vibre o se salte pasos y deja
+  1–2 rpm menos. El monitor te dice qué valor poner en `RPM_ESTRELLAS_RAPIDO` / `RPM_ESTRELLAS_LENTO`.
+- Si pones el diámetro del eje en `DIAMETRO_EJE_MM`, el monitor también dice la velocidad en cm/s.
+
 ### Calibrar bien con niños de 10 a 15 años con parálisis cerebral
 - **Piel y electrodos:** limpia la piel y asegura bien los cables (cinta). Un cable que se mueve produce picos
   que el atril puede tomar por contracciones.
-- **Durante los 10 s:** la cabeza **arriba, en la misma postura de la terapia** (como el niño la va a sostener; puede
-  tener un apoyo ligero), ambiente tranquilo, sin hablar, reír ni comer. El primer segundo se descarta. Así el reposo
-  calibrado corresponde a "cabeza arriba" y el atril distingue mejor la caída.
-- **Si la cabeza arriba da más señal que en la calibración**, el atril se equivoca solo en la primera caída y desde ahí
-  se ajusta solo (v8.2). Si la diferencia entre arriba y abajo es pequeña, calibra de nuevo con la cabeza arriba.
+- **Calibra en las mismas condiciones de la terapia.** Si la terapia es caminando en el Atlas, calibra caminando:
+  el movimiento de la marcha también activa el cuello, y un umbral medido en reposo total se queda corto.
+- **Paso 1 (luz azul, 7 s):** la cabeza **arriba, en la misma postura de la terapia**, quieta, sin hablar, reír ni comer.
+- **Paso 2 (luz verde, 7 s):** la cabeza **abajo como cae de verdad en la terapia** y sostenida. No hace falta llegar
+  al pecho. De cada paso se descartan los primeros 1,5 s (el movimiento de la cabeza).
+- **La polaridad se detecta sola (v8.3).** En un adulto que inclina la cabeza, el músculo trabaja y el RMS **sube**.
+  En un niño cuya cabeza **cae sin esfuerzo**, el RMS puede **bajar**. El atril mide los dos niveles y lo decide;
+  el monitor serie dice «Con la cabeza abajo el RMS SUBE/BAJA».
+- **Si sale «casi no se distinguen»:** revisa los electrodos y repite marcando más la diferencia entre arriba y abajo.
+  Si el músculo solo se activa **al subir** la cabeza (un pico breve) y no al sostenerla, el nivel sostenido no sirve
+  para distinguir la postura: el atril se queda con el umbral basal.
+- **Sonidos opcionales:** si en la microSD pones `/02/001.mp3` («mira las estrellas») y `/02/002.mp3` («ahora baja la
+  cabeza»), suenan al empezar cada paso. Si no están, la calibración es en silencio.
 - **Un movimiento breve ya no arruina la calibración** (v8.1), pero si el niño se movió casi todo el tiempo o la
   página avisa «La medición salió inestable», pulsa **Volver a calibrar**.
 - **Si recolocas los electrodos o cambias la posición del niño**, vuelve a calibrar.
+- Para calibrar sin la página: botón **BOOT** del ESP32 o `c` en el monitor serie.
 - **Después de calibrar, compruébalo:** pide al niño que deje caer la cabeza y que la suba. La postura en pantalla
   debe cambiar en menos de 1 s. Si no detecta la caída, elige **Más sensible**; si marca caídas que no ocurren, elige
   **Menos sensible**. Durante la terapia se cambia en **Ajustes → Sensibilidad**: el umbral se recalcula al momento,
   sin repetir la calibración, y queda guardada con el paciente.
+- `+` y `-` en el monitor serie mueven el umbral 5 % del camino (en vez de cambiar la sensibilidad).
 - El atril confirma una caída cuando la señal pasa el umbral durante **300 ms**. Los espasmos más cortos (menos de
   ~0,3 s) se ignoran; los más largos pueden contar como una caída breve.
 
@@ -301,7 +328,7 @@ También puedes abrir `http://192.168.4.1/estado.json`.
 - **El PARO manda.** Con el PARO activo, el atril ignora toda orden de la página (lo comprueba dos veces: al
   recibirla y en el `loop`). El paro solo se libera con el botón físico y BOOT, o con `r` por el monitor serie.
 - **La página solo puede:** recalibrar (`c`, únicamente en SESIÓN o PAUSA), pausar/continuar (`p`), elegir pistas
-  (1–255) y ajustar el volumen (0–30). Las demás teclas del monitor serie (`h`, `x`, `+`, `-`, `o`, `r`, `i`) no se
+  (1–255) y ajustar el volumen (0–30). Las demás teclas del monitor serie (`h`, `x`, `+`, `-`, `o`, `r`, `i`, `m`, `>`, `<`, `)`, `(`) no se
   aceptan desde la página. Cada mensaje se valida, y se ignoran más de 20 mensajes por segundo y los mensajes de
   más de 512 bytes.
 - La red usa **WPA2** con tu clave, para hasta 5 equipos (el Arduino y 4 celulares o computadoras).
