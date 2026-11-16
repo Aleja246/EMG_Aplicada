@@ -232,8 +232,8 @@
   /* ---------- música y volumen (lo único técnico que ve el fisio) ---------- */
   // Cabeza ARRIBA: pistas 001-003 del DFPlayer; cabeza ABAJO: 004-006
   const MUS_OPC = {
-    abajo: [['4,4,4', 'Canción 1'], ['5,5,5', 'Canción 2'], ['6,6,6', 'Canción 3']],
-    arriba: [['1,1,1', 'Canción 1'], ['2,2,2', 'Canción 2'], ['3,3,3', 'Canción 3']]
+    abajo: [['4,5,6', 'Las 3, una tras otra'], ['4,4,4', 'Solo canción 1'], ['5,5,5', 'Solo canción 2'], ['6,6,6', 'Solo canción 3']],
+    arriba: [['1,2,3', 'Las 3, una tras otra'], ['1,1,1', 'Solo canción 1'], ['2,2,2', 'Solo canción 2'], ['3,3,3', 'Solo canción 3']]
   };
   const musValida = (l, v) => MUS_OPC[l].some(o => o[0] === v);
   // Lo elegido en esta página (o Canción 1 si no hay elección válida: p. ej. la lista vieja "las tres")

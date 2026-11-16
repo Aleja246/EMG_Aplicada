@@ -61,6 +61,7 @@
 //   h = volver a buscar el microswitch   + / - = umbral mas alto / mas bajo
 //   i = info   x = invertir que estado del EMG es "cabeza abajo"
 //   o = probar la siguiente combinacion del lazy susan (6: orden x medio/completo)
+//   l = prueba de la tira: 3 s rojo, 3 s verde, 3 s azul (v8.5)
 //   m = estrellas en medio paso / paso completo (v8.3; vuelve a buscar el tope)
 //   > / < = estrellas +1 / -1 rpm con la CABEZA ABAJO (v8.3)
 //   ) / ( = estrellas +1 / -1 rpm con la CABEZA ARRIBA (v8.3)
@@ -446,6 +447,7 @@ unsigned long bootCambio = 0;
 
 // --- Luz ---
 float luzR = 0, luzG = 0, luzB = 0;
+unsigned long tPruebaLuz = 0;        // v8.5: prueba de la tira (tecla l)
 float faseColor = 0;                // 0..1, posicion en la rueda de colores
 bool musicaSonando = false;
 int cancion = 4;                    // archivo de /01 que esta sonando (001..255)
@@ -1149,6 +1151,9 @@ void ejecutarComando(char c) {
       case 'i': imprimirCalibracion(); break;
       case 'o': cambiarOrdenPlanetas(); break;
       case 'm': if (modo != PARO) cambiarModoEstrellas(); break;  // v8.3
+      case 'l':                                                   // v8.5: prueba de la tira
+        if (modo != PARO) { tPruebaLuz = max(millis(), 1UL); Log.println(">> Prueba de la luz: 3 s ROJO (IO25), 3 s VERDE (IO33), 3 s AZUL (IO32)."); }
+        break;
       case '>': ajustarRpm(true, 1); break;
       case '<': ajustarRpm(true, -1); break;
       case ')': ajustarRpm(false, 1); break;
@@ -1402,6 +1407,17 @@ void actualizarLuz() {
   ultimaLuz = ahora;
 
   float r = 0, g = 0, b = 0;
+  if (tPruebaLuz) {                    // v8.5: tecla l = 3 s ROJO, 3 s VERDE, 3 s AZUL
+    unsigned long t = ahora - tPruebaLuz;
+    if (t >= 9000) tPruebaLuz = 0;
+    else {
+      analogWrite(PIN_ROJO, t < 3000 ? BRILLO_MAX : 0);
+      analogWrite(PIN_VERDE, t >= 3000 && t < 6000 ? BRILLO_MAX : 0);
+      analogWrite(PIN_AZUL, t >= 6000 ? BRILLO_MAX : 0);
+      luzR = luzG = luzB = 0;
+      return;
+    }
+  }
   switch (modo) {
     case ARRANQUE:   r = 15; g = 15; b = 15; break;                 // blanco tenue
     case CALIBRANDO: {   // v8.3: luz que "respira" (3 s por respiracion): AZUL = cabeza arriba, VERDE = cabeza abajo
