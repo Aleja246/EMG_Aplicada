@@ -104,9 +104,11 @@
         <h3>Progreso entre sesiones</h3>
         <label class="inline">Ver
           <select id="h-metric">
-            <option value="pctArriba">% del tiempo con la cabeza erguida</option>
-            <option value="caidasMin">Caídas de cabeza por minuto</option>
-            <option value="caidaMasLargaS">Caída de cabeza más larga (s)</option>
+            <option value="esfuerzoMedioS">Esfuerzo medio por intento (s)</option>
+            <option value="intentosMin">Intentos de levantar por minuto</option>
+            <option value="esfuerzoMaxS">Esfuerzo más largo (s)</option>
+            <option value="intensidadRel">Intensidad media (veces el reposo)</option>
+            <option value="entreIntentosS">Reposo medio entre intentos (s)</option>
             <option value="duracionMin">Duración de la terapia (min)</option>
           </select>
         </label>
@@ -116,7 +118,7 @@
     <div class="card">
       <h3>Sesiones</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Fecha</th><th>Fisioterapeuta</th><th>Duración</th><th>Umbral (mV)</th><th>Cabeza erguida</th><th>Cabeza caída</th><th>Caídas</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Fisioterapeuta</th><th>Duración</th><th>Umbral (mV)</th><th>Intentos</th><th>Intentos/min</th><th>Esfuerzo medio</th><th></th></tr></thead>
         <tbody id="h-body"></tbody>
       </table></div>
       <p class="muted" id="h-vacio" hidden>Todavía no hay sesiones registradas.</p>
@@ -144,7 +146,7 @@
       <label>Sensibilidad de la detección
         <select id="st-sens">
           <option value="2">Normal (recomendada)</option>
-          <option value="1">Más sensible: detecta caídas leves</option>
+          <option value="1">Más sensible: detecta intentos leves</option>
           <option value="3">Menos sensible: si hay espasmos o falsas alarmas</option>
         </select>
       </label>
@@ -170,7 +172,7 @@
       </div>
       <hr>
       <div class="vivo-top">
-        <div><span class="muted">Postura estimada</span><b class="postura" id="lv-postura">—</b></div>
+        <div><span class="muted">Estado</span><b class="postura" id="lv-postura">—</b></div>
         <div><span class="muted">Tiempo de sesión</span><b class="reloj" id="lv-tiempo">00:00</b></div>
       </div>
       <div class="calibrando" id="lv-cal" hidden>
@@ -189,8 +191,8 @@
       </div>
       <canvas id="live" class="live"></canvas>
       <div class="vivo-kpis">
-        <div class="kpi"><span>Tiempo cabeza abajo</span><b id="lv-abajo">00:00</b></div>
-        <div class="kpi"><span>Episodios de cabeza abajo</span><b id="lv-caidas">0</b></div>
+        <div class="kpi"><span>Intentos de levantar</span><b id="lv-abajo">0</b></div>
+        <div class="kpi"><span>Intentos por minuto</span><b id="lv-caidas">—</b></div>
       </div>
       <p class="pie" id="lv-pie"></p>
       <div class="form-actions">
@@ -235,7 +237,7 @@
     <label>Sensibilidad de la detección (se aplica al momento, sin volver a calibrar)
       <select id="aj-sens">
         <option value="2">Normal (recomendada)</option>
-        <option value="1">Más sensible: detecta caídas leves</option>
+        <option value="1">Más sensible: detecta intentos leves</option>
         <option value="3">Menos sensible: si hay espasmos o falsas alarmas</option>
       </select>
     </label>
