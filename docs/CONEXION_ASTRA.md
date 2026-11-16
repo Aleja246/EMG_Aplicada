@@ -80,18 +80,18 @@ RED_CLAVE = "clave"
 5. En el expediente del paciente, **Iniciar terapia** → escribe quién dirige la sesión y pulsa **Comenzar**.
    El atril se calibra solo (10 s con la cabeza del niño apoyada y quieta) y la sesión **empieza a registrarse sola**.
 6. **Durante la terapia** la pantalla muestra solo lo necesario:
-   - tiempo de sesión y postura estimada (**Cabeza arriba / Cabeza abajo**);
+   - tiempo de sesión y estado (**En reposo / Intentando levantar / Premio**);
    - la señal EMG en tiempo real;
-   - **tiempo con la cabeza abajo** y **episodios de cabeza abajo**;
+   - **intentos de levantar** e **intentos por minuto**;
    - en la esquina, el estado del equipo, y abajo si la calibración está completa y si llega la señal.
 
    Botones: **Pausar**, **Volver a calibrar** y **Finalizar sesión**. Todo lo demás se guarda y se ve al final.
-7. **Finalizar sesión** muestra el resumen (duración, umbral de activación, tiempo con la cabeza erguida y caída,
-   número de caídas, caída más larga), deja escribir **observaciones** y permite **descargar el Excel** antes de **Guardar**.
+7. **Finalizar sesión** muestra el resumen (duración, umbral, intentos de levantar, intentos por minuto,
+   esfuerzo medio y más largo, intensidad en veces el reposo, reposo medio entre intentos), deja escribir **observaciones** y permite **descargar el Excel** antes de **Guardar**.
 8. En el **expediente** del paciente quedan:
-   - el **resumen general** (sesiones, promedio de tiempo con la cabeza erguida, caídas por minuto, mejor sesión, tendencia);
+   - el **resumen general** (sesiones, intentos por minuto, esfuerzo medio y más largo, mejor sesión, tendencia del esfuerzo medio);
    - la **gráfica de progreso** entre sesiones;
-   - la **tabla de sesiones** (fecha, fisioterapeuta, duración, umbral, tiempos, caídas) con **Ver** la señal, **⬇ Excel** y eliminar;
+   - la **tabla de sesiones** (fecha, fisioterapeuta, duración, umbral, intentos, intentos/min, esfuerzo medio) con **Ver** la señal, **⬇ Excel** y eliminar;
    - **⬇ Excel de todas las sesiones** y las **notas del paciente**.
 9. **Ajustes** (arriba a la derecha) solo tiene lo útil en terapia:
    - la **canción con la cabeza arriba** (pistas 004–006 del DFPlayer) y la **canción con la cabeza abajo** (001–003);

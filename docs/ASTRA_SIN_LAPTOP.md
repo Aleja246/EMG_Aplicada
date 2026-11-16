@@ -177,7 +177,7 @@ Desconecta los USB y deja cada placa en su power bank.
 7. Durante la terapia la pantalla muestra solo:
    - postura estimada y tiempo de sesión;
    - la señal EMG en tiempo real;
-   - tiempo con la cabeza abajo y número de episodios;
+   - intentos de levantar la cabeza e intentos por minuto;
    - el estado del equipo.
 
    Botones: **Pausar / Continuar**, **Volver a calibrar** y **Finalizar sesión**.
@@ -272,7 +272,7 @@ Una computadora con WiFi se usa igual: se une a la red ASTRA y abre `http://192.
 
 | Qué | Dónde | Qué contiene |
 |---|---|---|
-| **Excel de una sesión** | Al finalizar (**Descargar Excel**) o en el expediente (botón **⬇** de la sesión) | Hoja *Sesión*: paciente, fecha, fisioterapeuta, duración, umbral, tiempos con la cabeza erguida y caída, caídas, caída más larga, caídas por minuto, calibración (reposo, desviación, umbral de relajación, si fue inestable) y observaciones. Hoja *Episodios*. Hoja *Señal* (RMS cada 100 ms). |
+| **Excel de una sesión** | Al finalizar (**Descargar Excel**) o en el expediente (botón **⬇** de la sesión) | Hoja *Sesión*: paciente, fecha, fisioterapeuta, duración, umbral, intentos de levantar, intentos por minuto, esfuerzo total, medio y más largo, intensidad (veces el reposo), reposo medio entre intentos, primer intento, calibración (reposo, desviación, umbral de relajación, si fue inestable) y observaciones. Hoja *Intentos* (uno por fila). Desde v8.5 ya no hay «tiempo con la cabeza erguida» ni «caídas»: el EMG mide el esfuerzo, no la postura. Hoja *Señal* (RMS cada 100 ms). |
 | **Excel del expediente** | Expediente → **⬇ Excel de todas las sesiones** | Hoja *Paciente* y hoja *Sesiones* (una fila por sesión) |
 | **Respaldo** (`ASTRA-respaldo-AAAA-MM-DD.json`) | Ajustes → **Descargar respaldo** | Todos los pacientes, sesiones y señales de ese navegador |
 | **Importar respaldo** | Ajustes → **Importar respaldo…** | Suma los datos del archivo sin borrar nada. Lo que ya existe no se duplica. Si un paciente importado trae un ID que **otro** paciente ya usa, recibe un ID nuevo y el anterior queda guardado como `codigoOriginal`. |

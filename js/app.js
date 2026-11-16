@@ -350,7 +350,6 @@
   function startRecording(s) {
     rec = {
       start: new Date().toISOString(), key: keyOf(s), t0: s.tSes, base: 0, last: s.tSes, minId: s.nAct,
-      abajoS: 0, caidas: 0, maxAbajoS: 0, curAbajoS: 0, eraAbajo: false,
       acts: [], seen: new Set(), rms: [], umbral: s.cal.uon, cal: fotoCal(s), recal: 0, pausaS: 0
     };
     toast('La terapia empezó: ASTRA ya está midiendo.');
@@ -365,7 +364,7 @@
         const k = keyOf(s, sid), uid = s.boot + '#' + id;
         if (k !== rec.key || id <= rec.minId || rec.seen.has(uid)) continue;
         rec.seen.add(uid);
-        rec.acts.push({ n: rec.acts.length + 1, inicioS: rec.base + ini - rec.t0, durS: dur, rms });
+        rec.acts.push({ n: rec.acts.length + 1, inicioS: rec.base + ini - rec.t0, durS: dur, rms, reposo: rec.cal.reposoMV });
       }
     };
     take();
@@ -376,14 +375,6 @@
     }
     if (enSesion && keyOf(s) === rec.key) rec.last = s.tSes;
     if (s.modo === 'SESION' && keyOf(s) === rec.key) {
-      // tiempo con la cabeza caída y número de caídas, medidos con el reloj del atril
-      const dt = prev && prev.modo === 'SESION' && keyOf(prev) === rec.key ? Math.max(0, Math.min(1, s.tSes - prev.tSes)) : 0;
-      if (s.abajo) {
-        rec.abajoS += dt; rec.curAbajoS += dt;
-        if (!rec.eraAbajo) { rec.caidas++; rec.curAbajoS = dt; }
-        rec.maxAbajoS = Math.max(rec.maxAbajoS, rec.curAbajoS);
-      } else rec.curAbajoS = 0;
-      rec.eraAbajo = !!s.abajo;
       const t = recTime(), n = s.b.length;
       s.b.forEach(([v, m, f], i) => rec.rms.push([+(t - (n - 1 - i) * 0.1).toFixed(1), v, m, f === 1 ? 1 : 0]));
     }
@@ -526,41 +517,69 @@
     const abajo = !!(st && st.modo === 'SESION' && st.abajo);
     const post = $('lv-postura');
     post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo ? 'abajo' : 'arriba') : '');
-    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'Cabeza abajo' : 'Cabeza arriba')
+    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'En reposo' : st.activo ? 'Intentando levantar' : 'Premio')
       : st && st.modo === 'PAUSA' ? 'En pausa' : '—';
     $('lv-tiempo').textContent = clock(recTime());
-    $('lv-abajo').textContent = clock(rec ? rec.abajoS : 0);
-    $('lv-caidas').textContent = rec ? rec.caidas : 0;
+    const mv = metricas(rec ? rec.acts : [], recTime());
+    $('lv-abajo').textContent = String(mv.intentos);
+    $('lv-caidas').textContent = mv.intentosMin != null && recTime() >= 30 ? f1(mv.intentosMin) : '—';
     const cal = st && st.cal && st.cal.ok;
     $('lv-pie').textContent = (cal ? 'Calibración completada' : 'Falta calibrar') + ' · ' +
       (!senalVivo ? 'Señal en vivo apagada (Ajustes)' : emgConn.status === 'connected' || sim ? 'Señal disponible' : 'Sin señal del sensor');
     $('lv-pausa').textContent = st && st.modo === 'PAUSA' ? '▶ Continuar' : '❚❚ Pausar';
   }
 
+  /* ---------- métricas (v8.5): solo lo que el EMG mide de verdad ----------
+   * El EMG ve el ESFUERZO de levantar la cabeza, no la postura. Por eso ya no hay
+   * "tiempo con la cabeza erguida" ni "caídas": eran una suposición del atril. */
+  function metricas(acts, t) {
+    const n = acts.length, min = t / 60;
+    const durs = acts.map(a => a.durS);
+    const rel = acts.filter(a => a.reposo > 0).map(a => a.rms / a.reposo);
+    const huecos = [];
+    for (let i = 1; i < n; i++) huecos.push(Math.max(0, acts[i].inicioS - (acts[i - 1].inicioS + acts[i - 1].durS)));
+    const media = v => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : null);
+    return {
+      intentos: n,
+      intentosMin: min > 0 ? n / min : null,
+      esfuerzoTotalS: durs.reduce((a, b) => a + b, 0),
+      esfuerzoMedioS: media(durs),
+      esfuerzoMaxS: n ? Math.max(...durs) : null,
+      intensidadRel: media(rel),            // veces el nivel de reposo de la calibración
+      entreIntentosS: media(huecos),
+      primerIntentoS: n ? acts[0].inicioS : null,
+      duracionMin: min
+    };
+  }
+  // Las sesiones guardadas antes de v8.5 tienen las métricas viejas (cabeza erguida / caídas)
+  const esVieja = u => u && u.intentos == null && (u.pctArriba != null || u.caidas != null);
+
   /* ===================================================================
    * Fin de la sesión
    * =================================================================== */
   function buildRecord() {
-    const t = recTime(), abajo = Math.min(t, rec.abajoS), arriba = Math.max(0, t - abajo);
+    const t = recTime();
     return {
       patientId: patient.id, codigo: idDe(patient), fecha: rec.start, fisio: localStorage.getItem('emg.fisio') || '',
       duracionS: t, umbralMV: rec.umbral, calibracion: rec.cal, recalibraciones: rec.recal, observaciones: '',
-      resumen: {
-        tiempoArribaS: arriba, tiempoAbajoS: abajo, caidas: rec.caidas, caidaMasLargaS: rec.maxAbajoS,
-        pctArriba: t > 0 ? 100 * arriba / t : null, caidasMin: t > 0 ? rec.caidas / (t / 60) : null,
-        duracionMin: t / 60
-      },
-      episodios: rec.acts.map(a => ({ n: a.n, inicioS: a.inicioS, durS: a.durS, rms: a.rms }))
+      resumen: metricas(rec.acts, t),
+      episodios: rec.acts.map(a => ({ n: a.n, inicioS: a.inicioS, durS: a.durS, rms: a.rms, reposo: a.reposo }))
     };
   }
+  const seg = v => (v != null && isFinite(v) ? f1(v) + ' s' : '—');
+  const veces = v => (v != null && isFinite(v) ? f1(v) + ' × reposo' : '—');
   function kpisSesion(r) {
     const u = r.resumen || {};
+    if (esVieja(u)) return [['Duración de la terapia', clock(r.duracionS)], ['Umbral de activación', f1(r.umbralMV) + ' mV'],
+      ['Métricas', 'Sesión anterior a v8.5 (medía la postura supuesta)']];
     return [
       ['Duración de la terapia', clock(r.duracionS)],
-      ['Tiempo con la cabeza erguida', clock(u.tiempoArribaS) + (u.pctArriba != null ? ' · ' + pct(u.pctArriba) : '')],
-      ['Tiempo con la cabeza caída', clock(u.tiempoAbajoS)],
-      ['Caídas de cabeza', String(u.caidas != null ? u.caidas : '—')],
-      ['Caída más larga', f1(u.caidaMasLargaS) + ' s'],
+      ['Intentos de levantar la cabeza', String(u.intentos != null ? u.intentos : '—')],
+      ['Intentos por minuto', u.intentosMin != null ? f1(u.intentosMin) : '—'],
+      ['Esfuerzo medio por intento', seg(u.esfuerzoMedioS)],
+      ['Esfuerzo más largo', seg(u.esfuerzoMaxS)],
+      ['Intensidad media', veces(u.intensidadRel)],
+      ['Reposo medio entre intentos', seg(u.entreIntentosS)],
       ['Umbral de activación', f1(r.umbralMV) + ' mV']
     ];
   }
@@ -618,29 +637,32 @@
     }
     const tot = ses.reduce((a, s) => a + (s.duracionS || 0), 0);
     const prom = k => { const v = ses.map(s => res(s)[k]).filter(x => x != null && isFinite(x)); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
-    const mejor = ses.reduce((a, s) => (res(s).pctArriba > res(a).pctArriba ? s : a), ses[0]);
+    const nuevas = ses.filter(s => res(s).esfuerzoMedioS != null && isFinite(res(s).esfuerzoMedioS));
+    const mejor = nuevas.length ? nuevas.reduce((a, s) => (res(s).esfuerzoMedioS > res(a).esfuerzoMedioS ? s : a), nuevas[0]) : null;
     pintarKpis($('p-resumen'), [
       ['Sesiones realizadas', String(ses.length)],
       ['Primera sesión', fmtDate(ses[0].fecha)],
       ['Última sesión', fmtDate(ses[ses.length - 1].fecha)],
       ['Tiempo total de terapia', clock(tot)],
-      ['Cabeza erguida (promedio)', pct(prom('pctArriba'))],
-      ['Caídas por minuto (promedio)', f1(prom('caidasMin'))],
-      ['Caída más larga (promedio)', f1(prom('caidaMasLargaS')) + ' s'],
-      ['Mejor sesión', pct(res(mejor).pctArriba) + ' · ' + fmtDate(mejor.fecha)]
+      ['Intentos por minuto (promedio)', prom('intentosMin') != null ? f1(prom('intentosMin')) : '—'],
+      ['Esfuerzo medio por intento (promedio)', seg(prom('esfuerzoMedioS'))],
+      ['Esfuerzo más largo (promedio)', seg(prom('esfuerzoMaxS'))],
+      ['Mejor sesión (esfuerzo medio)', mejor ? seg(res(mejor).esfuerzoMedioS) + ' · ' + fmtDate(mejor.fecha) : '—']
     ]);
+    // Tendencia: cuánto sostiene cada esfuerzo (el objetivo es sostener la cabeza más tiempo)
     let msg = '';
-    const pts = ses.map(s => res(s).pctArriba).filter(v => v != null && isFinite(v));
+    const pts = nuevas.map(s => res(s).esfuerzoMedioS);
     if (pts.length >= 2) {
       const k = pts.length >= 6 ? 3 : 1, avg = a => a.reduce((x, y) => x + y, 0) / a.length;
-      const a = avg(pts.slice(0, k)), b = avg(pts.slice(-k)), d = b - a;
+      const a = avg(pts.slice(0, k)), b = avg(pts.slice(-k)), d = b - a, rel = a > 0 ? d / a : 0;
       msg = (k > 1 ? 'Últimas 3 sesiones frente a las primeras 3: ' : 'Última sesión frente a la primera: ') +
-        Math.round(a) + ' % → ' + Math.round(b) + ' % del tiempo con la cabeza erguida (' +
-        (d >= 0 ? '+' : '') + Math.round(d) + ' puntos' + (Math.abs(d) < 2 ? ', sin cambio claro' : d > 0 ? ', va mejorando' : ', ha bajado') + ').';
+        'esfuerzo medio de ' + f1(a) + ' s → ' + f1(b) + ' s por intento (' +
+        (Math.abs(rel) < 0.1 ? 'sin cambio claro' : d > 0 ? 'sostiene más el esfuerzo' : 'sostiene menos el esfuerzo') + ').';
     }
+    if (ses.some(s => esVieja(res(s)))) msg += (msg ? ' ' : '') + 'Las sesiones anteriores a v8.5 no entran en estas métricas.';
     $('p-tendencia').textContent = msg;
   }
-  const METRICS = { pctArriba: '%', caidasMin: 'caídas/min', caidaMasLargaS: 's', duracionMin: 'min' };
+  const METRICS = { intentosMin: 'intentos/min', esfuerzoMedioS: 's', esfuerzoMaxS: 's', intensidadRel: '× reposo', entreIntentosS: 's', duracionMin: 'min' };
   function renderProgreso(ses) {
     const key = $('h-metric').value;
     const pts = ses.filter(s => res(s)[key] != null && isFinite(res(s)[key])).map(s => ({ y: res(s)[key], label: fmtDate(s.fecha) }));
@@ -652,8 +674,7 @@
     ses.slice().reverse().forEach(s => {
       const u = res(s), tr = document.createElement('tr');
       [fmtCorta(s.fecha), s.fisio || '—', clock(s.duracionS), f1(s.umbralMV),
-        clock(u.tiempoArribaS) + (u.pctArriba != null ? ' (' + pct(u.pctArriba) + ')' : ''),
-        clock(u.tiempoAbajoS), String(u.caidas != null ? u.caidas : '—')]
+        u.intentos != null ? String(u.intentos) : '—', u.intentosMin != null ? f1(u.intentosMin) : '—', seg(u.esfuerzoMedioS)]
         .forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
       const td = document.createElement('td');
       const ver = document.createElement('button'); ver.className = 'btn small ghost'; ver.textContent = 'Ver';
@@ -708,11 +729,14 @@
     return [['Fecha', fmtDateTime(r.fecha)], ['Fisioterapeuta responsable', r.fisio || ''],
       ['Duración de la terapia', clock(r.duracionS)], ['Duración (minutos)', +(r.duracionS / 60).toFixed(2)],
       ['Umbral de activación (mV)', r.umbralMV != null ? +(+r.umbralMV).toFixed(2) : ''],
-      ['Tiempo con la cabeza erguida', clock(u.tiempoArribaS)], ['Tiempo cabeza erguida (s)', u.tiempoArribaS != null ? +u.tiempoArribaS.toFixed(1) : ''],
-      ['% del tiempo con la cabeza erguida', u.pctArriba != null ? +u.pctArriba.toFixed(1) : ''],
-      ['Tiempo con la cabeza caída', clock(u.tiempoAbajoS)], ['Tiempo cabeza caída (s)', u.tiempoAbajoS != null ? +u.tiempoAbajoS.toFixed(1) : ''],
-      ['Número de caídas de cabeza', u.caidas != null ? u.caidas : ''], ['Caída más larga (s)', u.caidaMasLargaS != null ? +u.caidaMasLargaS.toFixed(1) : ''],
-      ['Caídas por minuto', u.caidasMin != null ? +u.caidasMin.toFixed(2) : ''],
+      ['Intentos de levantar la cabeza', u.intentos != null ? u.intentos : ''],
+      ['Intentos por minuto', u.intentosMin != null ? +u.intentosMin.toFixed(2) : ''],
+      ['Tiempo total de esfuerzo (s)', u.esfuerzoTotalS != null ? +u.esfuerzoTotalS.toFixed(1) : ''],
+      ['Esfuerzo medio por intento (s)', u.esfuerzoMedioS != null ? +u.esfuerzoMedioS.toFixed(1) : ''],
+      ['Esfuerzo más largo (s)', u.esfuerzoMaxS != null ? +u.esfuerzoMaxS.toFixed(1) : ''],
+      ['Intensidad media (veces el reposo)', u.intensidadRel != null ? +u.intensidadRel.toFixed(2) : ''],
+      ['Reposo medio entre intentos (s)', u.entreIntentosS != null ? +u.entreIntentosS.toFixed(1) : ''],
+      ['Primer intento (s desde el inicio)', u.primerIntentoS != null ? +u.primerIntentoS.toFixed(1) : ''],
       ['Veces que se volvió a calibrar', r.recalibraciones || 0],
       ['Calibración: reposo medio (mV)', r.calibracion && r.calibracion.reposoMV != null ? +(+r.calibracion.reposoMV).toFixed(1) : ''],
       ['Calibración: desviación (mV)', r.calibracion && r.calibracion.sdMV != null ? +(+r.calibracion.sdMV).toFixed(2) : ''],
@@ -724,12 +748,13 @@
     const hojas = [
       { nombre: 'Sesión', anchos: [34, 26], negritas: true,
         filas: [['Sesión de terapia ASTRA', '']].concat(datosPaciente(p), [['', '']], hojaSesion(r)), titulos: 1 },
-      { nombre: 'Episodios', anchos: [10, 16, 16, 16],
-        filas: [['N.º', 'Inicio (s)', 'Duración (s)', 'Intensidad media (mV)']].concat(
-          (r.episodios || []).map(a => [a.n, +a.inicioS.toFixed(1), +a.durS.toFixed(1), Math.round(a.rms)])), titulos: 1 }
+      { nombre: 'Intentos', anchos: [10, 16, 16, 20, 20],
+        filas: [['N.º', 'Inicio (s)', 'Duración del esfuerzo (s)', 'Intensidad media (mV)', 'Intensidad (veces el reposo)']].concat(
+          (r.episodios || []).map(a => [a.n, +a.inicioS.toFixed(1), +a.durS.toFixed(1), Math.round(a.rms),
+            a.reposo > 0 ? +(a.rms / a.reposo).toFixed(2) : ''])), titulos: 1 }
     ];
     if (senal && senal.length) hojas.push({ nombre: 'Señal', anchos: [12, 14, 14, 12],
-      filas: [['Tiempo (s)', 'Señal (mV)', 'Promedio (mV)', 'Cabeza caída']].concat(senal.map(f => [f[0], f[1], f[2], f[3] ? 1 : 0])), titulos: 1 });
+      filas: [['Tiempo (s)', 'Señal (mV)', 'Promedio (mV)', 'Intento (1 = sí)']].concat(senal.map(f => [f[0], f[1], f[2], f[3] ? 1 : 0])), titulos: 1 });
     E.xlsx(archivo(p, r.fecha.slice(0, 16).replace(/[:T]/g, '-')), hojas);
   }
   async function descargarSesion(s, p) {
@@ -741,14 +766,12 @@
   $('btn-p-excel').addEventListener('click', () => {
     const p = patient, ses = E.Store.sessionsFor(p.id);
     if (!ses.length) { toast('Este paciente todavía no tiene sesiones.'); return; }
-    const H = ['Fecha', 'Fisioterapeuta', 'Duración (min)', 'Umbral de activación (mV)', 'Tiempo cabeza erguida (s)',
-      '% cabeza erguida', 'Tiempo cabeza caída (s)', 'Caídas de cabeza', 'Caída más larga (s)', 'Caídas por minuto', 'Observaciones'];
+    const H = ['Fecha', 'Fisioterapeuta', 'Duración (min)', 'Umbral de activación (mV)', 'Intentos', 'Intentos por minuto',
+      'Esfuerzo medio (s)', 'Esfuerzo más largo (s)', 'Intensidad (veces el reposo)', 'Reposo entre intentos (s)', 'Observaciones'];
     const filas = ses.map(s => {
       const u = res(s);
       return [fmtDateTime(s.fecha), s.fisio || '', +(s.duracionS / 60).toFixed(2), s.umbralMV != null ? +(+s.umbralMV).toFixed(2) : '',
-        u.tiempoArribaS != null ? +u.tiempoArribaS.toFixed(1) : '', u.pctArriba != null ? +u.pctArriba.toFixed(1) : '',
-        u.tiempoAbajoS != null ? +u.tiempoAbajoS.toFixed(1) : '', u.caidas != null ? u.caidas : '',
-        u.caidaMasLargaS != null ? +u.caidaMasLargaS.toFixed(1) : '', u.caidasMin != null ? +u.caidasMin.toFixed(2) : '', s.observaciones || ''];
+        u.intentos != null ? u.intentos : '', u.intentosMin != null ? +u.intentosMin.toFixed(2) : '', u.esfuerzoMedioS != null ? +u.esfuerzoMedioS.toFixed(1) : '', u.esfuerzoMaxS != null ? +u.esfuerzoMaxS.toFixed(1) : '', u.intensidadRel != null ? +u.intensidadRel.toFixed(2) : '', u.entreIntentosS != null ? +u.entreIntentosS.toFixed(1) : '', s.observaciones || ''];
     });
     E.xlsx(archivo(p, 'expediente'), [
       { nombre: 'Paciente', anchos: [30, 30], negritas: true, filas: datosPaciente(p).concat([['', ''], ['Notas', p.notas || '']]) },
