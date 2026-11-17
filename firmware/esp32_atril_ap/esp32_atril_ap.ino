@@ -1,7 +1,20 @@
 
 // =====================================================================
-//  ASTRA - Firmware del atril (ESP32) v8.2 SIN LAPTOP (sonido + red ASTRA + pagina web)
+//  ASTRA - Firmware del atril (ESP32) v8.3 SIN LAPTOP (sonido + red ASTRA + pagina web)
 //  La senal sEMG controla los actuadores.
+// ---------------------------------------------------------------------
+//  v8.3 (editado a mano sobre el v8.2; si se vuelve a generar con
+//  herramientas/firmware/v8transformar.py, estos cambios se pierden):
+//   - El RMS alto es el ESFUERZO DE LEVANTAR la cabeza (ABAJO_ES_ACTIVIDAD = false).
+//   - PREMIO SOSTENIDO: cada esfuerzo detectado deja T_PREMIO_SOSTENIDO_MS (8 s)
+//     de luz arcoiris brillante, musica dinamica (lista ARRIBA) y estrellas
+//     lentas. Otro esfuerzo durante el premio vuelve a contar los 8 s.
+//   - REPOSO: estrellas rapidas, luz tenue y musica tranquila (lista ABAJO);
+//     tambien al encender, calibrando, en pausa o sin datos.
+//   - Estrellas a 600 / 1100 medios pasos/s (probadas con el eje de las estrellas).
+//   - En la pagina, "cabeza arriba" = tiempo en premio; los episodios siguen
+//     siendo los esfuerzos detectados, con su duracion real.
+//  Lo de abajo describe el v8.2; donde no coincida, manda esta nota.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
 //  opto, cada 100 ms, una linea con el RMS en milivoltios ("640\n").
@@ -159,7 +172,7 @@ const char *NOMBRE_ORDEN_P[N_ORDENES_P] = {"medio paso, IN1 IN3 IN2 IN4", "medio
   "paso completo, IN1 IN4 IN2 IN3"};
 int ordenP = ORDEN_PLANETAS;
 AccelStepper *planetas = &planetasOrden[ORDEN_PLANETAS];
-// Estrellas: paso completo, orden IN1, IN3, IN2, IN4 (igual que motor_endstop.ino)
+// Estrellas: medio paso (HALF4WIRE), orden IN1, IN3, IN2, IN4 (igual que motor_endstop.ino)
 AccelStepper estrellas(AccelStepper::HALF4WIRE, 18, ORDEN_B_ESTRELLAS ? 17 : 16, ORDEN_B_ESTRELLAS ? 16 : 17, 4, false);
 
 const int PIN_ROJO  = 25;   // LEDR -> ULN2803 I1 + I2
@@ -184,9 +197,10 @@ const long MUY_LEJOS       = 1000000L;   // objetivo "infinito": gira hasta pisa
 const int  V_HOMING_E      = 200;        // pasos completos/s al buscar el microswitch
                                          // (= los 400 medios pasos/s del arranque de la V3)
 const long HOMING_MAX_PASOS = 20000;     // si no lo encuentra en estos pasos, sigue sin el
-// Velocidades en pasos completos por segundo (el 28BYJ-48 aguanta hasta ~600-700)
-const int  V_ESTRELLAS_RAPIDO = 1000;  // con la CABEZA ABAJO
-const int  V_ESTRELLAS_LENTO  = 600;  // con la CABEZA ARRIBA, calibrando o sin datos
+// Velocidades de las estrellas en MEDIOS pasos por segundo (el motor va en HALF4WIRE).
+// v8.3: 600 y 1100, probadas con el eje de las estrellas (se nota el cambio).
+const int  V_ESTRELLAS_RAPIDO = 1100;  // en REPOSO, para atraer la mirada
+const int  V_ESTRELLAS_LENTO  = 600;   // durante el PREMIO (para seguirlas), calibrando o sin datos
 const int  ACELERACION   = 1500;    // pasos/s^2: que tan rapido arranca, frena y cambia de sentido
 const int  V_PLANETAS    = 400;    // pasos/s (~1.8 rpm, una vuelta del eje en ~34 s). Hasta ~400 si quieres mas rapido
 const int  ACEL_PLANETAS = 200;    // pasos/s^2: arranque suave del lazy susan
@@ -205,6 +219,10 @@ const float UMBRAL_OFF_FACTOR = 0.6f; // histeresis relativa a la media basal
 const unsigned long T_CONFIRMAR = 300;  // ms sobre/bajo el umbral para cambiar de estado
 const unsigned long HOLGURA_MS  = 50;   // tolera que un bloque llegue unos ms antes (300 ms = 4 bloques seguidos)
 const unsigned long T_PREMIO    = 1000; // ms sostenidos para el sonido de activacion
+// v8.3: el premio (luz, musica y estrellas lentas) dura esto despues de cada esfuerzo
+// detectado. 8-10 s es lo que usan los programas de respuestas de cabeza con
+// microinterruptores (Lancioni et al., 2014). Se puede ajustar de 3000 a 10000.
+const unsigned long T_PREMIO_SOSTENIDO_MS = 8000;
 const unsigned long WATCHDOG_MS = 500;  // sin datos por mas de esto -> todo se detiene
 const int   N_MEDIANA           = 5;    // la senal que se compara es la MEDIANA de los ultimos
                                         // 5 bloques (0.5 s): quita los saltos sueltos del ruido
@@ -248,12 +266,12 @@ const float BRILLO_MIN_FRAC      = 0.15;   // brillo con la cabeza arriba (fracc
 //           en color lila; al contraer esperan 1.5 s y bajan rapido.
 //   false = CONTRAER: la logica original del documento.
 const bool PREMIO_AL_RELAJAR = true;     // (se conserva; lo que manda ahora es ABAJO_ES_ACTIVIDAD)
-// Con los semiespinosos, al BAJAR la cabeza el musculo trabaja para sostenerla,
-// asi que el RMS SUBE: RMS sobre el umbral = CABEZA ABAJO.
-// Si en otro montaje resulta al reves, pon false (o escribe x en el monitor).
-const bool ABAJO_ES_ACTIVIDAD = true;
+// v8.3: en las pruebas del equipo el RMS del semiespinoso SUBE al LEVANTAR la
+// cabeza (picos breves). RMS sobre el umbral = esfuerzo de levantar = CABEZA ARRIBA.
+// true = la interpretacion anterior (RMS alto = cabeza abajo); x lo invierte en vivo.
+const bool ABAJO_ES_ACTIVIDAD = false;
 const int  LILA_R = 80, LILA_G = 0, LILA_B = 128;   // color del premio al relajar (0..128)
-const unsigned long T_BRILLO_RELAJADO = 2000;      // ms con la cabeza abajo hasta el maximo (luz y estrellas)
+const unsigned long T_BRILLO_RELAJADO = 2000;      // ms para llegar al maximo: la luz al empezar el premio, las estrellas al volver al reposo
 
 const bool USAR_PARO = false;      // pon true cuando el divisor del paro (R6, R7) este conectado
 const bool EMG_INVERTIDO = false;  // pon true si el opto invierte (aviso "!! Llegan bytes ...")
@@ -279,7 +297,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.2";
+const char *VERSION_ATRIL = "8.3";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -295,6 +313,9 @@ long pasosHoming = 0;
 bool abajoEsActividad = ABAJO_ES_ACTIVIDAD;
 unsigned long tCambioCabeza = 0;     // cuando cambio por ultima vez arriba <-> abajo
 bool abajoAntes = false;
+bool hayEsfuerzo = false;            // v8.3: ya hubo al menos un esfuerzo en esta sesion
+unsigned long tUltimoEsfuerzo = 0;   // v8.3: cuando se detecto el ultimo esfuerzo
+bool esfuerzoAntes = false;          // v8.3: para notar el cambio premio <-> reposo
 bool cambiarCancion = false;         // la cabeza acaba de SUBIR: falta tocar el aviso ADVERT
 unsigned long tInicioAbajo = 0, tUltimoCambioCancion = 0;
 
@@ -466,7 +487,18 @@ bool datosOK() {
 }
 
 // CABEZA ABAJO segun el estado del EMG (ver ABAJO_ES_ACTIVIDAD)
-bool cabezaAbajo() { return abajoEsActividad ? activo : !activo; }
+// v8.3: el esfuerzo sigue vigente T_PREMIO_SOSTENIDO_MS despues de cada deteccion
+bool enEsfuerzo() {
+  return activo || (hayEsfuerzo && millis() - tUltimoEsfuerzo < T_PREMIO_SOSTENIDO_MS);
+}
+bool cabezaAbajo() { return abajoEsActividad ? enEsfuerzo() : !enEsfuerzo(); }
+
+// v8.3: tCambioCabeza cambia solo cuando cambia lo que se ve (premio <-> reposo):
+// no al terminar el pico de EMG ni con un esfuerzo nuevo durante el premio.
+void actualizarCambioCabeza() {
+  bool e = enEsfuerzo();
+  if (e != esfuerzoAntes) { esfuerzoAntes = e; tCambioCabeza = millis(); }
+}
 
 // Comando directo al DFPlayer (10 bytes). No espera respuesta, asi los
 // motores nunca se detienen esperando al reproductor.
@@ -642,8 +674,7 @@ void imprimirCalibracion() {
 // Imprime una linea por activacion: sirve para la tabla de resultados.
 void terminarActivacion(unsigned long fin) {
   if (activo) {
-    activo = false;
-    tCambioCabeza = millis();          // cambia de cabeza abajo <-> arriba
+    activo = false;                    // v8.3: el premio sigue hasta T_PREMIO_SOSTENIDO_MS
     unsigned long dur = fin - tInicioActivo;
     tiempoActivoTotal += dur;
     float rmsMedio = nRmsAct ? sumaRmsAct / nRmsAct : 0;
@@ -720,6 +751,7 @@ void aplicarSensibilidad(int n) {
 
 void iniciarCalibracion() {
   cerrarActivacion();
+  hayEsfuerzo = false;                        // v8.3: sin premio pendiente
   modo = CALIBRANDO;
   tCal = millis();
   nReposo = 0;
@@ -735,11 +767,14 @@ void iniciarSesion() {
   modo = SESION;
   activo = false;
   tSobre = tBajo = 0;
+  hayEsfuerzo = false; esfuerzoAntes = false;   // v8.3
   tCambioCabeza = millis();
   abajoAntes = cabezaAbajo();              // empezar la sesion no cambia la cancion
   cambiarCancion = false;
   Log.println();
-  Log.println(">> SESION: cabeza abajo = estrellas rapidas, luz brillante y colores rapidos.");
+  Log.printf(">> SESION: esfuerzo de levantar = premio de %lu s (luz arcoiris, musica dinamica, estrellas lentas).\n",
+             T_PREMIO_SOSTENIDO_MS / 1000);
+  Log.println(">>         reposo = estrellas rapidas, luz tenue y musica tranquila.");
 }
 
 void terminarCalibracion() {
@@ -834,7 +869,7 @@ void procesarRms(int mv) {
         activo = true;
         baseAct = nivelArribaActual(); uOnAct = uOnAhora; picoAct = rmsSuave;   // v8.2
         tInicioActivo = tSobre;
-        tCambioCabeza = ahora;                             // cambia de cabeza abajo <-> arriba
+        hayEsfuerzo = true; tUltimoEsfuerzo = ahora;       // v8.3: empieza (o se renueva) el premio
         nActivaciones++;
         tBajo = 0;
       }
@@ -1025,7 +1060,10 @@ void actualizarModo() {
   }
   if (avisoSonando && ahora - tAviso >= AVISO_MAX_MS) avisoSonando = false;
   if (ahora - ultimoCmdMusica >= 300 && (long)(ahora - tMusicaLista) >= 0) {  // tiempo entre comandos
-    bool quiereAbajo = (modo == SESION && ok && cabezaAbajo());
+    // v8.3: la lista del premio solo suena en sesion, durante el premio. En reposo,
+    // al encender, calibrando, en pausa o sin datos suena la lista tranquila.
+    bool premioMusica = (modo == SESION && ok && enEsfuerzo());
+    bool quiereAbajo = premioMusica ? abajoEsActividad : !abajoEsActividad;
     if (modo == PARO) {
       if (musicaSonando) { dfEnviar(0x16, 0); musicaSonando = false; ultimoCmdMusica = ahora; }
       cambiarCancion = avisoSonando = pistaTerminada = false;
@@ -1061,10 +1099,10 @@ void actualizarModo() {
   leerDFPlayer();
 }
 
-// Velocidad de las estrellas: CABEZA ABAJO acelera hasta V_ESTRELLAS_RAPIDO en
-// T_BRILLO_RELAJADO. Cabeza arriba, calibrando o sin datos: lento.
+// v8.3: Velocidad de las estrellas. En REPOSO aceleran hasta V_ESTRELLAS_RAPIDO en
+// T_BRILLO_RELAJADO. Durante el PREMIO, calibrando o sin datos: lento.
 float velEstrellas() {
-  if (modo == SESION && datosOK() && cabezaAbajo()) {
+  if (modo == SESION && datosOK() && !enEsfuerzo()) {
     float k = min((float)(millis() - tCambioCabeza) / T_BRILLO_RELAJADO, 1.0f);
     float v = V_ESTRELLAS_LENTO + (V_ESTRELLAS_RAPIDO - V_ESTRELLAS_LENTO) * k;
     return 50.0f * (int)(v / 50.0f);   // en escalones de 50 pasos/s
@@ -1160,8 +1198,8 @@ void actualizarLuz() {
     case SESION:
       if (!datosOK())               { r = 40; g = 10; }             // ambar: sin senal
       else {
-        // k = 0 con actividad; sube de 0 a 1 en los primeros 5 s por debajo del umbral
-        float k = cabezaAbajo() ? min((float)(ahora - tCambioCabeza) / T_BRILLO_RELAJADO, 1.0f) : 0.0f;
+        // v8.3: k sube de 0 a 1 en T_BRILLO_RELAJADO al empezar el premio; 0 en reposo
+        float k = enEsfuerzo() ? min((float)(ahora - tCambioCabeza) / T_BRILLO_RELAJADO, 1.0f) : 0.0f;
         float periodo = PERIODO_COLOR_LENTO + (PERIODO_COLOR_RAPIDO - PERIODO_COLOR_LENTO) * k;
         faseColor += 20.0f / periodo;              // cambia de color mas rapido al relajar
         if (faseColor >= 1.0f) faseColor -= 1.0f;
@@ -1761,7 +1799,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println("=== ASTRA - atril v8.2 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
+  Serial.println("=== ASTRA - atril v8.3 (sonido + red ASTRA + pagina en 192.168.4.1) ===");
 
   analogWrite(PIN_ROJO, 0);
   analogWrite(PIN_VERDE, 0);
@@ -1808,6 +1846,7 @@ void loop() {
   revisarBoot();
   revisarParo();
   actualizarModo();
+  actualizarCambioCabeza();   // v8.3
   moverEstrellas();
   moverPlanetas();
   actualizarLuz();
