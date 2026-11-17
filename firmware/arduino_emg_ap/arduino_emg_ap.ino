@@ -1,6 +1,16 @@
 /*
   =====================================================================
-   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5.1-AP
+   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5.2-AP
+  ---------------------------------------------------------------------
+   v5.2-AP (diagnostico de la red):
+     - Se une a la red ASTRA ANTES de empezar a medir, esperando hasta 8 s
+       (como la prueba aislada que si conecto). Los reintentos siguen sin
+       detener el loop.
+     - Al arrancar imprime la red, el largo de la clave y una "huella" de
+       4 cifras (no muestra la clave) y el firmware del modulo WiFi.
+     - Mientras no hay red, cada 2 s imprime el estado del modulo WiFi
+       ("[wifi] sin red: estado N = ...") y, si el ESP32 no acepta la
+       conexion en el puerto 9001, tambien lo dice.
   ---------------------------------------------------------------------
    v5.1-AP (senal limpia con el WiFi encendido):
      - Cada envio por WiFi hace que el modulo WiFi del R4 consuma corriente de
@@ -151,7 +161,7 @@ const char SERVIDOR_IP[]   = "192.168.4.1";
 const uint16_t PUERTO_SERVIDOR = 9001;
 const uint16_t PUERTO_AVISO    = 9999;
 const bool USB_PARA_PAGINA = false;            // true: paquetes crudos por USB en vez del Serial Plotter
-const char VERSION_EMG[]   = "5.1-AP";
+const char VERSION_EMG[]   = "5.2-AP";
 const uint8_t  TX_COLA_MS      = 5;             // ms que se siguen apartando despues de cada envio WiFi
 const uint32_t ENVIO_LENTO_MS  = 60;            // un envio mas lento que esto pausa la senal en vivo 3 s
 const uint16_t MARCA_TX        = 0x8000;        // bit 15 de una muestra cruda: tomada durante un envio WiFi
@@ -407,11 +417,44 @@ void mandarCrudoUsb() {
 // ======================================================================
 void mensaje(const char *t) { if (!USB_PARA_PAGINA) Serial.println(t); }
 
+// v5.2: "huella" de la clave para comparar Arduino y ESP32 sin mostrarla
+uint16_t huellaClave(const char *s) {
+  uint32_t h = 2166136261u;
+  for (; *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
+  return (uint16_t)(h ^ (h >> 16));
+}
+
+// v5.2: que significa cada estado del modulo WiFi
+const char *textoEstadoWifi(int s) {
+  switch (s) {
+    case 0:   return "intentando unirse";
+    case 1:   return "no encuentra la red ASTRA";
+    case 3:   return "conectado";
+    case 4:   return "la red rechazo la conexion (clave distinta?)";
+    case 5:   return "conexion perdida";
+    case 6:   return "desconectado (clave distinta o fuera de alcance?)";
+    case 255: return "el modulo WiFi no responde";
+    default:  return "otro";
+  }
+}
+
 void iniciarWifi() {
   if (WiFi.status() == WL_NO_MODULE) { mensaje("!! No responde el modulo WiFi del R4."); return; }
-  mensaje(">> Conectando a la red WiFi...");
-  WiFi.setTimeout(0);                          // begin() no espera: el loop sigue mandando al opto
-  WiFi.begin(RED_SSID, RED_CLAVE);             // el modulo WiFi termina de conectarse solo
+  if (!USB_PARA_PAGINA) {
+    Serial.print(">> Red: "); Serial.print(RED_SSID);
+    Serial.print(" | clave de "); Serial.print((int)strlen(RED_CLAVE));
+    Serial.print(" caracteres | huella "); Serial.println(huellaClave(RED_CLAVE), HEX);
+    Serial.print(">> Firmware del modulo WiFi: "); Serial.println(WiFi.firmwareVersion());
+  }
+  // v5.2: primer intento ESPERANDO hasta 8 s, antes de que arranque el muestreo
+  mensaje(">> Conectando a la red WiFi (hasta 8 s, antes de empezar a medir)...");
+  WiFi.setTimeout(8000);
+  WiFi.begin(RED_SSID, RED_CLAVE);
+  WiFi.setTimeout(0);                          // los reintentos ya no detienen el loop
+  if (!USB_PARA_PAGINA) {
+    int s = WiFi.status();
+    Serial.print(">> Primer intento: estado "); Serial.print(s); Serial.print(" = "); Serial.println(textoEstadoWifi(s));
+  }
   wifiListo = true;
   tRed = millis();
 }
@@ -465,7 +508,13 @@ void atenderWifi() {
   // Red: el modulo se reconecta solo; aqui solo se avisa el cambio
   if (ahora - tRevisar >= 500) {
     tRevisar = ahora;
-    bool red = WiFi.status() == WL_CONNECTED;
+    int estado = WiFi.status();
+    bool red = estado == WL_CONNECTED;
+    static uint32_t tDiagRed = 0;                // v5.2: sin red, cada 2 s dice por que
+    if (!red && !USB_PARA_PAGINA && ahora - tDiagRed >= 2000) {
+      tDiagRed = ahora;
+      Serial.print("[wifi] sin red: estado "); Serial.print(estado); Serial.print(" = "); Serial.println(textoEstadoWifi(estado));
+    }
     if (red != redAntes) {
       redAntes = red;
       if (red) {
@@ -505,6 +554,8 @@ void atenderWifi() {
       sigWifi = inicioAlineado();               // empieza desde "ahora"
       tDiag = 0;
       mensaje(">> Conectado al servidor: la senal ya sale a la pagina.");
+    } else {
+      mensaje("[wifi] hay red, pero el ESP32 no acepto la conexion en el puerto 9001 (reintenta en 3 s).");
     }
   }
 
@@ -560,6 +611,9 @@ void setup() {
   for (int i = 0; i < 16; i++) s += analogRead(PIN_EMG) * V_REF / ADC_MAX;
   dc = s / 16.0f;
 
+  // v5.2: unirse a la red ANTES de empezar a medir (el opto espera unos segundos al encender)
+  if (USAR_WIFI) iniciarWifi();
+
   tInicioMuestreo = millis();
   if (!iniciarTemporizador()) {
     // Sin temporizador no hay muestreo fiable: lo avisa y parpadea el LED
@@ -571,8 +625,7 @@ void setup() {
     }
   }
 
-  // El muestreo ya corre; unirse a la red tarda unos segundos (la cola guarda los bloques)
-  if (USAR_WIFI) iniciarWifi();
+  // v5.2: la red ya se pidio arriba, antes del muestreo
 }
 
 void loop() {
