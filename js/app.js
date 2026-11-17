@@ -350,13 +350,18 @@
   function startRecording(s) {
     rec = {
       start: new Date().toISOString(), key: keyOf(s), t0: s.tSes, base: 0, last: s.tSes, minId: s.nAct,
-      acts: [], seen: new Set(), rms: [], umbral: s.cal.uon, cal: fotoCal(s), recal: 0, pausaS: 0
+      acts: [], seen: new Set(), rms: [], umbral: s.cal.uon, cal: fotoCal(s), recal: 0, pausaS: 0, premioS: 0
     };
     toast('La terapia empezó: ASTRA ya está midiendo.');
   }
   // Lo que dejó la calibración del atril (se guarda con la sesión y va al Excel)
   const fotoCal = s => ({ reposoMV: s.cal.reposo, sdMV: s.cal.sd, umbralOnMV: s.cal.uon, umbralOffMV: s.cal.uoff, bloques: s.cal.n,
-    factorK: s.cal.k, inestable: !!s.cal.inestable, pocosDatos: !!s.cal.pocos, abajoEsActividad: !!s.abajoAct, version: s.v });
+    factorK: s.cal.k, inestable: !!s.cal.inestable, pocosDatos: !!s.cal.pocos, abajoEsActividad: !!s.abajoAct, version: s.v,
+    sensibilidad: s.cal.sens, margenMinMV: s.cal.margen, margenRel: s.cal.rel, factorOff: s.cal.koff });
+  // El atril da el premio (estrellas, luz y música) cuando NO marca "abajo" (o al revés si abajoAct)
+  const premioActivo = s => !!(s && (s.abajoAct ? s.abajo : !s.abajo));
+  // Umbral con el que el atril compara la mediana en ese bloque: el de activación en reposo, el de soltar durante un intento
+  const umbralVigente = (s, f) => { const u = f === 1 ? s.uSuelta : s.uAhora; return u > 0 ? +(+u).toFixed(1) : null; };
   const recTime = () => (rec ? rec.base + rec.last - rec.t0 : 0);
   function recordUpdate(prev, s) {
     const take = () => {
@@ -375,8 +380,11 @@
     }
     if (enSesion && keyOf(s) === rec.key) rec.last = s.tSes;
     if (s.modo === 'SESION' && keyOf(s) === rec.key) {
+      // tiempo con el premio activo, medido con el reloj del atril (lo que el atril mostró, no la postura)
+      const dt = prev && prev.modo === 'SESION' && keyOf(prev) === rec.key ? Math.max(0, Math.min(1, s.tSes - prev.tSes)) : 0;
+      if (premioActivo(s)) rec.premioS += dt;
       const t = recTime(), n = s.b.length;
-      s.b.forEach(([v, m, f], i) => rec.rms.push([+(t - (n - 1 - i) * 0.1).toFixed(1), v, m, f === 1 ? 1 : 0]));
+      s.b.forEach(([v, m, f], i) => rec.rms.push([+(t - (n - 1 - i) * 0.1).toFixed(1), v, m, f === 1 ? 1 : 0, umbralVigente(s, f)]));
     }
   }
 
@@ -511,10 +519,10 @@
       $('lv-cal-bar').style.width = '0';
     }
 
-    const abajo = !!(st && st.modo === 'SESION' && st.abajo);
+    const enSes = !!(st && st.modo === 'SESION'), premio = enSes && premioActivo(st);
     const post = $('lv-postura');
-    post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo ? 'abajo' : 'arriba') : '');
-    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'En reposo' : st.activo ? 'Intentando levantar' : 'Premio')
+    post.className = 'postura ' + (enSes ? (premio ? 'arriba' : 'abajo') : '');
+    post.textContent = enSes ? (st.activo ? 'Intentando levantar' : premio ? 'Premio' : 'En reposo')
       : st && st.modo === 'PAUSA' ? 'En pausa' : '—';
     $('lv-tiempo').textContent = clock(recTime());
     const mv = metricas(rec ? rec.acts : [], recTime());
@@ -526,30 +534,64 @@
     $('lv-pausa').textContent = st && st.modo === 'PAUSA' ? '▶ Continuar' : '❚❚ Pausar';
   }
 
-  /* ---------- métricas (v8.5): solo lo que el EMG mide de verdad ----------
+  /* ---------- métricas: solo lo que el EMG mide de verdad ----------
    * El EMG ve el ESFUERZO de levantar la cabeza, no la postura. Por eso ya no hay
    * "tiempo con la cabeza erguida" ni "caídas": eran una suposición del atril. */
+  const media = v => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : null);
+  const mediana = v => {
+    if (!v.length) return null;
+    const a = v.slice().sort((x, y) => x - y), k = a.length >> 1;
+    return a.length % 2 ? a[k] : (a[k - 1] + a[k]) / 2;
+  };
+  const desv = v => { if (v.length < 2) return null; const m = media(v); return Math.sqrt(v.reduce((a, x) => a + (x - m) * (x - m), 0) / (v.length - 1)); };
   function metricas(acts, t) {
     const n = acts.length, min = t / 60;
     const durs = acts.map(a => a.durS);
     const rel = acts.filter(a => a.reposo > 0).map(a => a.rms / a.reposo);
     const huecos = [];
     for (let i = 1; i < n; i++) huecos.push(Math.max(0, acts[i].inicioS - (acts[i - 1].inicioS + acts[i - 1].durS)));
-    const media = v => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : null);
     return {
       intentos: n,
       intentosMin: min > 0 ? n / min : null,
       esfuerzoTotalS: durs.reduce((a, b) => a + b, 0),
       esfuerzoMedioS: media(durs),
+      esfuerzoMedianaS: mediana(durs),
+      esfuerzoDesvS: desv(durs),
       esfuerzoMaxS: n ? Math.max(...durs) : null,
+      rmsMedioMV: media(acts.map(a => a.rms)),
       intensidadRel: media(rel),            // veces el nivel de reposo de la calibración
       entreIntentosS: media(huecos),
       primerIntentoS: n ? acts[0].inicioS : null,
       duracionMin: min
     };
   }
-  // Las sesiones guardadas antes de v8.5 tienen las métricas viejas (cabeza erguida / caídas)
+  // Las sesiones guardadas con la página anterior tienen las métricas viejas (cabeza erguida / caídas)
   const esVieja = u => u && u.intentos == null && (u.pctArriba != null || u.caidas != null);
+
+  /* ---------- cada intento contra la señal guardada ----------
+   * senal: filas [t, rms, mediana, detectorActivo, umbralVigente] cada 0.1 s.
+   * Los tiempos del atril y de la señal se redondean a 0.1 s: por eso la ventana del intento se abre VENT_S de cada lado.
+   * Reposo previo: mediana del RMS en los 2 s que terminan 0.5 s antes del intento, sin bloques con el detector activo. */
+  const VENT_S = 0.2, REPOSO_PREV_S = 2, REPOSO_HUECO_S = 0.5;
+  function analizarIntentos(eps, senal) {
+    const S2 = senal || [];
+    return (eps || []).map((a, i) => {
+      const ini = a.inicioS, fin = a.inicioS + a.durS, sig = eps[i + 1];
+      const dentro = S2.filter(f => f[0] >= ini - VENT_S && f[0] <= fin + VENT_S);
+      const antes = S2.filter(f => f[0] >= ini - REPOSO_HUECO_S - REPOSO_PREV_S && f[0] < ini - REPOSO_HUECO_S && !f[3]);
+      const alInicio = S2.find(f => f[0] >= ini - VENT_S && f[4] != null);
+      const pico = dentro.length ? Math.max(...dentro.map(f => f[1])) : null;
+      const reposoPrev = antes.length >= 5 ? mediana(antes.map(f => f[1])) : null;
+      const razon = pico != null && reposoPrev > 0 ? pico / reposoPrev : null;
+      return {
+        n: a.n, inicioS: ini, durS: a.durS, rms: a.rms, pico, reposoPrev, razon,
+        db: razon > 0 ? 20 * Math.log10(razon) : null,
+        relCal: a.reposo > 0 ? a.rms / a.reposo : null,
+        umbralIni: alInicio && alInicio[0] <= ini + VENT_S ? alInicio[4] : null,
+        hastaSig: sig ? Math.max(0, sig.inicioS - fin) : null
+      };
+    });
+  }
 
   /* ===================================================================
    * Fin de la sesión
@@ -559,7 +601,9 @@
     return {
       patientId: patient.id, codigo: idDe(patient), fecha: rec.start, fisio: localStorage.getItem('emg.fisio') || '',
       duracionS: t, umbralMV: rec.umbral, calibracion: rec.cal, recalibraciones: rec.recal, observaciones: '',
-      resumen: metricas(rec.acts, t),
+      resumen: Object.assign(metricas(rec.acts, t), {
+        tiempoPremioS: rec.premioS, pctPremio: t > 0 ? 100 * Math.min(t, rec.premioS) / t : null
+      }),
       episodios: rec.acts.map(a => ({ n: a.n, inicioS: a.inicioS, durS: a.durS, rms: a.rms, reposo: a.reposo }))
     };
   }
@@ -568,7 +612,7 @@
   function kpisSesion(r) {
     const u = r.resumen || {};
     if (esVieja(u)) return [['Duración de la terapia', clock(r.duracionS)], ['Umbral de activación', f1(r.umbralMV) + ' mV'],
-      ['Métricas', 'Sesión anterior a v8.5 (medía la postura supuesta)']];
+      ['Métricas', 'Sesión guardada con la página anterior (medía una postura supuesta)']];
     return [
       ['Duración de la terapia', clock(r.duracionS)],
       ['Intentos de levantar la cabeza', String(u.intentos != null ? u.intentos : '—')],
@@ -577,6 +621,7 @@
       ['Esfuerzo más largo', seg(u.esfuerzoMaxS)],
       ['Intensidad media', veces(u.intensidadRel)],
       ['Reposo medio entre intentos', seg(u.entreIntentosS)],
+      ['Tiempo con el premio activo', u.tiempoPremioS != null ? clock(u.tiempoPremioS) + (u.pctPremio != null ? ' · ' + pct(u.pctPremio) : '') : '—'],
       ['Umbral de activación', f1(r.umbralMV) + ' mV']
     ];
   }
@@ -656,7 +701,7 @@
         'esfuerzo medio de ' + f1(a) + ' s → ' + f1(b) + ' s por intento (' +
         (Math.abs(rel) < 0.1 ? 'sin cambio claro' : d > 0 ? 'sostiene más el esfuerzo' : 'sostiene menos el esfuerzo') + ').';
     }
-    if (ses.some(s => esVieja(res(s)))) msg += (msg ? ' ' : '') + 'Las sesiones anteriores a v8.5 no entran en estas métricas.';
+    if (ses.some(s => esVieja(res(s)))) msg += (msg ? ' ' : '') + 'Las sesiones guardadas con la página anterior no entran en estas métricas.';
     $('p-tendencia').textContent = msg;
   }
   const METRICS = { intentosMin: 'intentos/min', esfuerzoMedioS: 's', esfuerzoMaxS: 's', intensidadRel: '× reposo', entreIntentosS: 's', duracionMin: 'min' };
@@ -699,7 +744,7 @@
     $('ses-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     try {
       const datos = await E.Store.senal(s.id);
-      $('ses-txt').textContent = 'Señal del músculo durante la sesión. Lo sombreado es el tiempo con la cabeza caída.';
+      $('ses-txt').textContent = 'Señal del músculo durante la sesión. Lo sombreado es el tiempo con el detector activo (intento de levantar la cabeza).';
       requestAnimationFrame(() => E.dibujarSesion($('ses-senal'), datos, { uon: s.umbralMV, uoff: null }));
     } catch (e) {
       $('ses-txt').textContent = 'La señal de esta sesión no está disponible.';
@@ -721,58 +766,117 @@
     return [['Paciente', idDe(p)], ['Sexo', p.sexo || ''], ['Edad', edadTexto(p)], ['Nivel funcional (GMFCS)', p.gmfcs || ''],
       ['Diagnóstico', p.diagnostico || ''], ['Fecha de registro', p.fechaRegistro ? fmtDate(p.fechaRegistro) : '']];
   }
-  function hojaSesion(r) {
-    const u = res(r);
+  // Número redondeado para el Excel ('' si no hay dato: la celda queda vacía)
+  const nx = (v, d) => (v != null && v !== '' && isFinite(v) ? +(+v).toFixed(d) : '');
+  const SENS = { 1: '1 · Más sensible', 2: '2 · Normal', 3: '3 · Menos sensible' };
+  // Recalcula todo desde los intentos guardados: así también sirven las sesiones viejas
+  function analisisSesion(r, senal) {
+    const cal = r.calibracion || {};
+    const eps = (r.episodios || []).map(a => Object.assign({}, a, { reposo: a.reposo > 0 ? a.reposo : cal.reposoMV }));
+    const m = metricas(eps, r.duracionS || 0), u = res(r);
+    const fil = analizarIntentos(eps, senal);
+    const picos = fil.map(f => f.pico).filter(v => v != null), dbs = fil.map(f => f.db).filter(v => v != null);
+    return { cal, m, u, fil, picoMedio: media(picos), dbMedio: media(dbs), dbDesv: desv(dbs), conSenal: !!(senal && senal.length) };
+  }
+  function hojaSesion(r, A) {
+    const { cal, m, u } = A;
     return [['Fecha', fmtDateTime(r.fecha)], ['Fisioterapeuta responsable', r.fisio || ''],
-      ['Duración de la terapia', clock(r.duracionS)], ['Duración (minutos)', +(r.duracionS / 60).toFixed(2)],
-      ['Umbral de activación (mV)', r.umbralMV != null ? +(+r.umbralMV).toFixed(2) : ''],
-      ['Intentos de levantar la cabeza', u.intentos != null ? u.intentos : ''],
-      ['Intentos por minuto', u.intentosMin != null ? +u.intentosMin.toFixed(2) : ''],
-      ['Tiempo total de esfuerzo (s)', u.esfuerzoTotalS != null ? +u.esfuerzoTotalS.toFixed(1) : ''],
-      ['Esfuerzo medio por intento (s)', u.esfuerzoMedioS != null ? +u.esfuerzoMedioS.toFixed(1) : ''],
-      ['Esfuerzo más largo (s)', u.esfuerzoMaxS != null ? +u.esfuerzoMaxS.toFixed(1) : ''],
-      ['Intensidad media (veces el reposo)', u.intensidadRel != null ? +u.intensidadRel.toFixed(2) : ''],
-      ['Reposo medio entre intentos (s)', u.entreIntentosS != null ? +u.entreIntentosS.toFixed(1) : ''],
-      ['Primer intento (s desde el inicio)', u.primerIntentoS != null ? +u.primerIntentoS.toFixed(1) : ''],
-      ['Veces que se volvió a calibrar', r.recalibraciones || 0],
-      ['Calibración: reposo medio (mV)', r.calibracion && r.calibracion.reposoMV != null ? +(+r.calibracion.reposoMV).toFixed(1) : ''],
-      ['Calibración: desviación (mV)', r.calibracion && r.calibracion.sdMV != null ? +(+r.calibracion.sdMV).toFixed(2) : ''],
-      ['Umbral de relajación (mV)', r.calibracion && r.calibracion.umbralOffMV != null ? +(+r.calibracion.umbralOffMV).toFixed(1) : ''],
-      ['Calibración inestable', r.calibracion ? (r.calibracion.inestable ? 'Sí' : 'No') : ''],
+      ['Duración de la terapia', clock(r.duracionS)], ['Duración (minutos)', nx(r.duracionS / 60, 2)],
+      ['Versión del atril', cal.version || ''], ['Sensibilidad usada', SENS[cal.sensibilidad] || ''],
+      ['', ''], ['CALIBRACIÓN (10 s en reposo)', ''],
+      ['Reposo medio (mV)', nx(cal.reposoMV, 1)], ['Desviación del reposo (mV)', nx(cal.sdMV, 2)],
+      ['Bloques de 0.1 s usados', nx(cal.bloques, 0)], ['Factor k (veces la desviación)', nx(cal.factorK, 1)],
+      ['Margen mínimo (mV)', nx(cal.margenMinMV, 1)], ['Margen relativo (fracción del reposo)', nx(cal.margenRel, 2)],
+      ['Umbral de activación de la calibración (mV)', nx(r.umbralMV, 1)], ['Umbral de relajación de la calibración (mV)', nx(cal.umbralOffMV, 1)],
+      ['Calibración inestable', r.calibracion ? (cal.inestable ? 'Sí' : 'No') : ''], ['Veces que se volvió a calibrar', r.recalibraciones || 0],
+      ['', ''], ['INTENTOS DE LEVANTAR LA CABEZA', ''],
+      ['Intentos', m.intentos], ['Intentos por minuto', nx(m.intentosMin, 2)],
+      ['Tiempo total de esfuerzo (s)', nx(m.esfuerzoTotalS, 1)],
+      ['Duración media por intento (s)', nx(m.esfuerzoMedioS, 2)], ['Desviación estándar de la duración (s)', nx(m.esfuerzoDesvS, 2)],
+      ['Mediana de la duración (s)', nx(m.esfuerzoMedianaS, 2)], ['Duración máxima (s)', nx(m.esfuerzoMaxS, 1)],
+      ['RMS medio de los intentos (mV)', nx(m.rmsMedioMV, 1)], ['Intensidad media (veces el reposo de calibración)', nx(m.intensidadRel, 2)],
+      ['Pico medio (mV)', nx(A.picoMedio, 1)], ['Pico / reposo previo, media (dB)', nx(A.dbMedio, 1)],
+      ['Pico / reposo previo, desviación (dB)', nx(A.dbDesv, 1)],
+      ['Reposo medio entre intentos (s)', nx(m.entreIntentosS, 1)], ['Primer intento (s desde el inicio)', nx(m.primerIntentoS, 1)],
+      ['', ''], ['RETROALIMENTACIÓN DEL ATRIL', ''],
+      ['Tiempo con el premio activo (s)', nx(u.tiempoPremioS, 1)], ['Tiempo con el premio activo (% de la sesión)', nx(u.pctPremio, 1)],
+      ['', ''], ['Señal guardada', A.conSenal ? 'Sí' : 'No'],
       ['Observaciones', r.observaciones || '']];
   }
+  // Una fila por intento. Las dos últimas columnas se llenan a mano viendo el video.
+  const H_INTENTOS = ['N.º', 'Inicio (s)', 'Duración (s)', 'RMS medio (mV)', 'Pico RMS (mV)', 'Reposo previo (mV)',
+    'Pico / reposo previo (veces)', 'Pico / reposo previo (dB)', 'RMS medio / reposo de calibración (veces)',
+    'Umbral vigente al iniciar (mV)', 'Reposo hasta el siguiente intento (s)',
+    'Latencia medida en video (s) — a mano', 'Activación falsa (S/N) — a mano'];
+  const filaIntento = f => [f.n, nx(f.inicioS, 1), nx(f.durS, 1), nx(f.rms, 0), nx(f.pico, 0), nx(f.reposoPrev, 1),
+    nx(f.razon, 2), nx(f.db, 1), nx(f.relCal, 2), nx(f.umbralIni, 1), nx(f.hastaSig, 1), '', ''];
+  const ANCHOS_INTENTOS = [7, 10, 11, 13, 13, 15, 16, 16, 20, 17, 18, 20, 18];
+  // Qué es cada dato (va como hoja en los dos Excel)
+  const DEFINICIONES = [['Dato', 'Qué es y cómo se obtiene'],
+    ['Intento', 'Un periodo en que el atril detecta esfuerzo del músculo: la mediana de 0.5 s del RMS supera el umbral vigente al menos 0.3 s y termina cuando baja del umbral de soltar 0.3 s. Mide el esfuerzo de levantar la cabeza, no la postura.'],
+    ['Inicio (s)', 'Momento en que la señal cruzó el umbral, en segundos de terapia (sin pausas). Lo marca el atril.'],
+    ['Duración (s)', 'Tiempo con el detector activo en ese intento. Lo mide el atril con resolución de 0.1 s.'],
+    ['RMS medio (mV)', 'Promedio del RMS de los bloques de 0.1 s durante el intento. Lo calcula el atril (entero, en mV).'],
+    ['Pico RMS (mV)', 'Mayor RMS de bloque de 0.1 s dentro del intento. Se calcula de la señal guardada con una ventana de ±0.2 s alrededor del intento.'],
+    ['Reposo previo (mV)', 'Mediana del RMS en los 2 s que terminan 0.5 s antes del intento, sin bloques con el detector activo. Vacío si hay menos de 5 bloques.'],
+    ['Pico / reposo previo', 'Pico RMS entre reposo previo, en veces y en dB (20·log10). Indica cuánto se separa el esfuerzo del reposo inmediato.'],
+    ['RMS medio / reposo de calibración', 'RMS medio del intento entre el reposo medio de la calibración de 10 s.'],
+    ['Umbral vigente (mV)', 'Umbral con el que el atril compara la mediana en ese momento: el de activación mientras no hay intento (se ajusta solo al nivel de reposo de los últimos 3 s y nunca baja del de la calibración) y el de soltar durante un intento. Sale del estado que el atril manda 5 veces por segundo.'],
+    ['Reposo hasta el siguiente intento (s)', 'Tiempo entre el final de un intento y el inicio del siguiente.'],
+    ['Tiempo con el premio activo', 'Tiempo en que el atril mostró el premio (estrellas, luz y música): se enciende al detectar un intento y sigue mientras dura el esfuerzo y al menos 8 s desde que se detectó el último. Es lo que el niño vio, no su postura. Solo existe en sesiones grabadas con esta versión de la página.'],
+    ['Señal (RMS del bloque)', 'RMS de cada bloque de 0.1 s que manda el sensor al atril, en mV.'],
+    ['Mediana de 0.5 s', 'Mediana de los últimos 5 bloques: es la que el atril compara con el umbral.'],
+    ['Detector activo', '1 cuando el atril marca ese bloque dentro de un intento.'],
+    ['Calibración', '10 s en reposo al inicio. Reposo medio y desviación (1.4826·MAD). Umbral de activación = reposo + máx(k·desviación, margen mínimo, margen relativo·reposo).'],
+    ['Latencia y activación falsa', 'Columnas vacías para llenarlas a mano viendo el video de la sesión.'],
+    ['Sesiones anteriores', 'Las sesiones guardadas con la página anterior no tienen tiempo de premio, sensibilidad, margen ni umbral vigente; sus intentos, duraciones y RMS medio sí son válidos.']];
+  async function senalDe(s) {
+    try {
+      const d = await E.Store.senal(s.id);
+      return d.map(x => (Array.isArray(x) ? x : [x.t, x.rms, x.med, x.act, x.u == null ? null : x.u]));
+    } catch (e) { return []; }   // la sesión no tiene señal guardada
+  }
   function excelSesion(r, p, senal) {
+    const A = analisisSesion(r, senal);
     const hojas = [
-      { nombre: 'Sesión', anchos: [34, 26], negritas: true,
-        filas: [['Sesión de terapia ASTRA', '']].concat(datosPaciente(p), [['', '']], hojaSesion(r)), titulos: 1 },
-      { nombre: 'Intentos', anchos: [10, 16, 16, 20, 20],
-        filas: [['N.º', 'Inicio (s)', 'Duración del esfuerzo (s)', 'Intensidad media (mV)', 'Intensidad (veces el reposo)']].concat(
-          (r.episodios || []).map(a => [a.n, +a.inicioS.toFixed(1), +a.durS.toFixed(1), Math.round(a.rms),
-            a.reposo > 0 ? +(a.rms / a.reposo).toFixed(2) : ''])), titulos: 1 }
+      { nombre: 'Sesión', anchos: [44, 28], negritas: true,
+        filas: [['Sesión de terapia ASTRA', '']].concat(datosPaciente(p), [['', '']], hojaSesion(r, A)), titulos: 1 },
+      { nombre: 'Intentos', anchos: ANCHOS_INTENTOS, filas: [H_INTENTOS].concat(A.fil.map(filaIntento)), titulos: 1 }
     ];
-    if (senal && senal.length) hojas.push({ nombre: 'Señal', anchos: [12, 14, 14, 12],
-      filas: [['Tiempo (s)', 'Señal (mV)', 'Promedio (mV)', 'Intento (1 = sí)']].concat(senal.map(f => [f[0], f[1], f[2], f[3] ? 1 : 0])), titulos: 1 });
+    if (senal && senal.length) hojas.push({ nombre: 'Señal', anchos: [11, 22, 26, 22, 20],
+      filas: [['Tiempo (s)', 'RMS del bloque de 0.1 s (mV)', 'Mediana de 0.5 s (mV) — la que compara el atril', 'Detector activo (1 = sí)', 'Umbral vigente (mV)']]
+        .concat(senal.map(f => [f[0], f[1], f[2], f[3] ? 1 : 0, f[4] != null ? f[4] : ''])), titulos: 1 });
+    hojas.push({ nombre: 'Definiciones', anchos: [34, 110], negritas: true, filas: DEFINICIONES, titulos: 1 });
     E.xlsx(archivo(p, r.fecha.slice(0, 16).replace(/[:T]/g, '-')), hojas);
   }
   async function descargarSesion(s, p) {
-    let senal = [];
-    try { senal = await E.Store.senal(s.id); } catch (e) { /* la señal solo existe si se guardó en el servidor */ }
-    excelSesion(s, p, senal.map ? senal.map(d => (Array.isArray(d) ? d : [d.t, d.rms, d.med, d.act])) : []);
+    excelSesion(s, p, await senalDe(s));
     toast('Excel de la sesión descargado.');
   }
-  $('btn-p-excel').addEventListener('click', () => {
+  $('btn-p-excel').addEventListener('click', async () => {
     const p = patient, ses = E.Store.sessionsFor(p.id);
     if (!ses.length) { toast('Este paciente todavía no tiene sesiones.'); return; }
-    const H = ['Fecha', 'Fisioterapeuta', 'Duración (min)', 'Umbral de activación (mV)', 'Intentos', 'Intentos por minuto',
-      'Esfuerzo medio (s)', 'Esfuerzo más largo (s)', 'Intensidad (veces el reposo)', 'Reposo entre intentos (s)', 'Observaciones'];
-    const filas = ses.map(s => {
-      const u = res(s);
-      return [fmtDateTime(s.fecha), s.fisio || '', +(s.duracionS / 60).toFixed(2), s.umbralMV != null ? +(+s.umbralMV).toFixed(2) : '',
-        u.intentos != null ? u.intentos : '', u.intentosMin != null ? +u.intentosMin.toFixed(2) : '', u.esfuerzoMedioS != null ? +u.esfuerzoMedioS.toFixed(1) : '', u.esfuerzoMaxS != null ? +u.esfuerzoMaxS.toFixed(1) : '', u.intensidadRel != null ? +u.intensidadRel.toFixed(2) : '', u.entreIntentosS != null ? +u.entreIntentosS.toFixed(1) : '', s.observaciones || ''];
-    });
+    const H = ['Fecha', 'Fisioterapeuta', 'Versión del atril', 'Sensibilidad', 'Duración (min)',
+      'Reposo de calibración (mV)', 'Desviación de calibración (mV)', 'Umbral de activación de la calibración (mV)', 'Recalibraciones',
+      'Intentos', 'Intentos por minuto', 'Duración media (s)', 'Desviación de la duración (s)', 'Mediana de la duración (s)', 'Duración máxima (s)',
+      'RMS medio (mV)', 'RMS medio / reposo de calibración (veces)', 'Pico medio (mV)', 'Pico / reposo previo, media (dB)',
+      'Reposo medio entre intentos (s)', 'Tiempo con el premio activo (s)', 'Premio activo (% de la sesión)', 'Señal guardada', 'Observaciones'];
+    const filas = [], todos = [];
+    for (const s of ses) {
+      const A = analisisSesion(s, await senalDe(s)), { cal, m, u } = A;
+      filas.push([fmtDateTime(s.fecha), s.fisio || '', cal.version || '', SENS[cal.sensibilidad] || '', nx(s.duracionS / 60, 2),
+        nx(cal.reposoMV, 1), nx(cal.sdMV, 2), nx(s.umbralMV, 1), s.recalibraciones || 0,
+        m.intentos, nx(m.intentosMin, 2), nx(m.esfuerzoMedioS, 2), nx(m.esfuerzoDesvS, 2), nx(m.esfuerzoMedianaS, 2), nx(m.esfuerzoMaxS, 1),
+        nx(m.rmsMedioMV, 1), nx(m.intensidadRel, 2), nx(A.picoMedio, 1), nx(A.dbMedio, 1),
+        nx(m.entreIntentosS, 1), nx(u.tiempoPremioS, 1), nx(u.pctPremio, 1), A.conSenal ? 'Sí' : 'No', s.observaciones || '']);
+      A.fil.forEach(f => todos.push([fmtDateTime(s.fecha)].concat(filaIntento(f))));
+    }
     E.xlsx(archivo(p, 'expediente'), [
       { nombre: 'Paciente', anchos: [30, 30], negritas: true, filas: datosPaciente(p).concat([['', ''], ['Notas', p.notas || '']]) },
-      { nombre: 'Sesiones', anchos: [20, 22, 14, 18, 20, 16, 20, 16, 18, 16, 40], filas: [H].concat(filas), titulos: 1 }
+      { nombre: 'Sesiones', anchos: [18, 20, 9, 18, 10, 14, 14, 18, 10, 9, 11, 12, 13, 13, 12, 11, 18, 11, 16, 15, 15, 13, 9, 40],
+        filas: [H].concat(filas), titulos: 1 },
+      { nombre: 'Todos los intentos', anchos: [18].concat(ANCHOS_INTENTOS), filas: [['Sesión'].concat(H_INTENTOS)].concat(todos), titulos: 1 },
+      { nombre: 'Definiciones', anchos: [34, 110], negritas: true, filas: DEFINICIONES, titulos: 1 }
     ]);
     toast('Excel del expediente descargado.');
   });

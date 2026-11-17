@@ -157,12 +157,12 @@
       catch (e) { avisar('No se pudo eliminar la sesión: ' + mensajeError(e)); throw e; }
       mem.sesiones = mem.sesiones.filter(s => s.id !== id);
     },
-    /** Señal guardada de una sesión: [{t, rms, med, act}] */
+    /** Señal guardada de una sesión: [{t, rms, med, act, u}] (u = umbral vigente; no existe en sesiones viejas) */
     async senal(id) {
       if (!db) throw new Error('sin almacenamiento');
       const r = await tx('senales', 'readonly', st => st.senales.get(id));
       if (!r || !r.datos) throw new Error('Esta sesión no tiene señal guardada');
-      return r.datos.map(([t, rms, med, act]) => ({ t, rms, med, act }));
+      return r.datos.map(([t, rms, med, act, u]) => ({ t, rms, med, act, u }));
     },
 
     /** Respaldo completo (pacientes, sesiones y señales) como texto JSON */
