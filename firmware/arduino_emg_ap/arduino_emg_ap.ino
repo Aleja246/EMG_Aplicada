@@ -1,6 +1,22 @@
 /*
   =====================================================================
-   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5.2-AP
+   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5.2-AP-2C
+  ---------------------------------------------------------------------
+   v5.2-AP-2C (DOS CANALES: A0 y A1):
+     - A1 se mide a 1 kHz junto con A0, con su PROPIA cadena de filtros (centro,
+       notch de 60 Hz y de 60...420 Hz) y su propio RMS cada 100 ms. Es la misma
+       cadena que A0, solo con otro canal. Pensado para un semiespinoso en
+       cada canal (A0 = un lado, A1 = el otro).
+     - Lo que controla el atril NO cambia: por el opto sigue saliendo SOLO el
+       SinArm de A0, con el mismo formato ("640\n"). La senal cruda que va a la
+       pagina por WiFi tambien es solo la de A0. Si A1 esta desconectado o con
+       ruido, el atril y la pagina ni se enteran.
+     - Serial Plotter (USB): las tres lineas de A0 con los mismos nombres de
+       siempre (Bruto, Sin60, SinArm) y las de A1 agregadas al final
+       (Bruto_A1, Sin60_A1, SinArm_A1).
+     - Las muestras tomadas mientras el WiFi transmite se apartan del RMS en
+       los DOS canales por igual (v5.1).
+     - El diagnostico por WiFi agrega "r2" (SinArm de A1 en mV).
   ---------------------------------------------------------------------
    v5.2-AP (diagnostico de la red):
      - Se une a la red ASTRA ANTES de empezar a medir, esperando hasta 8 s
@@ -125,6 +141,7 @@
 
 // ------------------------- Parametros ajustables -----------------------
 const int   PIN_EMG  = A0;
+const int   PIN_EMG2 = A1;       // v5.2-AP-2C: segundo canal (solo se mide y se ve en el Serial Plotter)
 const float FS       = 1000.0f;   // Hz. Si cambia, los notch se recalculan solos (y cambia "Frecuencia" en la pagina)
 const int   N_BLOQUE = 100;       // muestras por RMS (100 = 100 ms = cada cuanto llega un dato al ESP32)
 const float ALPHA_DC = 0.003f;    // que tan lento sigue el centro de la senal (~0.5 Hz)
@@ -161,7 +178,7 @@ const char SERVIDOR_IP[]   = "192.168.4.1";
 const uint16_t PUERTO_SERVIDOR = 9001;
 const uint16_t PUERTO_AVISO    = 9999;
 const bool USB_PARA_PAGINA = false;            // true: paquetes crudos por USB en vez del Serial Plotter
-const char VERSION_EMG[]   = "5.2-AP";
+const char VERSION_EMG[]   = "5.2-AP-2C";
 const uint8_t  TX_COLA_MS      = 5;             // ms que se siguen apartando despues de cada envio WiFi
 const uint32_t ENVIO_LENTO_MS  = 60;            // un envio mas lento que esto pausa la senal en vivo 3 s
 const uint16_t MARCA_TX        = 0x8000;        // bit 15 de una muestra cruda: tomada durante un envio WiFi
@@ -181,6 +198,11 @@ Notch n60, arm[N_ARM];
 int nArm = 0;                       // cuantos armonicos caben debajo de FS/2
 float dc = 2.5f;
 double s_bruto = 0, s_60 = 0, s_arm = 0;   // RMS en bloques de N_BLOQUE muestras
+// v5.2-AP-2C: segundo canal (A1), misma cadena de filtros que A0
+Notch n60b, armb[N_ARM];
+float dc2 = 2.5f;
+double s_bruto2 = 0, s_60_2 = 0, s_arm2 = 0, t_bruto2 = 0, t_60_2 = 0, t_arm2 = 0;
+volatile float rmsCanal2Mv = 0;         // SinArm de A1 del ultimo bloque (mV)
 int cuenta = 0;
 int bloquesHechos = 0;
 // v5.1: muestras apartadas porque se tomaron mientras el WiFi transmitia
@@ -200,6 +222,7 @@ volatile uint32_t nCrudo = 0;       // muestras escritas desde el arranque
 // ---- Cola de bloques RMS (12.8 s): la interrupcion escribe, el loop lee ----
 const uint32_t N_COLA = 128;
 volatile float colaBruto[N_COLA], cola60[N_COLA], colaArm[N_COLA];
+volatile float colaBruto2[N_COLA], cola60_2[N_COLA], colaArm2[N_COLA];   // v5.2-AP-2C: canal A1
 volatile bool colaOpto[N_COLA];
 volatile uint32_t colaEsc = 0, colaLei = 0;
 volatile uint32_t bloquesPerdidos = 0;
@@ -260,12 +283,22 @@ void alMuestrear(timer_callback_args_t *) {
   float ya = x;
   for (int k = 0; k < nArm; k++) ya = arm[k].run(ya);
 
+  // v5.2-AP-2C: segundo canal, misma cadena. Se lee despues de A0 (A0 no cambia).
+  float v2 = analogRead(PIN_EMG2) * V_REF / ADC_MAX;
+  dc2 += ALPHA_DC * (v2 - dc2);
+  float x2 = v2 - dc2;
+  float y60b = n60b.run(x2);
+  float yab = x2;
+  for (int k = 0; k < nArm; k++) yab = armb[k].run(yab);
+
   if (!tx) {
+    s_bruto2 += (double)x2 * x2; s_60_2 += (double)y60b * y60b; s_arm2 += (double)yab * yab;
     s_bruto += (double)x * x;
     s_60    += (double)y60 * y60;
     s_arm   += (double)ya * ya;
     nLimpias++;
   } else {                                     // v5.1: apartada (no cuenta para el RMS)
+    t_bruto2 += (double)x2 * x2; t_60_2 += (double)y60b * y60b; t_arm2 += (double)yab * yab;
     t_bruto += (double)x * x;
     t_60    += (double)y60 * y60;
     t_arm   += (double)ya * ya;
@@ -278,7 +311,8 @@ void alMuestrear(timer_callback_args_t *) {
     int nApart = N_BLOQUE - nLimpias;
     if (nApart > 0) rmsTxMv = sqrt(t_arm / nApart) * 1000.0f;
     int n = nLimpias;
-    if (n < N_BLOQUE / 2) { n = N_BLOQUE; s_bruto += t_bruto; s_60 += t_60; s_arm += t_arm; }
+    if (n < N_BLOQUE / 2) { n = N_BLOQUE; s_bruto += t_bruto; s_60 += t_60; s_arm += t_arm;
+                            s_bruto2 += t_bruto2; s_60_2 += t_60_2; s_arm2 += t_arm2; }
     rmsLimpioMv = sqrt(s_arm / n) * 1000.0f;
     minBloque = minAcum; maxBloque = maxAcum; minAcum = 65535; maxAcum = 0;
     if (bloquesHechos <= BLOQUES_ASENTAR) bloquesHechos++;
@@ -289,12 +323,17 @@ void alMuestrear(timer_callback_args_t *) {
       colaArm[i]   = sqrt(s_arm / n);
       colaOpto[i]  = bloquesHechos > BLOQUES_ASENTAR;
       ultimoRmsMv  = colaArm[i] * 1000.0f;
+      colaBruto2[i] = sqrt(s_bruto2 / n);       // v5.2-AP-2C
+      cola60_2[i]   = sqrt(s_60_2 / n);
+      colaArm2[i]   = sqrt(s_arm2 / n);
+      rmsCanal2Mv   = colaArm2[i] * 1000.0f;
       colaEsc = colaEsc + 1;
     } else {
       bloquesPerdidos = bloquesPerdidos + 1;   // el loop lleva > 6.4 s sin vaciar la cola
     }
     s_bruto = s_60 = s_arm = 0;
     t_bruto = t_60 = t_arm = 0;
+    s_bruto2 = s_60_2 = s_arm2 = 0; t_bruto2 = t_60_2 = t_arm2 = 0;   // v5.2-AP-2C
     cuenta = 0;
     nLimpias = 0;
   }
@@ -333,6 +372,7 @@ int vaciarCola() {
     hechos++;
     uint32_t i = colaLei % N_COLA;
     float rmsBruto = colaBruto[i], rms60 = cola60[i], rmsArm = colaArm[i];
+    float rmsBruto2 = colaBruto2[i], rms60_2 = cola60_2[i], rmsArm2 = colaArm2[i];   // v5.2-AP-2C
     bool alOpto = colaOpto[i];
     colaLei = colaLei + 1;
 
@@ -352,13 +392,19 @@ int vaciarCola() {
 
     // USB: igual que v2 -> Bruto:0.123,Sin60:0.045,SinArm:0.012
     if (!USB_PARA_PAGINA && Serial) {
-      char u[64];
+      char u[128];                              // v5.2-AP-2C: mas largo (agrega A1)
       int n = 0;
       n += ponerVoltios(u + n, sizeof(u) - n, "Bruto", rmsBruto);
       u[n++] = ',';
       n += ponerVoltios(u + n, sizeof(u) - n, "Sin60", rms60);
       u[n++] = ',';
       n += ponerVoltios(u + n, sizeof(u) - n, "SinArm", rmsArm);
+      u[n++] = ',';                             // v5.2-AP-2C: canal A1 (A0 conserva sus nombres)
+      n += ponerVoltios(u + n, sizeof(u) - n, "Bruto_A1", rmsBruto2);
+      u[n++] = ',';
+      n += ponerVoltios(u + n, sizeof(u) - n, "Sin60_A1", rms60_2);
+      u[n++] = ',';
+      n += ponerVoltios(u + n, sizeof(u) - n, "SinArm_A1", rmsArm2);
       u[n++] = '\r';
       u[n++] = '\n';
       Serial.write((const uint8_t *)u, n);     // ~40 bytes cada 100 ms: el muestreo no se entera (va en la interrupcion)
@@ -483,17 +529,17 @@ size_t mandarWifi(const uint8_t *b, size_t n) {
 
 // Paquete de diagnostico: AA 57 | n | texto JSON | checksum (XOR del texto)
 void mandarDiagnostico() {
-  char t[256];
+  char t[288];
   uint16_t mn = minBloque, mx = maxBloque, ua = ultimoAdc;
   float seg = (millis() - tInicioMuestreo) / 1000.0f;
   int n = snprintf(t, sizeof t, "{\"v\":\"%s\",\"adc\":%u,\"min\":%u,\"max\":%u,\"fs\":%.1f,\"rms\":%.0f,\"perdidos\":%lu"
-                   ",\"sen\":%d,\"tx\":%lu,\"rTx\":%.1f,\"rOk\":%.1f,\"wMax\":%lu,\"lentos\":%lu,\"opto\":%lu}",
+                   ",\"sen\":%d,\"tx\":%lu,\"rTx\":%.1f,\"rOk\":%.1f,\"wMax\":%lu,\"lentos\":%lu,\"opto\":%lu,\"r2\":%.1f}",
                    VERSION_EMG, ua, mn, mx, seg > 0 ? nCrudo / seg : 0.0f, (float)ultimoRmsMv, (unsigned long)bloquesPerdidos,
                    enviarSenal ? 1 : 0, (unsigned long)apartadasSeg, (float)rmsTxMv, (float)rmsLimpioMv,
-                   (unsigned long)envioMax, (unsigned long)nLentos, (unsigned long)optoMax);
+                   (unsigned long)envioMax, (unsigned long)nLentos, (unsigned long)optoMax, (float)rmsCanal2Mv);
   envioMax = 0;
   if (millis() - tOptoMax > 10000) { tOptoMax = millis(); optoMax = 0; }   // la mayor espera de los ultimos ~10 s
-  if (n <= 0 || n > 250) return;
+  if (n <= 0 || n > 250) return;   // (el diagnostico mide ~190; el limite del paquete es 255)
   uint8_t p[256 + 4];
   p[0] = 0xAA; p[1] = 0x57; p[2] = (uint8_t)n;
   uint8_t chk = 0;
@@ -601,15 +647,19 @@ void setup() {
   if (PIN_MUESTREO >= 0) pinMode(PIN_MUESTREO, OUTPUT);
 
   n60.init(60.0f, Q_NOTCH);
+  n60b.init(60.0f, Q_NOTCH);                 // v5.2-AP-2C: mismos filtros para A1
   for (int k = 0; k < N_ARM; k++) {
     float f = 60.0f * (k + 1);
-    if (f < 0.5f * FS) arm[nArm++].init(f, Q_NOTCH);
+    if (f < 0.5f * FS) { armb[nArm].init(f, Q_NOTCH); arm[nArm++].init(f, Q_NOTCH); }
   }
 
   // El centro arranca donde esta la senal de verdad (TL431, ~2.5 V)
   float s = 0;
   for (int i = 0; i < 16; i++) s += analogRead(PIN_EMG) * V_REF / ADC_MAX;
   dc = s / 16.0f;
+  float s2 = 0;                              // v5.2-AP-2C: centro inicial de A1
+  for (int i = 0; i < 16; i++) s2 += analogRead(PIN_EMG2) * V_REF / ADC_MAX;
+  dc2 = s2 / 16.0f;
 
   // v5.2: unirse a la red ANTES de empezar a medir (el opto espera unos segundos al encender)
   if (USAR_WIFI) iniciarWifi();
