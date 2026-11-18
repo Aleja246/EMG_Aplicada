@@ -112,6 +112,9 @@ table.lista tbody tr { cursor: pointer; } table.lista tbody tr:hover { backgroun
 .chart-wrap { position: relative; }
 canvas { display: block; width: 100%; }
 canvas.prog { height: 230px; } canvas.rms { height: 220px; margin-top: 8px; } canvas.live { height: 240px; }
+canvas.live.doble { height: 190px; }   /* v8.3-BI: dos gráficas, una por lado */
+.lado-tit { margin: 6px 0 0; font-size: .85rem; font-weight: 600; color: var(--muted); }
+.pie.bilat { margin-top: 4px; }
 .tip { position: absolute; background: #0b1030; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; font-size: .82rem; pointer-events: none; }
 
 /* terapia en curso */
@@ -155,6 +158,8 @@ dialog::backdrop { background: rgba(3, 5, 20, .7); backdrop-filter: blur(3px); }
   .postura { font-size: 1.45rem; } .reloj { font-size: 1.6rem; }
   .vivo h3 { font-size: .9rem; margin-bottom: 2px; }
   canvas.live { height: 150px; }
+  canvas.live.doble { height: 110px; }
+  .lado-tit { font-size: .75rem; margin-top: 2px; }
   .graf-cab h3 { font-size: .85rem; } .zoom .btn { min-width: 34px; padding: 2px 8px; font-size: .85rem; }
   .leyenda { margin: 0; font-size: .72rem; }
   .vivo .form-actions, .vivo .form-actions.left { flex-wrap: nowrap; gap: 6px; }

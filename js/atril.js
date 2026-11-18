@@ -307,7 +307,7 @@
   /* ===================================================================
    * Conexión en vivo: UN WebSocket /ws con el ESP32 del atril (http://192.168.4.1)
    * (o con servidor/servidor.js en la versión con laptop). Trae
-   *   - binario: paquetes 0xAA 0x55 de la señal cruda del Arduino
+   *   - binario: paquetes 0xAA 0x55 de la señal cruda del Arduino (v8.3-BI: y 0x56 / 0x58 del lado izquierdo)
    *   - {type:'atril', st}: estado del ESP32 (lo mismo que antes daba /estado)
    *   - {type:'servidor', arduino, atril}: quién está conectado
    * y lleva las órdenes: {type:'cmd', c}, {type:'musica', l, p} y {type:'volumen', v}.
@@ -317,7 +317,8 @@
   class ServidorLink {
     constructor(host, h) {
       this.host = host; this.h = h; this.run = true; this.ws = null; this.boot = null; this.info = null;
-      this.parser = new EMG.PacketParser(arr => h.onSamples(arr));
+      this.parser = new EMG.PacketParser(arr => h.onSamples(arr),
+        arr => h.onCanal2 && h.onCanal2(arr), p => h.onPares && h.onPares(p));   // v8.3-BI: lado izquierdo
       const link = this;
       this.emg = { kind: 'servidor', get lost() { return link.parser.lost; }, stop() { link.stop(); } };
       this.atril = { kind: 'servidor', cmd: c => link._enviar({ type: 'cmd', c }), musica: (l, p) => link._enviar({ type: 'musica', l, p }),

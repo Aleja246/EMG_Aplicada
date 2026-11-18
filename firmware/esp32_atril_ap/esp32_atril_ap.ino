@@ -15,6 +15,10 @@
 //   - En la pagina, "cabeza arriba" = tiempo en premio; los episodios siguen
 //     siendo los esfuerzos detectados, con su duracion real.
 //  Lo de abajo describe el v8.2; donde no coincida, manda esta nota.
+//  v8.3-BI (DOS LADOS): lo unico que cambia es que procesarArduino() tambien pasa a la
+//  pagina los paquetes 0xAA 0x56 (lado izquierdo, A1) y 0xAA 0x58 (RMS de los dos lados)
+//  del arduino_emg_ap.ino v5.2-AP-BI. La deteccion, la calibracion, los motores, la luz y
+//  la musica NO cambian: siguen usando solo el RMS del opto (A0 = lado derecho).
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
 //  opto, cada 100 ms, una linea con el RMS en milivoltios ("640\n").
@@ -1661,6 +1665,7 @@ bool iniciarServidorWeb() {
 }
 
 // ---------- Senal del Arduino: paquetes 0xAA 0x55 (datos) y 0xAA 0x57 (diagnostico) ----------
+// v8.3-BI: tambien 0xAA 0x56 (lado izquierdo, A1) y 0xAA 0x58 (RMS de los dos lados): se pasan a la pagina
 static uint8_t pend[1024];          // bytes recibidos sin procesar
 static int npend = 0;
 static uint8_t emgOut[1400];        // paquetes validos para la pagina
@@ -1683,6 +1688,19 @@ void procesarArduino() {
       ultimoSeq = seq;
       muestrasArduino += n; paquetesArduino++;
       if (nEmgOut + largo > (int)sizeof emgOut) nEmgOut = 0;   // no deberia pasar: se manda cada 40 ms
+      memcpy(emgOut + nEmgOut, pend + i, largo);
+      nEmgOut += largo;
+      i += largo;
+    } else if (pend[i + 1] == 0x56 || pend[i + 1] == 0x58) {
+      // v8.3-BI: lado izquierdo (A1) a 500 Hz (0x56) y RMS de los dos lados (0x58). Solo se
+      // revisan y se pasan a la pagina: no cuentan en la estadistica de A0 ni tocan el control.
+      int n = pend[i + 3], largo = 4 + (pend[i + 1] == 0x56 ? 2 : 4) * n + 1;
+      if (n == 0 || n > 64) { i++; bytesMalos++; continue; }
+      if (i + largo > npend) break;
+      uint8_t chk = 0;
+      for (int k = i + 2; k < i + largo - 1; k++) chk ^= pend[k];
+      if (chk != pend[i + largo - 1]) { i++; bytesMalos++; continue; }
+      if (nEmgOut + largo > (int)sizeof emgOut) nEmgOut = 0;
       memcpy(emgOut + nEmgOut, pend + i, largo);
       nEmgOut += largo;
       i += largo;

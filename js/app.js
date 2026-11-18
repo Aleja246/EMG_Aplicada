@@ -4,6 +4,9 @@
  *   Atril (ESP32)     -> calibración, detección de la postura, estrellas, luz y música
  *   Esta página       -> muestra la terapia, guarda el expediente y manda la música/volumen
  * En pantalla nunca se nombran las placas ni los umbrales: todo en palabras del consultorio.
+ * v8.3-BI (dos canales): A0 = LADO DERECHO (el que controla el atril, igual que siempre) y
+ *   A1 = LADO IZQUIERDO (solo se ve y se analiza aquí). Ver js/bilateral.js: activación bilateral
+ *   y lado predominante en cada intento de levantar la cabeza y al final de la sesión.
  */
 (function () {
   'use strict';
@@ -31,6 +34,10 @@
   /* ---------- estado ---------- */
   let S = E.Store.settings();
   let proc, quality, chart, progChart;
+  let proc2, chart2;                  // v8.3-BI: lado izquierdo (A1, 500 Hz)
+  const bil = new E.Bilateral();      // v8.3-BI: análisis de los dos lados
+  const ultIzq = [];                  // v8.3-BI: últimos RMS del lado izquierdo (para guardarlos junto a la señal)
+  const rx2 = { muestras: 0, antes: 0, fs: 0, pares: 0, ultimo: 0 };
   let view = 'home', patient = null;
   let emg = null, emgConn = { status: 'disconnected', msg: '' };
   let atril = null, atrilConn = { status: 'disconnected', msg: '' };
@@ -41,8 +48,11 @@
   let senalVivo = true;               // Ajustes > Diagnóstico: apagar la señal en vivo para comparar el ruido
   let prevCrit = new Set();
 
+  const FS_IZQ = 500;                 // el Arduino manda el lado izquierdo a 500 Hz (promedio de 2 muestras)
   function rebuildDsp() {
     proc = new E.Processor(S);
+    // a 500 Hz los armónicos 300/360/420 Hz quedan reflejados en 200/140/80 Hz: también se quitan
+    proc2 = new E.Processor(Object.assign({}, S, { fs: FS_IZQ, notchList: [60, 120, 180, 240, 200, 140, 80] }));
     quality = new E.SignalQuality(S.adcMax);
   }
 
@@ -54,7 +64,7 @@
     if (name === 'home') renderHome();
     if (name === 'patients') renderPatients();
     if (name === 'patient') renderPatient();
-    if (name === 'live') chart.setWindow(S.winS);
+    if (name === 'live') { chart.setWindow(S.winS); chart2.setWindow(S.winS); }
   }
   function salirDeSesion(destino) {
     if (rec && !confirm('La terapia sigue en curso. ¿Salir sin guardarla? Se perderán los datos de esta sesión.')) return;
@@ -141,6 +151,27 @@
       chart.push(tx ? NaN : x, flag);
     }
   }
+  // v8.3-BI: lado izquierdo (A1) a 500 Hz, mismo bit 15 que el derecho
+  function onCanal2(arr) {
+    rx2.muestras += arr.length;
+    const flag = st && st.modo === 'SESION' ? (st.abajo ? 1 : 2) : 0;
+    for (let i = 0; i < arr.length; i++) {
+      const tx = arr[i] & 0x8000, x = proc2.process(arr[i] & 0x3FFF);
+      chart2.push(tx ? NaN : x, flag);
+    }
+  }
+  // v8.3-BI: RMS de los dos lados cada 100 ms (calculado en el Arduino): [[derecho, izquierdo], ...]
+  function onPares(p) {
+    rx2.pares += p.length; rx2.ultimo = performance.now();
+    const modo = st && st.modo;
+    for (let k = 0; k < p.length; k++) {
+      const [d, i] = p[k];
+      ultIzq.push(i); if (ultIzq.length > 40) ultIzq.shift();
+      if (modo === 'CALIBRANDO') bil.calibrar(d, i);
+      else if (rec && modo === 'SESION' && st.cal && keyOf(st) === rec.key) bil.bloque(+(recTime() - 0.1 * (p.length - 1 - k)).toFixed(1), d, i);
+    }
+  }
+  const hayIzq = () => performance.now() - rx2.ultimo < 3000;
   // El atril (ESP32) sirve la página: la conexión en vivo va al mismo lugar de donde vino la página
   const servidorHost = () => (/^https?:$/.test(location.protocol) ? location.host : (S.servidor || '192.168.4.1'));
   let rtt = null;                     // retraso de ida y vuelta con el atril (ms)
@@ -157,6 +188,7 @@
     rebuildDsp();
     link = new E.ServidorLink(servidorHost(), {
       onSamples,
+      onCanal2, onPares,               // v8.3-BI
       onEstado,
       onServidor,
       onRtt: v => { rtt = v; },
@@ -182,12 +214,25 @@
   function startSim() {
     disconnectAll();
     rebuildDsp();
-    const asim = new E.AtrilSim(), blk = new E.BlockRms(S);
+    const asim = new E.AtrilSim(), blk = new E.BlockRms(S), blk2 = new E.BlockRms(S);
+    // v8.3-BI: lado izquierdo simulado = el derecho más débil (45 %) con su propio ruido
+    let par = null;
+    const randn = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
     sim = { atril: asim };
     atril = new E.AtrilLink(asim, onEstado, onAtrilStatus);
     emg = new E.SimSource(arr => {
       onSamples(arr);
-      for (let i = 0; i < arr.length; i++) { const mv = blk.feed(arr[i]); if (mv !== null) asim.feedBlock(mv); }
+      const izq = new Uint16Array(arr.length), pares = [];
+      for (let i = 0; i < arr.length; i++) {
+        izq[i] = Math.max(0, Math.min(16383, Math.round(8192 + 0.45 * (arr[i] - 8192) + 40 * randn())));
+        const mv = blk.feed(arr[i]), mv2 = blk2.feed(izq[i]);
+        if (mv !== null) { asim.feedBlock(mv); par = mv; }
+        if (mv2 !== null && par !== null) { pares.push([par, mv2]); par = null; }
+      }
+      const a500 = [];
+      for (let i = 0; i + 1 < izq.length; i += 2) a500.push((izq[i] + izq[i + 1] + 1) >> 1);
+      onCanal2(Uint16Array.from(a500));
+      if (pares.length) onPares(pares);
     }, onEmgStatus, () => asim.simCtx(), S.fs);
     emg.start();
     toast('Modo demostración: el equipo está simulado, sirve para practicar.');
@@ -222,6 +267,10 @@
   function onEstado(s) {
     const prev = st; st = s;
     syncMusica(s);
+    // v8.3-BI: el reposo de cada lado se mide durante la calibración del atril
+    if (s.modo === 'CALIBRANDO' && (!prev || prev.modo !== 'CALIBRANDO')) bil.iniciarCal();
+    if (prev && prev.modo === 'CALIBRANDO' && s.modo !== 'CALIBRANDO') bil.cerrarCal(s.cal && s.cal.sens || 2);
+    if (prev && prev.modo === 'SESION' && s.modo !== 'SESION') bil.cortar();
     if (rec) recordUpdate(prev, s);
     if (!rec && view === 'live' && patient && prev && prev.modo === 'CALIBRANDO' && s.modo === 'SESION') startRecording(s);
     renderSys();
@@ -314,7 +363,9 @@
       ['Envío WiFi más lento (último s)', [d && d.wMax != null ? d.wMax + ' ms' : '—', d && d.wMax > 60 ? 'mal' : '']],
       ['Pausas de la señal por WiFi lento', [d && d.lentos != null ? String(d.lentos) : '—', d && d.lentos ? 'mal' : '']],
       ['Mayor espera entre datos al atril (10 s)', [d && d.opto ? d.opto + ' ms (normal: 100)' : '—', d && d.opto > 250 ? 'mal' : '']],
-      ['Rango de la señal en A0', [d && d.max != null ? (d.min * 5 / 16383).toFixed(2) + ' a ' + (d.max * 5 / 16383).toFixed(2) + ' V' : '—', '']],
+      ['Lado izquierdo (A1): muestras/s / RMS', [hayIzq() ? Math.round(rx2.fs) + ' (se mandan 500) · ' + (d && d.r2 != null ? f1(d.r2) + ' mV' : '—') : 'no llega (¿Arduino v5.2-AP-BI?)', hayIzq() ? '' : 'mal']],
+      ['Reposo / umbral de cada lado (der. / izq.)', [bil.cal ? f1(bil.cal.D.reposo) + ' / ' + f1(bil.cal.I.reposo) + ' mV · ' + f1(bil.cal.D.on) + ' / ' + f1(bil.cal.I.on) + ' mV' : '—', '']],
+      ['Rango de la señal en A0 (lado derecho)', [d && d.max != null ? (d.min * 5 / 16383).toFixed(2) + ' a ' + (d.max * 5 / 16383).toFixed(2) + ' V' : '—', '']],
       ['Estado del atril', [st ? st.modo + (st.datos ? '' : ' · sin RMS del opto') : '—', st && !st.datos ? 'mal' : '']],
       ['RMS actual (opto)', [st ? st.rms + ' mV (mediana ' + f1(st.med) + ')' : '—', '']],
       ['Reposo de la calibración', [c && c.ok ? f1(c.reposo) + ' ± ' + f1(c.sd) + ' mV' : '—', c && c.inestable ? 'mal' : '']],
@@ -353,6 +404,7 @@
       abajoS: 0, caidas: 0, maxAbajoS: 0, curAbajoS: 0, eraAbajo: false,
       acts: [], seen: new Set(), rms: [], umbral: s.cal.uon, cal: fotoCal(s), recal: 0, pausaS: 0
     };
+    bil.nuevaSesion();                 // v8.3-BI: el reposo de los dos lados ya se midió en esta calibración
     toast('La terapia empezó: ASTRA ya está midiendo.');
   }
   // Lo que dejó la calibración del atril (se guarda con la sesión y va al Excel)
@@ -385,7 +437,13 @@
       } else rec.curAbajoS = 0;
       rec.eraAbajo = !!s.abajo;
       const t = recTime(), n = s.b.length;
-      s.b.forEach(([v, m, f], i) => rec.rms.push([+(t - (n - 1 - i) * 0.1).toFixed(1), v, m, f === 1 ? 1 : 0]));
+      const izq = hayIzq() ? ultIzq.slice(-n) : [];      // v8.3-BI: lado izquierdo de los mismos bloques (aprox.)
+      s.b.forEach(([v, m, f], i) => {
+        const fila = [+(t - (n - 1 - i) * 0.1).toFixed(1), v, m, f === 1 ? 1 : 0];
+        const zi = izq.length - n + i;
+        if (zi >= 0) fila.push(izq[zi]);
+        rec.rms.push(fila);
+      });
     }
   }
 
@@ -474,7 +532,7 @@
   // Zoom de la gráfica: Auto (×1) y de ×2 en ×2 (se recuerda en este celular)
   const ZOOMS = [0.25, 0.5, 1, 2, 4, 8, 16];
   function ponerZoom(z) {
-    chart.zoom = z; S.zoom = z; E.Store.saveSettings(S);
+    chart.zoom = z; chart2.zoom = z; S.zoom = z; E.Store.saveSettings(S);
     $('zoom-auto').textContent = z === 1 ? 'Auto' : '×' + (z >= 1 ? z : '1/' + (1 / z));
     $('zoom-auto').classList.toggle('on', z === 1);
   }
@@ -487,6 +545,7 @@
   $('lv-fin').addEventListener('click', () => {
     if (!rec) { if (confirm('La terapia todavía no empezó a medir. ¿Salir?')) { rec = null; show('patient'); } return; }
     if (!confirm('¿Finalizar la sesión?')) return;
+    bil.cortar();                      // v8.3-BI: cierra el intento que estuviera en curso
     fin = buildRecord();
     const senal = rec.rms; rec = null;
     fin.senal = senal;
@@ -532,6 +591,19 @@
     $('lv-pie').textContent = (cal ? 'Calibración completada' : 'Falta calibrar') + ' · ' +
       (!senalVivo ? 'Señal en vivo apagada (Ajustes)' : emgConn.status === 'connected' || sim ? 'Señal disponible' : 'Sin señal del sensor');
     $('lv-pausa').textContent = st && st.modo === 'PAUSA' ? '▶ Continuar' : '❚❚ Pausar';
+    $('lv-bilat').textContent = textoBilateralVivo();
+  }
+  // v8.3-BI: una línea con lo que va de la sesión en los dos lados
+  function textoBilateralVivo() {
+    if (!senalVivo) return '';
+    if (!hayIzq()) return 'Lado izquierdo: sin datos (revisa que el sensor tenga la versión de dos canales).';
+    if (!bil.cal) return 'Dos lados: se mide el reposo de cada lado durante la calibración.';
+    if (!rec) return 'Dos lados: reposo medido en la calibración.';
+    const r = bil.resumen(), a = bil.ahora, it = bil.it;
+    let t = 'Intentos: ' + r.intentos + ' · con los dos lados: ' + r.bilaterales;
+    if (r.intentos) t += ' · predomina: ' + r.ladoTexto.toLowerCase();
+    if (it && a) t += ' · ahora: ' + (a.aD && a.aI ? 'los dos lados' : a.aD ? 'lado derecho' : a.aI ? 'lado izquierdo' : 'relajando');
+    return t;
   }
 
   /* ===================================================================
@@ -547,9 +619,14 @@
         pctArriba: t > 0 ? 100 * arriba / t : null, caidasMin: t > 0 ? rec.caidas / (t / 60) : null,
         duracionMin: t / 60
       },
-      episodios: rec.acts.map(a => ({ n: a.n, inicioS: a.inicioS, durS: a.durS, rms: a.rms }))
+      episodios: rec.acts.map(a => ({ n: a.n, inicioS: a.inicioS, durS: a.durS, rms: a.rms })),
+      bilateral: bil.resumen()        // v8.3-BI: null si no llegó el lado izquierdo
     };
   }
+  // v8.3-BI: textos del análisis de los dos lados
+  const pctTxt = v => (v != null && isFinite(v) ? Math.round(v) + ' %' : '—');
+  const ladoDe = r => (r.bilateral ? r.bilateral.ladoTexto : r.bilateral === null ? 'Sin datos del lado izquierdo' : '—');
+  const iaTxt = b => (b && b.indiceAsimetria != null ? (b.indiceAsimetria > 0 ? '+' : '') + Math.round(b.indiceAsimetria) + ' %' : '—');
   function kpisSesion(r) {
     const u = r.resumen || {};
     return [
@@ -559,7 +636,11 @@
       ['Caídas de cabeza', String(u.caidas != null ? u.caidas : '—')],
       ['Caída más larga', f1(u.caidaMasLargaS) + ' s'],
       ['Umbral de activación', f1(r.umbralMV) + ' mV']
-    ];
+    ].concat(r.bilateral === undefined ? [] : r.bilateral === null
+      ? [['Lado predominante', 'Sin datos del lado izquierdo']]
+      : [['Lado predominante', r.bilateral.ladoTexto + (r.bilateral.intentos ? ' (asimetría ' + iaTxt(r.bilateral) + ')' : '')],
+        ['Activación de los dos lados', r.bilateral.intentos ? r.bilateral.bilaterales + ' de ' + r.bilateral.intentos + ' intentos (' + pctTxt(r.bilateral.pctBilateral) + ')' : 'Sin intentos detectados'],
+        ['Solo un lado', r.bilateral.intentos ? 'derecho ' + r.bilateral.soloDerecho + ' · izquierdo ' + r.bilateral.soloIzquierdo : '—']]);
   }
   function pintarKpis(el, items) {
     el.innerHTML = items.map(() => '<div class="kpi"><span></span><b></b></div>').join('');
@@ -625,7 +706,7 @@
       ['Caídas por minuto (promedio)', f1(prom('caidasMin'))],
       ['Caída más larga (promedio)', f1(prom('caidaMasLargaS')) + ' s'],
       ['Mejor sesión', pct(res(mejor).pctArriba) + ' · ' + fmtDate(mejor.fecha)]
-    ]);
+    ].concat(ladoFrecuente(ses)));
     let msg = '';
     const pts = ses.map(s => res(s).pctArriba).filter(v => v != null && isFinite(v));
     if (pts.length >= 2) {
@@ -636,6 +717,14 @@
         (d >= 0 ? '+' : '') + Math.round(d) + ' puntos' + (Math.abs(d) < 2 ? ', sin cambio claro' : d > 0 ? ', va mejorando' : ', ha bajado') + ').';
     }
     $('p-tendencia').textContent = msg;
+  }
+  // v8.3-BI: lado que predominó en más sesiones
+  function ladoFrecuente(ses) {
+    const con = ses.filter(s => s.bilateral && s.bilateral.lado);
+    if (!con.length) return [];
+    const c = { D: 0, I: 0, S: 0 }; con.forEach(s => { c[s.bilateral.lado]++; });
+    const top = Object.keys(c).sort((a, b) => c[b] - c[a])[0];
+    return [['Lado predominante (sesiones)', E.Bilateral.LADO_TXT[top] + ' en ' + c[top] + ' de ' + con.length]];
   }
   const METRICS = { pctArriba: '%', caidasMin: 'caídas/min', caidaMasLargaS: 's', duracionMin: 'min' };
   function renderProgreso(ses) {
@@ -650,7 +739,7 @@
       const u = res(s), tr = document.createElement('tr');
       [fmtCorta(s.fecha), s.fisio || '—', clock(s.duracionS), f1(s.umbralMV),
         clock(u.tiempoArribaS) + (u.pctArriba != null ? ' (' + pct(u.pctArriba) + ')' : ''),
-        clock(u.tiempoAbajoS), String(u.caidas != null ? u.caidas : '—')]
+        clock(u.tiempoAbajoS), String(u.caidas != null ? u.caidas : '—'), ladoDe(s)]
         .forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
       const td = document.createElement('td');
       const ver = document.createElement('button'); ver.className = 'btn small ghost'; ver.textContent = 'Ver';
@@ -678,7 +767,8 @@
     $('ses-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     try {
       const datos = await E.Store.senal(s.id);
-      $('ses-txt').textContent = 'Señal del músculo durante la sesión. Lo sombreado es el tiempo con la cabeza caída.';
+      $('ses-txt').textContent = 'Señal del músculo durante la sesión (lado derecho' + (datos.some(d => d.izq != null) ? '; en violeta, el lado izquierdo' : '') +
+        '). Lo sombreado es el tiempo con la cabeza caída.';
       requestAnimationFrame(() => E.dibujarSesion($('ses-senal'), datos, { uon: s.umbralMV, uoff: null }));
     } catch (e) {
       $('ses-txt').textContent = 'La señal de esta sesión no está disponible.';
@@ -714,8 +804,23 @@
       ['Calibración: reposo medio (mV)', r.calibracion && r.calibracion.reposoMV != null ? +(+r.calibracion.reposoMV).toFixed(1) : ''],
       ['Calibración: desviación (mV)', r.calibracion && r.calibracion.sdMV != null ? +(+r.calibracion.sdMV).toFixed(2) : ''],
       ['Umbral de relajación (mV)', r.calibracion && r.calibracion.umbralOffMV != null ? +(+r.calibracion.umbralOffMV).toFixed(1) : ''],
-      ['Calibración inestable', r.calibracion ? (r.calibracion.inestable ? 'Sí' : 'No') : ''],
-      ['Observaciones', r.observaciones || '']];
+      ['Calibración inestable', r.calibracion ? (r.calibracion.inestable ? 'Sí' : 'No') : '']].concat(hojaBilateral(r), [
+      ['Observaciones', r.observaciones || '']]);
+  }
+  // v8.3-BI: los dos lados en la hoja de la sesión
+  function hojaBilateral(r) {
+    const b = r.bilateral, n2 = v => (v != null && isFinite(v) ? +(+v).toFixed(2) : '');
+    if (b === undefined) return [];
+    if (b === null) return [['Lado predominante', 'Sin datos del lado izquierdo']];
+    return [['Lado predominante', b.ladoTexto],
+      ['Índice de asimetría (%) (+ = derecho, − = izquierdo)', b.indiceAsimetria != null ? +b.indiceAsimetria.toFixed(1) : ''],
+      ['Intentos analizados (los dos lados)', b.intentos], ['Intentos con activación de los dos lados', b.bilaterales],
+      ['% de intentos con activación de los dos lados', b.pctBilateral != null ? +b.pctBilateral.toFixed(1) : ''],
+      ['Intentos solo con el lado derecho', b.soloDerecho], ['Intentos solo con el lado izquierdo', b.soloIzquierdo],
+      ['Intentos en que predominó el derecho / izquierdo / ninguno', b.predominaDerecho + ' / ' + b.predominaIzquierdo + ' / ' + b.sinPredominio],
+      ['Reposo lado derecho (mV)', n2(b.reposoDMV)], ['Reposo lado izquierdo (mV)', n2(b.reposoIMV)],
+      ['Umbral lado derecho (mV)', n2(b.umbralDMV)], ['Umbral lado izquierdo (mV)', n2(b.umbralIMV)],
+      ['Picos cortos descartados (ruido)', b.descartadosRuido]];
   }
   function excelSesion(r, p, senal) {
     const hojas = [
@@ -725,31 +830,42 @@
         filas: [['N.º', 'Inicio (s)', 'Duración (s)', 'Intensidad media (mV)']].concat(
           (r.episodios || []).map(a => [a.n, +a.inicioS.toFixed(1), +a.durS.toFixed(1), Math.round(a.rms)])), titulos: 1 }
     ];
-    if (senal && senal.length) hojas.push({ nombre: 'Señal', anchos: [12, 14, 14, 12],
-      filas: [['Tiempo (s)', 'Señal (mV)', 'Promedio (mV)', 'Cabeza caída']].concat(senal.map(f => [f[0], f[1], f[2], f[3] ? 1 : 0])), titulos: 1 });
+    const b = r.bilateral;
+    if (b && b.intentosDetalle) hojas.push({ nombre: 'Dos lados', anchos: [8, 12, 12, 16, 16, 14, 14, 12, 12, 14, 14, 18],
+      filas: [['N.º', 'Inicio (s)', 'Duración (s)', 'RMS derecho (mV)', 'RMS izquierdo (mV)', 'Derecho (× reposo)', 'Izquierdo (× reposo)',
+        'Derecho activo', 'Izquierdo activo', 'Los dos lados', 'Asimetría (%)', 'Predomina']].concat(b.intentosDetalle.map(x => [x.n, +x.inicioS.toFixed(1), +x.durS.toFixed(1),
+        +x.rmsD.toFixed(1), +x.rmsI.toFixed(1), +x.activD.toFixed(2), +x.activI.toFixed(2), x.derechoActivo ? 'Sí' : 'No', x.izquierdoActivo ? 'Sí' : 'No',
+        x.bilateral ? 'Sí' : 'No', +x.ia.toFixed(1), E.Bilateral.LADO_TXT[x.lado]])), titulos: 1 });
+    const conIzq = senal && senal.some(f => f[4] != null);
+    if (senal && senal.length) hojas.push({ nombre: 'Señal', anchos: conIzq ? [12, 18, 18, 12, 18] : [12, 14, 14, 12],
+      filas: [['Tiempo (s)', 'Señal lado derecho (mV)', 'Promedio lado derecho (mV)', 'Cabeza caída'].concat(conIzq ? ['Señal lado izquierdo (mV)'] : [])]
+        .concat(senal.map(f => [f[0], f[1], f[2], f[3] ? 1 : 0].concat(conIzq ? [f[4] != null ? f[4] : ''] : []))), titulos: 1 });
     E.xlsx(archivo(p, r.fecha.slice(0, 16).replace(/[:T]/g, '-')), hojas);
   }
   async function descargarSesion(s, p) {
     let senal = [];
     try { senal = await E.Store.senal(s.id); } catch (e) { /* la señal solo existe si se guardó en el servidor */ }
-    excelSesion(s, p, senal.map ? senal.map(d => (Array.isArray(d) ? d : [d.t, d.rms, d.med, d.act])) : []);
+    excelSesion(s, p, senal.map ? senal.map(d => (Array.isArray(d) ? d : [d.t, d.rms, d.med, d.act, d.izq])) : []);
     toast('Excel de la sesión descargado.');
   }
   $('btn-p-excel').addEventListener('click', () => {
     const p = patient, ses = E.Store.sessionsFor(p.id);
     if (!ses.length) { toast('Este paciente todavía no tiene sesiones.'); return; }
     const H = ['Fecha', 'Fisioterapeuta', 'Duración (min)', 'Umbral de activación (mV)', 'Tiempo cabeza erguida (s)',
-      '% cabeza erguida', 'Tiempo cabeza caída (s)', 'Caídas de cabeza', 'Caída más larga (s)', 'Caídas por minuto', 'Observaciones'];
+      '% cabeza erguida', 'Tiempo cabeza caída (s)', 'Caídas de cabeza', 'Caída más larga (s)', 'Caídas por minuto',
+      'Lado predominante', 'Índice de asimetría (%)', '% intentos con los dos lados', 'Observaciones'];
     const filas = ses.map(s => {
       const u = res(s);
       return [fmtDateTime(s.fecha), s.fisio || '', +(s.duracionS / 60).toFixed(2), s.umbralMV != null ? +(+s.umbralMV).toFixed(2) : '',
         u.tiempoArribaS != null ? +u.tiempoArribaS.toFixed(1) : '', u.pctArriba != null ? +u.pctArriba.toFixed(1) : '',
         u.tiempoAbajoS != null ? +u.tiempoAbajoS.toFixed(1) : '', u.caidas != null ? u.caidas : '',
-        u.caidaMasLargaS != null ? +u.caidaMasLargaS.toFixed(1) : '', u.caidasMin != null ? +u.caidasMin.toFixed(2) : '', s.observaciones || ''];
+        u.caidaMasLargaS != null ? +u.caidaMasLargaS.toFixed(1) : '', u.caidasMin != null ? +u.caidasMin.toFixed(2) : '',
+        ladoDe(s), s.bilateral && s.bilateral.indiceAsimetria != null ? +s.bilateral.indiceAsimetria.toFixed(1) : '',
+        s.bilateral && s.bilateral.pctBilateral != null ? +s.bilateral.pctBilateral.toFixed(1) : '', s.observaciones || ''];
     });
     E.xlsx(archivo(p, 'expediente'), [
       { nombre: 'Paciente', anchos: [30, 30], negritas: true, filas: datosPaciente(p).concat([['', ''], ['Notas', p.notas || '']]) },
-      { nombre: 'Sesiones', anchos: [20, 22, 14, 18, 20, 16, 20, 16, 18, 16, 40], filas: [H].concat(filas), titulos: 1 }
+      { nombre: 'Sesiones', anchos: [20, 22, 14, 18, 20, 16, 20, 16, 18, 16, 22, 16, 18, 40], filas: [H].concat(filas), titulos: 1 }
     ]);
     toast('Excel del expediente descargado.');
   });
@@ -776,18 +892,21 @@
 
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
+  chart2 = new E.LiveChart($('live2'), FS_IZQ);   // v8.3-BI: lado izquierdo
   chart.zoom = [0.25, 0.5, 1, 2, 4, 8, 16].includes(S.zoom) ? S.zoom : 1;
   ponerZoom(chart.zoom);
   progChart = new E.ProgressChart($('prog'), $('prog-tip'));
   initMusica();
   rebuildDsp();
-  (function frame() { if (view === 'live') chart.draw(); requestAnimationFrame(frame); })();
+  (function frame() { if (view === 'live') { chart.draw(); chart2.draw(); } requestAnimationFrame(frame); })();
   let tick = 0;
   setInterval(() => {
     const now = performance.now();
     if (now - rx.lastT >= 1000) {
       const inst = (rx.samples - rx.lastCount) * 1000 / (now - rx.lastT);
-      rx.fs = rx.fs ? 0.75 * rx.fs + 0.25 * inst : inst; rx.lastCount = rx.samples; rx.lastT = now;
+      rx.fs = rx.fs ? 0.75 * rx.fs + 0.25 * inst : inst; rx.lastCount = rx.samples;
+      const inst2 = (rx2.muestras - rx2.antes) * 1000 / (now - rx.lastT);   // v8.3-BI
+      rx2.fs = rx2.fs ? 0.75 * rx2.fs + 0.25 * inst2 : inst2; rx2.antes = rx2.muestras; rx.lastT = now;
     }
     renderSys();
     if (view === 'live') renderLive();

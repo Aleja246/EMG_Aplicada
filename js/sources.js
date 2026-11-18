@@ -1,6 +1,9 @@
 /* Fuentes de la señal EMG cruda del Arduino: WiFi (recomendado), USB (Web Serial) y simulador.
  * Protocolo (arduino_emg.ino, igual por WiFi y por USB), paquetes de 20 muestras:
  *   0xAA 0x55 | seq (1B) | n (1B) | n x uint16 little-endian | checksum (XOR de seq, n y payload)
+ * v8.3-BI (arduino_emg_ap.ino v5.2-AP-BI), con el mismo checksum:
+ *   0xAA 0x56 | seq | n | n x uint16          -> lado izquierdo (A1), 500 Hz
+ *   0xAA 0x58 | seq | n | n x (uint16, uint16) -> RMS de cada bloque de 100 ms: derecho (A0), izquierdo (A1), en 0.1 mV
  */
 (function () {
   'use strict';
@@ -21,21 +24,37 @@
 
   /* Separa los paquetes de un flujo de bytes (tolera bytes basura y cortes). */
   class PacketParser {
-    constructor(onSamples) { this.onSamples = onSamples; this.buf = new Uint8Array(0); this.reset(); }
+    constructor(onSamples, onCanal2, onPares) {
+      this.onSamples = onSamples; this.onCanal2 = onCanal2; this.onPares = onPares;   // v8.3-BI
+      this.buf = new Uint8Array(0); this.reset();
+    }
     reset() { this.lastSeq = -1; this.packets = 0; this.lost = 0; this.badBytes = 0; this.buf = new Uint8Array(0); }
     push(chunk) {
       const b = new Uint8Array(this.buf.length + chunk.length);
       b.set(this.buf); b.set(chunk, this.buf.length);
       let i = 0;
       while (i + 5 <= b.length) {
-        if (b[i] !== 0xAA || b[i + 1] !== 0x55) { i++; this.badBytes++; continue; }
+        const tipo = b[i + 1];
+        if (b[i] !== 0xAA || (tipo !== 0x55 && tipo !== 0x56 && tipo !== 0x58)) { i++; this.badBytes++; continue; }
         const n = b[i + 3];
         if (n === 0 || n > 64) { i++; this.badBytes++; continue; }
-        const len = 4 + 2 * n + 1;
+        const len = 4 + (tipo === 0x58 ? 4 : 2) * n + 1;
         if (i + len > b.length) break; // paquete incompleto
         let chk = 0;
         for (let k = i + 2; k < i + len - 1; k++) chk ^= b[k];
         if (chk !== b[i + len - 1]) { i++; this.badBytes++; continue; }
+        if (tipo !== 0x55) {             // v8.3-BI: lado izquierdo / RMS de los dos lados (no cuentan para A0)
+          if (tipo === 0x56 && this.onCanal2) {
+            const s = new Uint16Array(n);
+            for (let k = 0; k < n; k++) s[k] = b[i + 4 + 2 * k] | (b[i + 5 + 2 * k] << 8);
+            this.onCanal2(s);
+          } else if (tipo === 0x58 && this.onPares) {
+            const p = [];
+            for (let k = 0; k < n; k++) { const q = i + 4 + 4 * k; p.push([(b[q] | (b[q + 1] << 8)) / 10, (b[q + 2] | (b[q + 3] << 8)) / 10]); }
+            this.onPares(p);
+          }
+          i += len; continue;
+        }
         const seq = b[i + 2];
         if (this.lastSeq >= 0) this.lost += (seq - this.lastSeq - 1) & 255;
         this.lastSeq = seq;

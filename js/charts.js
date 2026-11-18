@@ -143,7 +143,8 @@
     }
   }
 
-  /* Señal guardada de una sesión (RMS y mediana cada 100 ms) con sus umbrales y las activaciones sombreadas. */
+  /* Señal guardada de una sesión (RMS y mediana cada 100 ms) con sus umbrales y las activaciones sombreadas.
+   * v8.3-BI: rms/med = lado derecho; si la sesión trae el lado izquierdo (izq) se dibuja en violeta. */
   function dibujarSesion(canvas, datos, umbrales) {
     const { ctx, w, h } = fit(canvas);
     if (!w || !h) return;
@@ -151,7 +152,8 @@
     ctx.clearRect(0, 0, w, h);
     if (!datos.length) return;
     const t0 = datos[0].t, t1 = Math.max(t0 + 1, datos[datos.length - 1].t);
-    let ymax = Math.max(20, umbrales.uon || 0, ...datos.map(d => d.rms)) * 1.1;
+    const conIzq = datos.some(d => isFinite(d.izq) && d.izq !== null);
+    let ymax = Math.max(20, umbrales.uon || 0, ...datos.map(d => d.rms), ...(conIzq ? datos.map(d => d.izq || 0) : [])) * 1.1;
     const X = t => L + (t - t0) / (t1 - t0) * W, Y = v => T + H - (v / ymax) * H;
     ctx.fillStyle = css('--green-bg');
     for (let i = 0; i < datos.length; i++) if (datos[i].act) ctx.fillRect(X(datos[i].t), T, Math.max(1, W / datos.length + 0.5), H);
@@ -162,6 +164,11 @@
     for (let s = Math.ceil(t0 / paso) * paso; s <= t1; s += paso) ctx.fillText(Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0'), X(s), T + H + 6);
     const linea = (k, color, ancho) => { ctx.strokeStyle = color; ctx.lineWidth = ancho; ctx.beginPath(); datos.forEach((d, i) => i ? ctx.lineTo(X(d.t), Y(d[k])) : ctx.moveTo(X(d.t), Y(d[k]))); ctx.stroke(); };
     linea('rms', css('--signal'), 1); linea('med', css('--primary'), 2);
+    if (conIzq) {                                     // v8.3-BI: lado izquierdo
+      ctx.strokeStyle = css('--violet'); ctx.lineWidth = 1.5; ctx.beginPath(); let pen = false;
+      datos.forEach(d => { if (!(isFinite(d.izq) && d.izq !== null)) { pen = false; return; } pen ? ctx.lineTo(X(d.t), Y(d.izq)) : ctx.moveTo(X(d.t), Y(d.izq)); pen = true; });
+      ctx.stroke();
+    }
     ctx.setLineDash([8, 4]); ctx.strokeStyle = css('--amber'); ctx.lineWidth = 1.5;
     for (const v of [umbrales.uon, umbrales.uoff]) if (v > 0) { ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(L + W, Y(v)); ctx.stroke(); }
     ctx.setLineDash([]); ctx.lineWidth = 1;

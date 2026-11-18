@@ -60,7 +60,8 @@
       const fs = o.fs;
       // Butterworth 4º orden = 2 biquads con Q 0.5412 y 1.3066
       this.hp = [Biquad.highpass(o.hpHz, 0.5412, fs), Biquad.highpass(o.hpHz, 1.3066, fs)];
-      this.notches = notchChain(o.notchHz, o.notchQ, Math.max(1, o.nArm), fs);
+      this.notches = o.notchList ? o.notchList.map(f => Biquad.notch(f, o.notchQ, fs))   // v8.3-BI: lado izquierdo (500 Hz)
+        : notchChain(o.notchHz, o.notchQ, Math.max(1, o.nArm), fs);
       this.scale = o.vref / o.adcMax / o.gain; // cuentas -> mV
       this.dc = null;
       this.x = 0; this.hpOut = 0;

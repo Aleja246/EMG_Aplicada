@@ -1,6 +1,27 @@
 /*
   =====================================================================
-   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5.2-AP-2C
+   ASTRA - Arduino UNO R4 WiFi (lado del nino): arduino_emg_ap.ino  v5.2-AP-BI
+  ---------------------------------------------------------------------
+   v5.2-AP-BI (BILATERAL: A0 = lado DERECHO, A1 = lado IZQUIERDO):
+     - Es v5.2-AP-2C con una sola cosa nueva: cuando la pagina pide la senal
+       en vivo ("S"), junto con los paquetes de A0 salen tambien:
+         0xAA 0x56 | seq | n | n x uint16 | checksum   -> crudo de A1 a 500 Hz (promedio
+                                                         de cada 2 muestras; mismo seq
+                                                         que el 0x55 de A0 del mismo tramo)
+         0xAA 0x58 | seq | n | n x (uint16 A0, uint16 A1) | checksum
+                                                       -> SinArm de cada bloque de
+                                                          100 ms, en decimas de mV
+       Van en el MISMO envio WiFi que A0 (justo despues de la linea del opto).
+       A1 va a 500 Hz (no a 1000) para que el envio no crezca demasiado: solo es
+       para dibujarlo; el RMS de A1 (0x58) se calcula aqui a 1 kHz, igual que A0.
+       La pagina los usa para las dos graficas y para ver si la activacion es
+       bilateral y que lado predomina.
+     - Lo que controla el atril NO cambia: el opto sigue siendo solo SinArm de
+       A0, con el mismo formato. Sin pagina abierta ("N") no se manda nada extra.
+     - Con una pagina abierta el envio WiFi es mas largo (lleva los dos
+       canales), asi que se apartan algo mas de muestras del RMS (v5.1): en el
+       simulador, ~27 % -> ~35 %. El RMS sigue sin sesgo; solo usa menos
+       muestras por bloque. Sin pagina abierta no cambia nada.
   ---------------------------------------------------------------------
    v5.2-AP-2C (DOS CANALES: A0 y A1):
      - A1 se mide a 1 kHz junto con A0, con su PROPIA cadena de filtros (centro,
@@ -178,7 +199,7 @@ const char SERVIDOR_IP[]   = "192.168.4.1";
 const uint16_t PUERTO_SERVIDOR = 9001;
 const uint16_t PUERTO_AVISO    = 9999;
 const bool USB_PARA_PAGINA = false;            // true: paquetes crudos por USB en vez del Serial Plotter
-const char VERSION_EMG[]   = "5.2-AP-2C";
+const char VERSION_EMG[]   = "5.2-AP-BI";
 const uint8_t  TX_COLA_MS      = 5;             // ms que se siguen apartando despues de cada envio WiFi
 const uint32_t ENVIO_LENTO_MS  = 60;            // un envio mas lento que esto pausa la senal en vivo 3 s
 const uint16_t MARCA_TX        = 0x8000;        // bit 15 de una muestra cruda: tomada durante un envio WiFi
@@ -218,6 +239,7 @@ volatile float rmsLimpioMv = 0;         // SinArm del ultimo bloque, sin las apa
 const uint32_t N_CRUDO = 2048;      // 2 s de reserva (potencia de 2)
 volatile uint16_t crudo[N_CRUDO];
 volatile uint32_t nCrudo = 0;       // muestras escritas desde el arranque
+volatile uint16_t crudo2[N_CRUDO];  // v5.2-AP-BI: crudo de A1 (mismo indice que crudo[])
 
 // ---- Cola de bloques RMS (12.8 s): la interrupcion escribe, el loop lee ----
 const uint32_t N_COLA = 128;
@@ -238,7 +260,14 @@ uint32_t tInicioMuestreo = 0;
 const int N_PAQ = 20;                         // muestras por paquete (20 ms)
 const int LARGO_PAQ = 4 + 2 * N_PAQ + 1;      // 45 bytes
 const int MAX_PAQ_WIFI = 10;                  // hasta 200 ms por envio
-uint8_t bufWifi[LARGO_PAQ * MAX_PAQ_WIFI];
+// v5.2-AP-BI: el envio lleva A0 (0x55), A1 (0x56) y los RMS de los dos (0x58)
+const int N_PAR = 32;                         // pares de RMS guardados (3.2 s)
+const int LARGO_PAR = 4 + 4 * N_PAR + 1;
+const int N_PAQ2 = N_PAQ / 2;                 // muestras de A1 por paquete (500 Hz)
+const int LARGO_PAQ2 = 4 + 2 * N_PAQ2 + 1;    // 25 bytes
+uint8_t bufWifi[(LARGO_PAQ + LARGO_PAQ2) * MAX_PAQ_WIFI + LARGO_PAR];
+uint16_t parA0[N_PAR], parA1[N_PAR];          // SinArm de cada bloque, en decimas de mV (solo el loop)
+uint32_t parEsc = 0, parLei = 0;
 uint8_t bufUsb[LARGO_PAQ];
 
 FspTimer temporizador;
@@ -273,7 +302,6 @@ void alMuestrear(timer_callback_args_t *) {
   if (cuentaAdc < minAcum) minAcum = cuentaAdc;
   if (cuentaAdc > maxAcum) maxAcum = cuentaAdc;
   crudo[nCrudo & (N_CRUDO - 1)] = (uint16_t)cuentaAdc | (tx ? MARCA_TX : 0);
-  nCrudo = nCrudo + 1;
 
   float v = cuentaAdc * V_REF / ADC_MAX;
   dc += ALPHA_DC * (v - dc);
@@ -284,7 +312,10 @@ void alMuestrear(timer_callback_args_t *) {
   for (int k = 0; k < nArm; k++) ya = arm[k].run(ya);
 
   // v5.2-AP-2C: segundo canal, misma cadena. Se lee despues de A0 (A0 no cambia).
-  float v2 = analogRead(PIN_EMG2) * V_REF / ADC_MAX;
+  int cuentaAdc2 = analogRead(PIN_EMG2);
+  crudo2[nCrudo & (N_CRUDO - 1)] = (uint16_t)cuentaAdc2 | (tx ? MARCA_TX : 0);   // v5.2-AP-BI
+  nCrudo = nCrudo + 1;                         // (ahora despues de leer A1: el loop ve las dos muestras juntas)
+  float v2 = cuentaAdc2 * V_REF / ADC_MAX;
   dc2 += ALPHA_DC * (v2 - dc2);
   float x2 = v2 - dc2;
   float y60b = n60b.run(x2);
@@ -376,6 +407,12 @@ int vaciarCola() {
     bool alOpto = colaOpto[i];
     colaLei = colaLei + 1;
 
+    // v5.2-AP-BI: guarda el par de RMS (A0, A1) para la pagina (no toca lo que sale al opto)
+    parA0[parEsc % N_PAR] = (uint16_t)constrain(lroundf(rmsArm * 10000.0f), 0L, 65535L);
+    parA1[parEsc % N_PAR] = (uint16_t)constrain(lroundf(rmsArm2 * 10000.0f), 0L, 65535L);
+    parEsc++;
+    if (parEsc - parLei > (uint32_t)N_PAR) parLei = parEsc - N_PAR;
+
     // Opto: solo SinArm en mV, de 1 a 6 cifras y fin de linea -> "640\n"
     // La linea sale completa (unos 5 ms a 9600 baud): el ESP32 descarta
     // las lineas con huecos de mas de 50 ms.
@@ -441,6 +478,48 @@ int armarPaquetes(uint32_t &sig, uint8_t *buf, int maxPaq) {
     len += LARGO_PAQ;
   }
   return len;
+}
+
+// v5.2-AP-BI: los paquetes de A1 (0xAA 0x56) del MISMO tramo que acaban de salir de A0.
+// Cada valor es el promedio de 2 muestras (500 Hz); el bit 15 se marca si alguna de las dos se aparto.
+int armarCanal2(uint32_t desde, int nPaq, uint8_t *buf) {
+  int len = 0;
+  for (int paq = 0; paq < nPaq; paq++) {
+    uint8_t *p = buf + len;
+    uint32_t s = desde + paq * N_PAQ;
+    p[0] = 0xAA;
+    p[1] = 0x56;
+    p[2] = (uint8_t)(s / N_PAQ);
+    p[3] = N_PAQ2;
+    uint8_t chk = p[2] ^ p[3];
+    for (int i = 0; i < N_PAQ2; i++) {
+      uint16_t a = crudo2[(s + 2 * i) & (N_CRUDO - 1)], b = crudo2[(s + 2 * i + 1) & (N_CRUDO - 1)];
+      uint16_t v = (uint16_t)((((uint32_t)(a & 0x3FFF)) + (b & 0x3FFF) + 1) / 2) | ((a | b) & MARCA_TX);
+      p[4 + 2 * i] = v & 0xFF;
+      p[5 + 2 * i] = v >> 8;
+      chk ^= p[4 + 2 * i] ^ p[5 + 2 * i];
+    }
+    p[LARGO_PAQ2 - 1] = chk;
+    len += LARGO_PAQ2;
+  }
+  return len;
+}
+
+// v5.2-AP-BI: los pares de RMS pendientes (0xAA 0x58 | seq | n | n x (A0, A1) | checksum)
+int armarPares(uint8_t *p) {
+  int n = (int)(parEsc - parLei);
+  if (n <= 0) return 0;
+  p[0] = 0xAA; p[1] = 0x58; p[2] = (uint8_t)parLei; p[3] = (uint8_t)n;
+  uint8_t chk = p[2] ^ p[3];
+  for (int k = 0; k < n; k++) {
+    uint32_t j = (parLei + k) % N_PAR;
+    uint8_t *q = p + 4 + 4 * k;
+    q[0] = parA0[j] & 0xFF; q[1] = parA0[j] >> 8; q[2] = parA1[j] & 0xFF; q[3] = parA1[j] >> 8;
+    chk ^= q[0] ^ q[1] ^ q[2] ^ q[3];
+  }
+  p[4 + 4 * n] = chk;
+  parLei = parEsc;
+  return 4 + 4 * n + 1;
 }
 
 // Empieza a mandar desde "ahora" (sin la reserva vieja)
@@ -622,10 +701,13 @@ void atenderWifi() {
   bool pausada = pausaSenalHasta && (int32_t)(ahora - pausaSenalHasta) < 0;
   if (transmitiendo && hayHueco) {
     hayHueco = false;
-    if (!enviarSenal || pausada) sigWifi = inicioAlineado();   // no se manda: no se acumula
+    if (!enviarSenal || pausada) { sigWifi = inicioAlineado(); parLei = parEsc; }   // no se manda: no se acumula
     else {
       tEnvio = ahora;
       int len = armarPaquetes(sigWifi, bufWifi, MAX_PAQ_WIFI);
+      int nPaq = len / LARGO_PAQ;               // v5.2-AP-BI: el mismo tramo de A1 y los RMS, en el mismo envio
+      len += armarCanal2(sigWifi - (uint32_t)nPaq * N_PAQ, nPaq, bufWifi + len);
+      len += armarPares(bufWifi + len);
       if (len && mandarWifi(bufWifi, len) != (size_t)len) cerrarFlujo();   // el servidor se fue
     }
   }
