@@ -14,6 +14,11 @@
 //   - Estrellas a 600 / 1100 medios pasos/s (probadas con el eje de las estrellas).
 //   - En la pagina, "cabeza arriba" = tiempo en premio; los episodios siguen
 //     siendo los esfuerzos detectados, con su duracion real.
+//  v8.3-2C (DOS CANALES): lo UNICO que cambia es que reenvia a la pagina
+//   tambien la senal cruda del canal A1 del Arduino v5.3-AP-2C (paquetes
+//   0xAA 0x56). La calibracion, la deteccion, el premio sostenido, las
+//   estrellas, la luz y la musica son exactamente los del v8.3: siguen usando
+//   el RMS que llega por el opto (el Arduino manda ahi el promedio de A0 y A1).
 //  Lo de abajo describe el v8.2; donde no coincida, manda esta nota.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
@@ -297,7 +302,7 @@ const int  MAX_EQUIPOS_RED = 5;           // el Arduino + hasta 4 celulares o co
 const int  MAX_PAGINAS = 3;               // paginas abiertas a la vez (las mas viejas se cierran)
 const uint16_t PUERTO_ARDUINO = 9001;     // senal cruda del Arduino
 const uint16_t PUERTO_AVISO   = 9999;     // aviso UDP "aqui esta ASTRA" (el Arduino tambien tiene la IP fija)
-const char *VERSION_ATRIL = "8.3";
+const char *VERSION_ATRIL = "8.3-2C";
 
 // ======================================================================
 enum Modo { ARRANQUE, CALIBRANDO, SESION, PAUSA, PARO };
@@ -1660,10 +1665,12 @@ bool iniciarServidorWeb() {
   return true;
 }
 
-// ---------- Senal del Arduino: paquetes 0xAA 0x55 (datos) y 0xAA 0x57 (diagnostico) ----------
-static uint8_t pend[1024];          // bytes recibidos sin procesar
+// ---------- Senal del Arduino: paquetes 0xAA 0x55 (datos A0), 0xAA 0x56 (datos A1) y 0xAA 0x57 (diagnostico) ----------
+// v8.3-2C: el Arduino v5.3-AP-2C manda tambien el canal A1 (0x56, mismo formato). Se reenvia
+// a la pagina igual que el de A0; los motores siguen usando SOLO el RMS del opto.
+static uint8_t pend[2048];          // bytes recibidos sin procesar (v8.3-2C: el doble, dos canales)
 static int npend = 0;
-static uint8_t emgOut[1400];        // paquetes validos para la pagina
+static uint8_t emgOut[2800];        // paquetes validos para la pagina (v8.3-2C: el doble)
 static int nEmgOut = 0;
 static int ultimoSeq = -1;
 
@@ -1671,18 +1678,21 @@ void procesarArduino() {
   int i = 0;
   while (i + 4 <= npend) {
     if (pend[i] != 0xAA) { i++; bytesMalos++; continue; }
-    if (pend[i + 1] == 0x55) {
+    if (pend[i + 1] == 0x55 || pend[i + 1] == 0x56) {   // v8.3-2C: 0x56 = canal A1
+      bool a0 = pend[i + 1] == 0x55;
       int n = pend[i + 3], largo = 4 + 2 * n + 1;
       if (n == 0 || n > 64) { i++; bytesMalos++; continue; }
       if (i + largo > npend) break;
       uint8_t chk = 0;
       for (int k = i + 2; k < i + largo - 1; k++) chk ^= pend[k];
       if (chk != pend[i + largo - 1]) { i++; bytesMalos++; continue; }
-      int seq = pend[i + 2];
-      if (ultimoSeq >= 0) perdidosArduino += (uint8_t)(seq - ultimoSeq - 1);
-      ultimoSeq = seq;
-      muestrasArduino += n; paquetesArduino++;
-      if (nEmgOut + largo > (int)sizeof emgOut) nEmgOut = 0;   // no deberia pasar: se manda cada 40 ms
+      if (a0) {                                  // la cuenta de muestras y perdidas sigue siendo la de A0
+        int seq = pend[i + 2];
+        if (ultimoSeq >= 0) perdidosArduino += (uint8_t)(seq - ultimoSeq - 1);
+        ultimoSeq = seq;
+        muestrasArduino += n; paquetesArduino++;
+      }
+      if (nEmgOut + largo > (int)sizeof emgOut) nEmgOut = 0;   // no deberia pasar: se manda cada 40 ms o al pasar de 2000
       memcpy(emgOut + nEmgOut, pend + i, largo);
       nEmgOut += largo;
       i += largo;
@@ -1761,7 +1771,7 @@ void tareaRed(void *) {
         if (quiero) ultimoSeq = -1;               // la senal vuelve a empezar: ese salto de numeracion no es perdida
       }
     }
-    if (nEmgOut && (ahora - tEmg >= 40 || nEmgOut > 1000)) {   // senal: tandas de ~40 ms
+    if (nEmgOut && (ahora - tEmg >= 40 || nEmgOut > 2000)) {   // senal: tandas de ~40 ms (v8.3-2C: dos canales)
       tEmg = ahora;
       mandar(HTTPD_WS_TYPE_BINARY, emgOut, nEmgOut, 8);
       nEmgOut = 0;

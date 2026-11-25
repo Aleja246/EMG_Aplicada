@@ -31,19 +31,22 @@
   /* ---------- estado ---------- */
   let S = E.Store.settings();
   let proc, quality, chart, progChart;
+  let proc2, quality2, chart2;        // canal 2 (A1): solo se dibuja; el atril recibe por el opto el promedio de A0 y A1
   let view = 'home', patient = null;
   let emg = null, emgConn = { status: 'disconnected', msg: '' };
   let atril = null, atrilConn = { status: 'disconnected', msg: '' };
   let link = null, srv = null, sim = null, st = null;
   let rec = null;        // sesión en curso
   let fin = null;        // sesión terminada, esperando que la guarden
-  const rx = { lastData: 0, samples: 0, lastCount: 0, lastT: performance.now(), fs: 0, apartadas: 0 };
+  const rx = { lastData: 0, samples: 0, lastCount: 0, lastT: performance.now(), fs: 0, apartadas: 0, lastData2: 0 };
   let senalVivo = true;               // Ajustes > Diagnóstico: apagar la señal en vivo para comparar el ruido
   let prevCrit = new Set();
 
   function rebuildDsp() {
     proc = new E.Processor(S);
     quality = new E.SignalQuality(S.adcMax);
+    proc2 = new E.Processor(S);
+    quality2 = new E.SignalQuality(S.adcMax);
   }
 
   /* ---------- navegación ---------- */
@@ -54,7 +57,7 @@
     if (name === 'home') renderHome();
     if (name === 'patients') renderPatients();
     if (name === 'patient') renderPatient();
-    if (name === 'live') chart.setWindow(S.winS);
+    if (name === 'live') { chart.setWindow(S.winS); chart2.setWindow(S.winS); }
   }
   function salirDeSesion(destino) {
     if (rec && !confirm('La terapia sigue en curso. ¿Salir sin guardarla? Se perderán los datos de esta sesión.')) return;
@@ -141,6 +144,16 @@
       chart.push(tx ? NaN : x, flag);
     }
   }
+  // Canal 2 (A1, Arduino v5.3-AP-2C): la misma cadena para dibujarlo, con su propia gráfica
+  function onSamples2(arr) {
+    rx.lastData2 = performance.now();
+    const flag = st && st.modo === 'SESION' ? (st.abajo ? 1 : 2) : 0;
+    for (let i = 0; i < arr.length; i++) {
+      const tx = arr[i] & 0x8000, raw = arr[i] & 0x3FFF, x = proc2.process(raw);
+      if (!tx) quality2.feed(raw, proc2.hpOut, x);
+      chart2.push(tx ? NaN : x, flag);
+    }
+  }
   // El atril (ESP32) sirve la página: la conexión en vivo va al mismo lugar de donde vino la página
   const servidorHost = () => (/^https?:$/.test(location.protocol) ? location.host : (S.servidor || '192.168.4.1'));
   let rtt = null;                     // retraso de ida y vuelta con el atril (ms)
@@ -157,6 +170,7 @@
     rebuildDsp();
     link = new E.ServidorLink(servidorHost(), {
       onSamples,
+      onSamples2,
       onEstado,
       onServidor,
       onRtt: v => { rtt = v; },
@@ -182,13 +196,18 @@
   function startSim() {
     disconnectAll();
     rebuildDsp();
-    const asim = new E.AtrilSim(), blk = new E.BlockRms(S);
+    const asim = new E.AtrilSim(), blk = new E.BlockRms(S), blk2 = new E.BlockRms(S);
     sim = { atril: asim };
     atril = new E.AtrilLink(asim, onEstado, onAtrilStatus);
-    emg = new E.SimSource(arr => {
-      onSamples(arr);
-      for (let i = 0; i < arr.length; i++) { const mv = blk.feed(arr[i]); if (mv !== null) asim.feedBlock(mv); }
-    }, onEmgStatus, () => asim.simCtx(), S.fs);
+    let ult1 = null;
+    // Como el Arduino de dos canales: al atril va el promedio del RMS de A0 y A1
+    emg = new E.SimSource(arr => { onSamples(arr); ult1 = arr; }, onEmgStatus, () => asim.simCtx(), S.fs, arr2 => {
+      onSamples2(arr2);
+      for (let i = 0; i < arr2.length && ult1 && i < ult1.length; i++) {
+        const mv = blk.feed(ult1[i]), mv2 = blk2.feed(arr2[i]);
+        if (mv !== null) asim.feedBlock(mv2 !== null ? Math.round((mv + mv2) / 2) : mv);
+      }
+    });
     emg.start();
     toast('Modo demostración: el equipo está simulado, sirve para practicar.');
   }
@@ -315,6 +334,9 @@
       ['Pausas de la señal por WiFi lento', [d && d.lentos != null ? String(d.lentos) : '—', d && d.lentos ? 'mal' : '']],
       ['Mayor espera entre datos al atril (10 s)', [d && d.opto ? d.opto + ' ms (normal: 100)' : '—', d && d.opto > 250 ? 'mal' : '']],
       ['Rango de la señal en A0', [d && d.max != null ? (d.min * 5 / 16383).toFixed(2) + ' a ' + (d.max * 5 / 16383).toFixed(2) + ' V' : '—', '']],
+      ['Rango de la señal en A1', [d && d.mx2 != null ? (d.mn2 * 5 / 16383).toFixed(2) + ' a ' + (d.mx2 * 5 / 16383).toFixed(2) + ' V' : '—', '']],
+      ['RMS del canal A1', [d && d.r2 != null ? f1(d.r2) + ' mV' : '—', '']],
+      ['Lo que recibe el atril', [d && d.c2 != null ? (d.c2 ? 'promedio de A0 y A1' : 'solo A0 (A1 desconectado o saturado)') : d ? 'solo A0 (Arduino de un canal)' : '—', d && d.c2 === 0 ? 'mal' : '']],
       ['Estado del atril', [st ? st.modo + (st.datos ? '' : ' · sin RMS del opto') : '—', st && !st.datos ? 'mal' : '']],
       ['RMS actual (opto)', [st ? st.rms + ' mV (mediana ' + f1(st.med) + ')' : '—', '']],
       ['Reposo de la calibración', [c && c.ok ? f1(c.reposo) + ' ± ' + f1(c.sd) + ' mV' : '—', c && c.inestable ? 'mal' : '']],
@@ -420,6 +442,7 @@
         else if (q.noisy60) A.noisy = ['warn', 'Hay mucha interferencia eléctrica. Separa los cables del cargador o de la corriente.'];
       }
     }
+    estadoCanales(now);
     const el = $('alarms'); el.innerHTML = '';
     const crit = new Set();
     Object.entries(A).forEach(([k, [lvl, msg]]) => {
@@ -429,6 +452,20 @@
     });
     for (const k of crit) if (!prevCrit.has(k)) { beep(); break; }
     prevCrit = crit;
+  }
+
+  // Estado de cada canal junto a su gráfica (solo informa; las alarmas no cambian)
+  function estadoCanales(now) {
+    const pon = (id, txt, mal) => { const e = $(id); e.textContent = txt; e.className = mal ? 'mal' : ''; };
+    const q2 = quality2.evaluate();
+    if (!(emgConn.status === 'connected' || sim)) { pon('lv-c1', ''); pon('lv-c2', ''); return; }
+    const d = srv && srv.arduino && srv.arduino.diag;
+    pon('lv-c1', now - rx.lastData < 2000 ? '' : '· sin señal', now - rx.lastData >= 2000);
+    if (!rx.lastData2 || now - rx.lastData2 > 2000) pon('lv-c2', '· sin señal (el sensor no manda el canal 2)', true);
+    else if (q2 && q2.saturated) pon('lv-c2', '· en el límite: electrodo o cable suelto', true);
+    else if (q2 && q2.flat) pon('lv-c2', '· plana: revisa los electrodos', true);
+    else if (d && d.c2 === 0) pon('lv-c2', '· el atril usa solo el canal 1', true);
+    else if (q2) pon('lv-c2', '');
   }
 
   /* ===================================================================
@@ -474,7 +511,7 @@
   // Zoom de la gráfica: Auto (×1) y de ×2 en ×2 (se recuerda en este celular)
   const ZOOMS = [0.25, 0.5, 1, 2, 4, 8, 16];
   function ponerZoom(z) {
-    chart.zoom = z; S.zoom = z; E.Store.saveSettings(S);
+    chart.zoom = z; if (chart2) chart2.zoom = z; S.zoom = z; E.Store.saveSettings(S);
     $('zoom-auto').textContent = z === 1 ? 'Auto' : '×' + (z >= 1 ? z : '1/' + (1 / z));
     $('zoom-auto').classList.toggle('on', z === 1);
   }
@@ -776,12 +813,13 @@
 
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
+  chart2 = new E.LiveChart($('live2'), S.fs);
   chart.zoom = [0.25, 0.5, 1, 2, 4, 8, 16].includes(S.zoom) ? S.zoom : 1;
   ponerZoom(chart.zoom);
   progChart = new E.ProgressChart($('prog'), $('prog-tip'));
   initMusica();
   rebuildDsp();
-  (function frame() { if (view === 'live') chart.draw(); requestAnimationFrame(frame); })();
+  (function frame() { if (view === 'live') { chart.draw(); chart2.draw(); } requestAnimationFrame(frame); })();
   let tick = 0;
   setInterval(() => {
     const now = performance.now();

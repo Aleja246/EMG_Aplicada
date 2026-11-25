@@ -3,6 +3,10 @@ Monitor sEMG cervical para Atlas2030 / ASTRA: interfaz web para fisioterapeutas.
 Pacientes identificados solo con un **ID** (sin nombre), terapia en vivo con la señal EMG, el tiempo con la cabeza
 caída y los episodios, y un **expediente por paciente** con resumen, progreso y descarga en **Excel**.
 
+## 🔀 Dos canales (rama de dos canales sobre `firmware-v8.3-premio-sostenido`)
+Arduino **v5.3-AP-2C** (A0 + A1) y atril **v8.3-2C**: funciona igual que v8.3 premio sostenido; el atril recibe el
+promedio de los dos lados y la página muestra cada canal en su propia gráfica. Guía: [`docs/DOS_CANALES.md`](docs/DOS_CANALES.md).
+
 ## ✨ Versión sin laptop (esta rama: `claude/astra-sin-laptop`)
 El **atril (ESP32) crea la red WiFi «ASTRA» y sirve la página** en **http://192.168.4.1**. El Arduino se une a esa
 red y el celular (Android o iPhone) también: no hace falta laptop, Node.js ni internet. Los pacientes y las sesiones

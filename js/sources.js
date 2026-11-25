@@ -1,6 +1,8 @@
 /* Fuentes de la señal EMG cruda del Arduino: WiFi (recomendado), USB (Web Serial) y simulador.
  * Protocolo (arduino_emg.ino, igual por WiFi y por USB), paquetes de 20 muestras:
  *   0xAA 0x55 | seq (1B) | n (1B) | n x uint16 little-endian | checksum (XOR de seq, n y payload)
+ * Dos canales (arduino_emg_ap.ino v5.3-AP-2C): el canal A1 llega con el mismo formato pero 0xAA 0x56
+ * (mismo seq que el paquete de A0 de esas muestras). Un Arduino de un canal no los manda.
  */
 (function () {
   'use strict';
@@ -21,14 +23,15 @@
 
   /* Separa los paquetes de un flujo de bytes (tolera bytes basura y cortes). */
   class PacketParser {
-    constructor(onSamples) { this.onSamples = onSamples; this.buf = new Uint8Array(0); this.reset(); }
-    reset() { this.lastSeq = -1; this.packets = 0; this.lost = 0; this.badBytes = 0; this.buf = new Uint8Array(0); }
+    constructor(onSamples, onSamples2) { this.onSamples = onSamples; this.onSamples2 = onSamples2; this.buf = new Uint8Array(0); this.reset(); }
+    reset() { this.lastSeq = -1; this.packets = 0; this.packets2 = 0; this.lost = 0; this.badBytes = 0; this.buf = new Uint8Array(0); }
     push(chunk) {
       const b = new Uint8Array(this.buf.length + chunk.length);
       b.set(this.buf); b.set(chunk, this.buf.length);
       let i = 0;
       while (i + 5 <= b.length) {
-        if (b[i] !== 0xAA || b[i + 1] !== 0x55) { i++; this.badBytes++; continue; }
+        if (b[i] !== 0xAA || (b[i + 1] !== 0x55 && b[i + 1] !== 0x56)) { i++; this.badBytes++; continue; }
+        const canal2 = b[i + 1] === 0x56;          // canal A1 (Arduino de dos canales)
         const n = b[i + 3];
         if (n === 0 || n > 64) { i++; this.badBytes++; continue; }
         const len = 4 + 2 * n + 1;
@@ -36,11 +39,17 @@
         let chk = 0;
         for (let k = i + 2; k < i + len - 1; k++) chk ^= b[k];
         if (chk !== b[i + len - 1]) { i++; this.badBytes++; continue; }
+        const s = new Uint16Array(n);
+        for (let k = 0; k < n; k++) s[k] = b[i + 4 + 2 * k] | (b[i + 5 + 2 * k] << 8);
+        if (canal2) {                               // las pérdidas se cuentan con el canal A0
+          this.packets2++;
+          if (this.onSamples2) this.onSamples2(s);
+          i += len;
+          continue;
+        }
         const seq = b[i + 2];
         if (this.lastSeq >= 0) this.lost += (seq - this.lastSeq - 1) & 255;
         this.lastSeq = seq;
-        const s = new Uint16Array(n);
-        for (let k = 0; k < n; k++) s[k] = b[i + 4 + 2 * k] | (b[i + 5 + 2 * k] << 8);
         this.packets++;
         this.onSamples(s);
         i += len;
@@ -97,8 +106,8 @@
 
   /* USB (Web Serial): arduino_emg.ino con USB_PARA_PAGINA = true. */
   class SerialSource {
-    constructor(onSamples, onStatus) {
-      this.onStatus = onStatus; this.parser = new PacketParser(onSamples);
+    constructor(onSamples, onStatus, onSamples2) {
+      this.onStatus = onStatus; this.parser = new PacketParser(onSamples, onSamples2);
       this.port = null; this.reader = null; this.kind = 'usb'; this.closing = false;
     }
     get lost() { return this.parser.lost; }
@@ -143,8 +152,9 @@
    * getCtx() dice qué está haciendo el atril simulado para que la señal "obedezca":
    *   { phase: 'rest' | 'passive' | 'active' | 'running', cueUp } */
   class SimSource {
-    constructor(onSamples, onStatus, getCtx, fs) {
+    constructor(onSamples, onStatus, getCtx, fs, onSamples2) {
       this.onSamples = onSamples; this.onStatus = onStatus; this.getCtx = getCtx; this.fs = fs || 1000;
+      this.onSamples2 = onSamples2;                 // canal A1 simulado (el mismo músculo del otro lado)
       this.kind = 'sim'; this.fault = null; this.timer = null; this.lost = 0;
       this.n = 0; this.last = 0; this.amp = 0; this.burst = 0; this.prevUp = false;
       this.autoUp = false; this.autoLeft = 3;
@@ -164,7 +174,7 @@
       if (k < 1) return;
       if (k > this.fs) { this.last = now - 1000; k = this.fs; }   // pestaña en segundo plano: no generar de golpe
       this.last += k * 1000 / this.fs;
-      const out = new Uint16Array(k), dt = 1 / this.fs;
+      const out = new Uint16Array(k), out2 = new Uint16Array(k), dt = 1 / this.fs;
       for (let i = 0; i < k; i++) {
         const ctx = this.getCtx() || {};
         const t = this.n++ / this.fs;
@@ -194,9 +204,16 @@
         else if (this.fault === 'flat') v = 8192;
         else if (this.fault === 'noise60') v += 2500 * Math.sin(2 * Math.PI * 60 * t);
         out[i] = Math.max(0, Math.min(16383, Math.round(v)));
+        // Canal A1: el mismo esfuerzo (algo más débil) con su propio ruido
+        let v2 = 8192 + 25 * Math.sin(2 * Math.PI * 0.17 * t) + 45 * this._randn() + 35 * Math.sin(2 * Math.PI * 60 * t);
+        v2 += this.amp * 900 * this._randn();
+        if (this.fault === 'disconnect') v2 = 16383 - Math.random() * 20;
+        else if (this.fault === 'flat') v2 = 8192;
+        out2[i] = Math.max(0, Math.min(16383, Math.round(v2)));
       }
       if (this.fault === 'nodata') return;
       this.onSamples(out);
+      if (this.onSamples2) this.onSamples2(out2);
     }
   }
 
