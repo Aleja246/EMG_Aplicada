@@ -9,14 +9,16 @@ La calibración, la detección, el premio sostenido de 8 s, las estrellas, la lu
 | Parte | Antes (1 canal) | Ahora (2 canales) |
 |---|---|---|
 | Arduino `arduino_emg_ap.ino` | v5.2-AP: mide A0 | **v5.3-AP-2C**: mide A0 y A1 con la misma cadena (centro, notch de 60…420 Hz, RMS de 100 ms) |
-| Lo que va al atril por el opto | SinArm de A0 (`"640\n"`) | **Promedio** del SinArm de A0 y A1, en el mismo formato y al mismo ritmo |
+| Lo que va al atril por el opto | SinArm de A0 (`"640\n"`) | **Igual: solo A0** (`OPTO_CANALES = 1`, por defecto), para que la detección sea la de premio-sostenido. Con `OPTO_CANALES = 2` va el promedio de A0 y A1 |
 | Atril `esp32_atril_ap.ino` | v8.3 | **v8.3-2C**: idéntico, solo reenvía también la señal cruda de A1 a la página |
 | Página | 1 gráfica | **2 gráficas**: Canal 1 · A0 y Canal 2 · A1, cada una con su señal y su línea de activación |
 | Serial Plotter | Bruto, Sin60, SinArm | lo mismo + Bruto_A1, Sin60_A1, SinArm_A1 y AlAtril (lo que recibe el atril) |
 
 Hay que subir **los dos** sketches y volver a cargar `data/` en el LittleFS del atril (la página cambió).
 
-## Por qué el promedio (la recomendación de la literatura)
+## Opción: el promedio (`OPTO_CANALES = 2`)
+
+Por defecto el atril recibe solo A0. El promedio solo conviene cuando los dos canales tienen la misma calidad de señal.
 
 - Levantar y sostener la cabeza es un movimiento **simétrico**: los extensores del cuello de los **dos lados**
   se activan a la vez. Lo recomendado es registrar el **mismo músculo en ambos lados** (canales homólogos).
@@ -48,10 +50,16 @@ Engineering, and Noninvasive Applications*, 2004.
   **solo A0** hasta que A1 esté bien 3 s seguidos. La página lo dice junto a la gráfica del canal 2 y en
   Ajustes → Diagnóstico ("Lo que recibe el atril"). Si esto pasa a media sesión, conviene **Recalibrar**.
 
-## Volver a un solo canal
+## Usar el promedio
 
-En `firmware/arduino_emg_ap/arduino_emg_ap.ino` cambia `OPTO_CANALES = 2` por `OPTO_CANALES = 1`: el atril
-recibe solo A0, exactamente como en v5.2-AP (la página sigue mostrando las dos señales).
+En `firmware/arduino_emg_ap/arduino_emg_ap.ino` cambia `OPTO_CANALES = 1` por `OPTO_CANALES = 2`. Con `1` (por defecto)
+el atril recibe solo A0, exactamente como en v5.2-AP (la página sigue mostrando las dos señales).
+
+## Música (microSD)
+
+Carpeta `/01`: `001.mp3`–`006.mp3` dinámicas (esfuerzo) y `007.mp3`–`012.mp3` reposo, en orden aleatorio sin repetir.
+Al encender, el atril pregunta cuántas canciones hay y se salta las que falten (lo dice en el monitor serie y en
+Ajustes → Diagnóstico).
 
 ## Para revisar en el Serial Plotter
 

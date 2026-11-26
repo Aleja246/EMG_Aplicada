@@ -9,14 +9,16 @@
        (centro, notch de 60 Hz y de 60...420 Hz, RMS de 100 ms, muestras
        apartadas por el WiFi).
      - Que va al atril por el opto (mismo formato "640\n", mismo ritmo):
-       OPTO_CANALES = 2 (recomendado) -> el PROMEDIO del SinArm de A0 y A1.
+       OPTO_CANALES = 1 (por defecto) -> solo A0, EXACTAMENTE como el v5.2-AP
+       de firmware-v8.3-premio-sostenido: la deteccion de la cabeza es la misma.
+       A1 se mide y se ve en la pagina y en el Serial Plotter.
+       OPTO_CANALES = 2 -> el PROMEDIO del SinArm de A0 y A1.
        Levantar la cabeza activa los extensores de los dos lados a la vez;
        promediar dos canales homologos baja el ruido que no comparten
        (electrodo, cable, movimiento de un lado) y hace que girar o inclinar
        la cabeza hacia un lado (que activa sobre todo un lado) dispare menos.
        El atril calibra igual (reposo, umbrales relativos), asi que la
        deteccion, el premio, la musica y la pagina funcionan igual.
-       OPTO_CANALES = 1 -> solo A0, exactamente como el v5.2-AP.
      - Proteccion: si A1 esta saturado o plano (electrodo suelto, cable
        desconectado) durante 1 s, el opto usa SOLO A0 hasta que A1 este bien
        3 s seguidos. Asi un canal malo no estropea la deteccion.
@@ -155,8 +157,10 @@
 // ------------------------- Parametros ajustables -----------------------
 const int   PIN_EMG  = A0;
 const int   PIN_EMG2 = A1;       // v5.3-2C: segundo canal (el mismo musculo del otro lado)
-// v5.3-2C: que va al atril por el opto. 2 = promedio de A0 y A1 (recomendado), 1 = solo A0 (como v5.2)
-const int   OPTO_CANALES = 2;
+// v5.3-2C: que va al atril por el opto.
+//   1 = solo A0, EXACTAMENTE lo mismo que v5.2-AP / firmware-v8.3-premio-sostenido (la deteccion que funciona)
+//   2 = promedio de A0 y A1 (solo si los dos canales tienen la misma calidad de senal)
+const int   OPTO_CANALES = 1;
 const int   BLOQUES_A1_MAL  = 10;  // A1 mal 1 s seguido   -> el opto usa solo A0
 const int   BLOQUES_A1_BIEN = 30;  // A1 bien 3 s seguidos -> A1 vuelve al promedio
 const float FS       = 1000.0f;   // Hz. Si cambia, los notch se recalculan solos (y cambia "Frecuencia" en la pagina)
@@ -587,11 +591,11 @@ void mandarDiagnostico() {
   float seg = (millis() - tInicioMuestreo) / 1000.0f;
   int n = snprintf(t, sizeof t, "{\"v\":\"%s\",\"adc\":%u,\"min\":%u,\"max\":%u,\"fs\":%.1f,\"rms\":%.0f,\"perdidos\":%lu"
                    ",\"sen\":%d,\"tx\":%lu,\"rTx\":%.1f,\"rOk\":%.1f,\"wMax\":%lu,\"lentos\":%lu,\"opto\":%lu"
-                   ",\"r2\":%.1f,\"mn2\":%u,\"mx2\":%u,\"c2\":%d}",
+                   ",\"r2\":%.1f,\"mn2\":%u,\"mx2\":%u,\"c2\":%d,\"oc\":%d}",
                    VERSION_EMG, ua, mn, mx, seg > 0 ? nCrudo / seg : 0.0f, (float)ultimoRmsMv, (unsigned long)bloquesPerdidos,
                    enviarSenal ? 1 : 0, (unsigned long)apartadasSeg, (float)rmsTxMv, (float)rmsLimpioMv,
                    (unsigned long)envioMax, (unsigned long)nLentos, (unsigned long)optoMax,
-                   (float)ultimoRms2Mv, mn2, mx2, usarA1 ? 1 : 0);
+                   (float)ultimoRms2Mv, mn2, mx2, usarA1 ? 1 : 0, OPTO_CANALES);
   envioMax = 0;
   if (millis() - tOptoMax > 10000) { tOptoMax = millis(); optoMax = 0; }   // la mayor espera de los ultimos ~10 s
   if (n <= 0 || n > 250) return;   // (v5.3-2C: unos 235 en el peor caso; el paquete admite 255)
