@@ -58,8 +58,7 @@ el atril recibe solo A0, exactamente como en v5.2-AP (la página sigue mostrando
 ## Música (microSD)
 
 Carpeta `/01`: `001.mp3`–`006.mp3` dinámicas (esfuerzo) y `007.mp3`–`012.mp3` reposo, en orden aleatorio sin repetir.
-Al encender, el atril pregunta cuántas canciones hay y se salta las que falten (lo dice en el monitor serie y en
-Ajustes → Diagnóstico).
+El manejo del DFPlayer es el mismo de v8.3 premio sostenido; deben estar las 12 canciones.
 
 ## Para revisar en el Serial Plotter
 

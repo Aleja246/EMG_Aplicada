@@ -24,10 +24,8 @@
 //   cancion distinta de su grupo, en orden aleatorio, y no se repite ninguna
 //   hasta que sonaron las 6 (luego se vuelven a barajar). La pagina ya no
 //   elige las canciones (solo el volumen).
-//   Al encender pregunta al DFPlayer cuantas canciones hay en /01 y se salta
-//   las que no existen (si la microSD solo tiene 001-006, en reposo suenan
-//   esas, en vez de quedarse callado). Si el DFPlayer contesta "no existe ese
-//   archivo", esa cancion se salta. Todo se avisa en el monitor serie.
+//   El manejo del DFPlayer (comandos, tiempos, fin de pista y aviso ADVERT) es
+//   EXACTAMENTE el del v8.3 premio sostenido; solo cambia que cancion se pide.
 //  Lo de abajo describe el v8.2; donde no coincida, manda esta nota.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
@@ -415,13 +413,9 @@ bool pistaTerminada = false;        // el DFPlayer aviso que termino la pista
 bool avisoSonando = false;          // esta sonando /ADVERT/0001.mp3
 unsigned long tAviso = 0, tUltimoFin = 0;
 uint8_t dfBuf[10];                  // respuesta del DFPlayer (10 bytes)
-uint16_t pistasFaltan = 0;          // v8.3-2C: bit k-1 = /01/00k.mp3 no esta en la microSD
-int pistasEnSd = -1;                // v8.3-2C: canciones en /01 segun el DFPlayer (-1 = aun no contesta)
-unsigned long dfConsultaEn = 0;     // v8.3-2C: cuando preguntar cuantas canciones hay
-unsigned long tPistaPedida = 0;     // v8.3-2C: cuando se pidio la ultima cancion
 int dfN = 0;
 unsigned long episodioCancion = 0;  // inicio del "cabeza abajo" que ya cambio la cancion
-unsigned long tMusicaLista = 2600;  // la musica arranca despues de mandar el volumen (y preguntar cuantas hay)
+unsigned long tMusicaLista = 2300;  // la musica arranca despues de mandar el volumen
 unsigned long ultimoCmdMusica = 0;
 unsigned long ultimaLuz = 0, ultimoEstado = 0;
 
@@ -579,43 +573,18 @@ void aplicarVolumen(int v) {
 // Toca una pista del grupo de REPOSO (abajo) o DINAMICAS (arriba), carpeta /01.
 // avanzar = true: la siguiente del orden aleatorio; false: la que tocaba (o la primera).
 // v8.3-2C: al terminar las 6 se vuelven a barajar.
-bool pistaFalta(int p) { return p >= 1 && p <= 16 && ((pistasFaltan >> (p - 1)) & 1); }
-bool grupoSinPistas(bool abajo) {
-  const int *pistas = abajo ? pistasAbajo : pistasArriba;
-  for (int k = 0; k < PISTAS_POR_LISTA; k++) if (!pistaFalta(pistas[k])) return false;
-  return true;
-}
-
 void tocarLista(bool abajo, bool avanzar) {
-  listaAbajoSonando = abajo;
-  // v8.3-2C: si a ese grupo le faltan todas sus canciones en la microSD, se usa el otro grupo
-  bool grupo = abajo;
-  if (grupoSinPistas(grupo)) grupo = !grupo;
-  if (grupoSinPistas(grupo)) {                     // no hay ninguna cancion: reintenta en 10 s
-    Log.println("!! El DFPlayer no tiene canciones en /01 (revisa la microSD). Reintento en 10 s.");
-    pistasFaltan = 0; pistasEnSd = -1;
-    dfConsultaEn = millis() + 9500;
-    tMusicaLista = millis() + 10000;
-    musicaSonando = false;
-    ultimoCmdMusica = millis();
-    return;
-  }
-  int &idx = grupo ? idxAbajo : idxArriba;
-  int *orden = grupo ? ordenAbajo : ordenArriba;
-  if (grupo != abajo) avanzar = true;
-  for (int intento = 0; intento < 2 * PISTAS_POR_LISTA; intento++) {
-    if (avanzar || idx < 0) {
-      idx++;
-      if (idx >= PISTAS_POR_LISTA) {
-        barajar(orden, grupo ? pistasAbajo : pistasArriba, orden[PISTAS_POR_LISTA - 1]);
-        idx = 0;
-      }
+  int &idx = abajo ? idxAbajo : idxArriba;
+  int *orden = abajo ? ordenAbajo : ordenArriba;
+  if (avanzar || idx < 0) {
+    idx++;
+    if (idx >= PISTAS_POR_LISTA) {                 // ya sonaron las 6: se vuelven a barajar
+      barajar(orden, abajo ? pistasAbajo : pistasArriba, orden[PISTAS_POR_LISTA - 1]);
+      idx = 0;
     }
-    if (!pistaFalta(orden[idx])) break;
-    avanzar = true;                                // esa no esta en la microSD: la siguiente
   }
   cancion = orden[idx];
-  tPistaPedida = millis();
+  listaAbajoSonando = abajo;
   dfEnviar(0x0F, (CARPETA_MUSICA << 8) | cancion);   // carpeta + archivo
   musicaSonando = true;
   pistaTerminada = false;
@@ -632,38 +601,7 @@ void leerDFPlayer() {
     dfBuf[dfN++] = b;
     if (dfN < 10) continue;
     dfN = 0;
-    if (dfBuf[9] != 0xEF) continue;
-    uint8_t cmd = dfBuf[3];
-    uint16_t par = ((uint16_t)dfBuf[5] << 8) | dfBuf[6];
-    if (cmd == 0x4E) {                             // v8.3-2C: cuantas canciones hay en /01
-      pistasEnSd = par;
-      pistasFaltan = 0;
-      for (int k = par + 1; k <= 16; k++) pistasFaltan |= (uint16_t)1 << (k - 1);
-      Log.printf(">> microSD: /01 tiene %d canciones (se usan 001-006 dinamicas y 007-012 reposo)\n", par);
-      if (par < 12) Log.println("!! Faltan canciones: las que no esten se saltan (si no hay de reposo, suenan las dinamicas).");
-      continue;
-    }
-    if (cmd == 0x40) {                             // v8.3-2C: error del DFPlayer
-      if ((par == 0x05 || par == 0x06) && avisoSonando) {
-        avisoSonando = false;
-        Log.println("!! No esta /ADVERT/0001.mp3 en la microSD (el aviso no suena).");
-      } else if ((par == 0x05 || par == 0x06) && millis() - tPistaPedida < 2000 && cancion >= 1 && cancion <= 16) {
-        pistasFaltan |= (uint16_t)1 << (cancion - 1);
-        Log.printf("!! No esta /%02d/%03d.mp3 en la microSD: se salta.\n", CARPETA_MUSICA, cancion);
-        pistaTerminada = true;                     // pasa a la siguiente
-      } else if (par == 0x07 || par == 0x08) {
-        Log.println("!! El DFPlayer no puede leer la microSD (revisa que este puesta y en FAT32).");
-      }
-      continue;
-    }
-    if (cmd == 0x3A) {                             // v8.3-2C: metieron la microSD: empezar de nuevo
-      Log.println(">> microSD puesta en el DFPlayer.");
-      pistasFaltan = 0; pistasEnSd = -1; musicaSonando = false;
-      dfConsultaEn = millis() + 1500; tMusicaLista = millis() + 2000;
-      continue;
-    }
-    if (cmd == 0x3B) { Log.println("!! Sacaron la microSD del DFPlayer."); continue; }
-    if (cmd != 0x3D) continue;
+    if (dfBuf[9] != 0xEF || dfBuf[3] != 0x3D) continue;
     unsigned long ahora = millis();
     if (ahora - tUltimoFin < 1000) continue;       // el DFPlayer suele mandar el aviso 2 veces
     tUltimoFin = ahora;
@@ -791,8 +729,7 @@ void iniciarArranque() {
   estrellas.setSpeed(SENTIDO_INICIAL * V_HOMING_E);
   velE = 0;
   dfVolumenEn = millis() + 2000;     // el DFPlayer pudo reiniciarse (paro): reenvia el volumen
-  dfConsultaEn = millis() + 2200;    // v8.3-2C: pregunta cuantas canciones hay en /01
-  tMusicaLista = millis() + 2600;    // y despues vuelve a poner la musica
+  tMusicaLista = millis() + 2300;    // y despues vuelve a poner la musica
   musicaSonando = false;
   Log.println();
   Log.println(">> Buscando el tope de las estrellas (presiona el microswitch si no hay mecanismo).");
@@ -1158,10 +1095,6 @@ void actualizarModo() {
   }
 
   // Reenvio del volumen (el DFPlayer pierde la configuracion si se queda sin energia)
-  if (dfConsultaEn && (long)(ahora - dfConsultaEn) >= 0) {   // v8.3-2C: cuantas canciones hay en /01
-    dfConsultaEn = 0;
-    dfEnviar(0x4E, CARPETA_MUSICA);
-  }
   if (dfVolumenEn && (long)(ahora - dfVolumenEn) >= 0) {
     dfVolumenEn = 0;
     dfEnviar(0x06, volumen);
@@ -1392,10 +1325,9 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":0",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
      lineasMalas);
-  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d,%d,%d,%d],\"arriba\":[%d,%d,%d,%d,%d,%d],\"aleatoria\":1,\"enSd\":%d,\"faltan\":%u,\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d,\"vol\":%d}",
+  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d,%d,%d,%d],\"arriba\":[%d,%d,%d,%d,%d,%d],\"aleatoria\":1,\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d,\"vol\":%d}",
      CARPETA_MUSICA, pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasAbajo[3], pistasAbajo[4], pistasAbajo[5],
      pistasArriba[0], pistasArriba[1], pistasArriba[2], pistasArriba[3], pistasArriba[4], pistasArriba[5],
-     pistasEnSd, (unsigned)pistasFaltan,
      musicaSonando ? 1 : 0, listaAbajoSonando ? "abajo" : "arriba", cancion, avisoSonando ? 1 : 0, PISTA_AVISO, volumen);
   ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
   for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%.1f,%d]" : "[%ld,%.1f,%d]", (long)br[i], bm[i], bf[i]);

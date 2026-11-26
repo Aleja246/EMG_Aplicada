@@ -275,9 +275,7 @@
     if (document.activeElement !== $('aj-sens')) $('aj-sens').value = String(sens);
     $('aj-sens').disabled = !(equipoListo() || sim);
     $('mus-estado').textContent = on
-      ? (m.enSd >= 0 && m.enSd < 12
-        ? 'La microSD tiene ' + m.enSd + ' canciones en /01 y se necesitan 12 (001-006 dinámicas, 007-012 reposo). Las que faltan se saltan.'
-        : 'Las canciones cambian solas y al azar: 6 dinámicas durante el esfuerzo y 6 tranquilas en reposo, sin repetir hasta que suenan todas.')
+      ? 'Las canciones cambian solas y al azar: 6 dinámicas durante el esfuerzo y 6 tranquilas en reposo, sin repetir hasta que suenan todas.'
       : 'El atril no está encendido: el volumen se mandará en cuanto lo esté.';
     const ed = E.Store.estado;
     $('datos-estado').textContent = ed.modo === 'indexeddb'
@@ -309,7 +307,6 @@
       ['Rango de la señal en A1', [d && d.mx2 != null ? (d.mn2 * 5 / 16383).toFixed(2) + ' a ' + (d.mx2 * 5 / 16383).toFixed(2) + ' V' : '—', '']],
       ['RMS del canal A1', [d && d.r2 != null ? f1(d.r2) + ' mV' : '—', '']],
       ['Lo que recibe el atril', [d && d.oc === 1 ? 'solo A0 (como v8.3 premio sostenido)' : d && d.c2 != null ? (d.c2 ? 'promedio de A0 y A1' : 'solo A0 (A1 desconectado o saturado)') : d ? 'solo A0 (Arduino de un canal)' : '—', d && d.oc !== 1 && d.c2 === 0 ? 'mal' : '']],
-      ['Canciones en la microSD (/01)', [st && st.musica && st.musica.enSd >= 0 ? st.musica.enSd + ' (se usan 12: 001-006 dinámicas, 007-012 reposo)' : '—', st && st.musica && st.musica.enSd >= 0 && st.musica.enSd < 12 ? 'mal' : '']],
       ['Estado del atril', [st ? st.modo + (st.datos ? '' : ' · sin RMS del opto') : '—', st && !st.datos ? 'mal' : '']],
       ['RMS actual (opto)', [st ? st.rms + ' mV (mediana ' + f1(st.med) + ')' : '—', '']],
       ['Reposo de la calibración', [c && c.ok ? f1(c.reposo) + ' ± ' + f1(c.sd) + ' mV' : '—', c && c.inestable ? 'mal' : '']],
