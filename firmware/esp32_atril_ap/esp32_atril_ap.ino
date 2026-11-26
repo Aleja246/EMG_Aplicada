@@ -26,6 +26,12 @@
 //   elige las canciones (solo el volumen).
 //   El manejo del DFPlayer (comandos, tiempos, fin de pista y aviso ADVERT) es
 //   EXACTAMENTE el del v8.3 premio sostenido; solo cambia que cancion se pide.
+//  v8.3-2C AJUSTES DE LA PAGINA:
+//   - ESFUERZO MANUAL: un switch de la pagina deja el sistema en el modo de
+//     esfuerzo (premio: luz, musica dinamica y estrellas lentas) mientras este
+//     encendido, aunque no haya contraccion. Al apagarlo vuelve a lo normal.
+//   - CANCIONES: por cada grupo la pagina elige "aleatorio" (asi arranca
+//     siempre) o una cancion fija (esfuerzo 001-006, reposo 007-012).
 //  Lo de abajo describe el v8.2; donde no coincida, manda esta nota.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
@@ -327,6 +333,7 @@ bool abajoEsActividad = ABAJO_ES_ACTIVIDAD;
 unsigned long tCambioCabeza = 0;     // cuando cambio por ultima vez arriba <-> abajo
 bool abajoAntes = false;
 bool hayEsfuerzo = false;            // v8.3: ya hubo al menos un esfuerzo en esta sesion
+volatile bool esfuerzoManual = false; // v8.3-2C: switch de la pagina: modo esfuerzo sostenido a mano
 unsigned long tUltimoEsfuerzo = 0;   // v8.3: cuando se detecto el ultimo esfuerzo
 bool esfuerzoAntes = false;          // v8.3: para notar el cambio premio <-> reposo
 bool cambiarCancion = false;         // la cabeza acaba de SUBIR: falta tocar el aviso ADVERT
@@ -408,6 +415,7 @@ int pistasAbajo[PISTAS_POR_LISTA]  = {7, 8, 9, 10, 11, 12};   // REPOSO:    /01/
 int pistasArriba[PISTAS_POR_LISTA] = {1, 2, 3, 4, 5, 6};      // DINAMICAS: /01/001 ... 006
 int ordenAbajo[PISTAS_POR_LISTA], ordenArriba[PISTAS_POR_LISTA];   // orden barajado de cada grupo
 int idxAbajo = -1, idxArriba = -1;  // posicion en cada orden (-1 = aun no suena)
+int fijaAbajo = 0, fijaArriba = 0;  // v8.3-2C: cancion fija elegida en la pagina (0 = aleatorio, al encender)
 bool listaAbajoSonando = false;     // que lista esta sonando
 bool pistaTerminada = false;        // el DFPlayer aviso que termino la pista
 bool avisoSonando = false;          // esta sonando /ADVERT/0001.mp3
@@ -503,6 +511,7 @@ bool datosOK() {
 // CABEZA ABAJO segun el estado del EMG (ver ABAJO_ES_ACTIVIDAD)
 // v8.3: el esfuerzo sigue vigente T_PREMIO_SOSTENIDO_MS despues de cada deteccion
 bool enEsfuerzo() {
+  if (esfuerzoManual && modo == SESION) return true;   // v8.3-2C: modo manual de la pagina
   return activo || (hayEsfuerzo && millis() - tUltimoEsfuerzo < T_PREMIO_SOSTENIDO_MS);
 }
 bool cabezaAbajo() { return abajoEsActividad ? enEsfuerzo() : !enEsfuerzo(); }
@@ -556,8 +565,19 @@ void cargarListas() {
   barajar(ordenArriba, pistasArriba, 0);
 }
 
-// v8.3-2C: la pagina ya no elige las canciones; un pedido viejo se ignora
-void aplicarMusica(const PedidoMusica &) {}
+// v8.3-2C: la pagina elige por grupo "aleatorio" (p = 0) o una cancion fija de ese grupo.
+// No se guarda: al encender siempre empieza aleatorio. Si ese grupo es el que suena, cambia ya.
+void aplicarMusica(const PedidoMusica &m) {
+  int p = m.p[0];
+  const int *pistas = m.abajo ? pistasAbajo : pistasArriba;
+  bool valida = p == 0;
+  for (int k = 0; k < PISTAS_POR_LISTA; k++) if (pistas[k] == p) valida = true;
+  if (!valida) return;
+  (m.abajo ? fijaAbajo : fijaArriba) = p;
+  if (p) Log.printf(">> Musica de %s: cancion fija /%02d/%03d.mp3\n", m.abajo ? "reposo" : "esfuerzo", CARPETA_MUSICA, p);
+  else   Log.printf(">> Musica de %s: aleatoria\n", m.abajo ? "reposo" : "esfuerzo");
+  if (musicaSonando && (bool)m.abajo == listaAbajoSonando) reiniciarLista = true;
+}
 
 // Volumen pedido por la pagina (0 a 30): se aplica ya y se guarda
 void aplicarVolumen(int v) {
@@ -584,6 +604,8 @@ void tocarLista(bool abajo, bool avanzar) {
     }
   }
   cancion = orden[idx];
+  int fija = abajo ? fijaAbajo : fijaArriba;          // v8.3-2C: cancion fija elegida en la pagina
+  if (fija) cancion = fija;
   listaAbajoSonando = abajo;
   dfEnviar(0x0F, (CARPETA_MUSICA << 8) | cancion);   // carpeta + archivo
   musicaSonando = true;
@@ -1322,12 +1344,14 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
   ja(",\"k\":%.1f,\"margen\":%.1f,\"rel\":%.2f,\"sens\":%d,\"koff\":%.2f,\"uon\":%.1f,\"uoff\":%.1f,\"pocos\":%d,\"inestable\":%d}",
      umbralK, MARGEN_MIN_MV, margenRel, sensibilidad, UMBRAL_OFF_FACTOR, umbralOn, umbralOff, calPocos ? 1 : 0, calInestable ? 1 : 0);
   ja(",\"uAhora\":%.1f,\"uSuelta\":%.1f,\"arriba\":%.1f", (float)uAhoraPub, (float)uSueltaPub, (float)arribaPub);   // v8.2
+  ja(",\"manual\":%d", esfuerzoManual ? 1 : 0);   // v8.3-2C
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":0",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
      lineasMalas);
-  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d,%d,%d,%d],\"arriba\":[%d,%d,%d,%d,%d,%d],\"aleatoria\":1,\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d,\"vol\":%d}",
+  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d,%d,%d,%d],\"arriba\":[%d,%d,%d,%d,%d,%d],\"aleatoria\":1,\"fijaAbajo\":%d,\"fijaArriba\":%d,\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d,\"vol\":%d}",
      CARPETA_MUSICA, pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasAbajo[3], pistasAbajo[4], pistasAbajo[5],
      pistasArriba[0], pistasArriba[1], pistasArriba[2], pistasArriba[3], pistasArriba[4], pistasArriba[5],
+     fijaAbajo, fijaArriba,
      musicaSonando ? 1 : 0, listaAbajoSonando ? "abajo" : "arriba", cancion, avisoSonando ? 1 : 0, PISTA_AVISO, volumen);
   ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
   for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%.1f,%d]" : "[%ld,%.1f,%d]", (long)br[i], bm[i], bf[i]);
@@ -1347,7 +1371,7 @@ void lineaDelServidor(const char *l) {
   } else if (l[0] == 'M' && l[1] == ' ') {
     char lista[8]; int a = 0, b = 0, c = 0;
     if (sscanf(l + 2, "%7s %d,%d,%d", lista, &a, &b, &c) == 4 && (!strcmp(lista, "abajo") || !strcmp(lista, "arriba")) &&
-        a >= 1 && a <= 255 && b >= 1 && b <= 255 && c >= 1 && c <= 255) {
+        a >= 0 && a <= 255 && b >= 0 && b <= 255 && c >= 0 && c <= 255) {   // v8.3-2C: 0 = aleatorio
       PedidoMusica m = {(uint8_t)(!strcmp(lista, "abajo") ? 1 : 0), {(uint8_t)a, (uint8_t)b, (uint8_t)c}};
       if (colaMusica) xQueueSend(colaMusica, &m, 0);
     }
@@ -1558,6 +1582,10 @@ void mensajeDePagina(httpd_req_t *req, const char *m) {
     const char *v = valorDe(m, "on");
     if (!v) return;
     senalPedida = !strncmp(v, "true", 4) || *v == '1';
+  } else if (!strcmp(tipo, "manual")) {            // v8.3-2C: switch de esfuerzo manual
+    const char *v = valorDe(m, "on");
+    if (!v) return;
+    esfuerzoManual = !strncmp(v, "true", 4) || *v == '1';
   } else if (!strcmp(tipo, "volumen")) {
     const char *v = valorDe(m, "v");
     if (!v || *v < '0' || *v > '9') return;

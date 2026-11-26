@@ -137,10 +137,12 @@
   function onSamples(arr) {
     rx.lastData = performance.now(); rx.samples += arr.length;
     const flag = st && st.modo === 'SESION' ? (st.abajo ? 1 : 2) : 0;
+    const enLado = !!(rec && st && st.modo === 'SESION');
     for (let i = 0; i < arr.length; i++) {
       const tx = arr[i] & 0x8000, raw = arr[i] & 0x3FFF, x = proc.process(raw);
       if (tx) rx.apartadas++;
       else quality.feed(raw, proc.hpOut, x);
+      if (!tx && enLado) { rec.e0 += x * x; rec.n0++; }      // A0 = lado izquierdo
       chart.push(tx ? NaN : x, flag);
     }
   }
@@ -148,9 +150,11 @@
   function onSamples2(arr) {
     rx.lastData2 = performance.now();
     const flag = st && st.modo === 'SESION' ? (st.abajo ? 1 : 2) : 0;
+    const enLado = !!(rec && st && st.modo === 'SESION');
     for (let i = 0; i < arr.length; i++) {
       const tx = arr[i] & 0x8000, raw = arr[i] & 0x3FFF, x = proc2.process(raw);
       if (!tx) quality2.feed(raw, proc2.hpOut, x);
+      if (!tx && enLado) { rec.e1 += x * x; rec.n1++; }      // A1 = lado derecho
       chart2.push(tx ? NaN : x, flag);
     }
   }
@@ -249,10 +253,25 @@
   }
 
   /* ---------- música y volumen (lo único técnico que ve el fisio) ---------- */
-  // Las canciones las elige el atril al azar: 001-006 dinámicas (esfuerzo) y 007-012 de reposo.
-  // Desde aquí solo se ajusta el volumen.
+  // Canciones: esfuerzo 001-006 y reposo 007-012. Por grupo: "Aleatorio" (así arranca siempre el atril)
+  // o una canción fija. La elección vive en el atril (al encenderlo vuelve a aleatorio).
+  const MUS_OPC = {
+    arriba: [[0, 'Aleatorio']].concat([1, 2, 3, 4, 5, 6].map((t, i) => [t, 'Canción ' + (i + 1)])),
+    abajo: [[0, 'Aleatorio']].concat([7, 8, 9, 10, 11, 12].map((t, i) => [t, 'Canción ' + (i + 1)]))
+  };
   const musEnviado = {};
   function initMusica() {
+    for (const l of ['abajo', 'arriba']) {
+      const sel = $('mus-' + l);
+      sel.innerHTML = MUS_OPC[l].map(() => '<option></option>').join('');
+      sel.querySelectorAll('option').forEach((o, i) => { o.value = String(MUS_OPC[l][i][0]); o.textContent = MUS_OPC[l][i][1]; });
+      sel.addEventListener('change', () => {
+        const t = +sel.value, nombre = l === 'abajo' ? 'reposo' : 'esfuerzo';
+        if (!equipoListo() && !sim) { toast('El atril no está encendido.'); return; }
+        musEnviado[l] = performance.now();
+        atril.musica(l, [t, t, t]).then(ok => toast(ok ? 'Música de ' + nombre + ': ' + (t ? sel.selectedOptions[0].textContent : 'aleatoria') + '.' : 'El atril no recibió la música.'));
+      });
+    }
     const v = $('vol');
     v.addEventListener('input', () => { $('vol-val').textContent = v.value; });
     v.addEventListener('change', () => {
@@ -268,6 +287,11 @@
   }
   function renderAjustes() {
     const m = st && st.musica, on = !!m && equipoListo();
+    for (const l of ['abajo', 'arriba']) {
+      const sel = $('mus-' + l), f = m ? m[l === 'abajo' ? 'fijaAbajo' : 'fijaArriba'] : undefined;
+      if (document.activeElement !== sel && f !== undefined && performance.now() - (musEnviado[l] || 0) > 1500) sel.value = String(f);
+      sel.disabled = !(on || sim);
+    }
     const vol = S.volumen !== undefined ? S.volumen : (m && m.vol !== undefined ? m.vol : 15);
     if (document.activeElement !== $('vol')) $('vol').value = vol;
     $('vol-val').textContent = vol;
@@ -275,7 +299,7 @@
     if (document.activeElement !== $('aj-sens')) $('aj-sens').value = String(sens);
     $('aj-sens').disabled = !(equipoListo() || sim);
     $('mus-estado').textContent = on
-      ? 'Las canciones cambian solas y al azar: 6 dinámicas durante el esfuerzo y 6 tranquilas en reposo, sin repetir hasta que suenan todas.'
+      ? 'Esfuerzo: canciones 001-006 · Reposo: 007-012. En "Aleatorio" cambian solas sin repetir hasta que suenan todas; también puedes fijar una.'
       : 'El atril no está encendido: el volumen se mandará en cuanto lo esté.';
     const ed = E.Store.estado;
     $('datos-estado').textContent = ed.modo === 'indexeddb'
@@ -342,7 +366,7 @@
   function startRecording(s) {
     rec = {
       start: new Date().toISOString(), key: keyOf(s), t0: s.tSes, base: 0, last: s.tSes, minId: s.nAct,
-      abajoS: 0, caidas: 0, maxAbajoS: 0, curAbajoS: 0, eraAbajo: false,
+      abajoS: 0, caidas: 0, maxAbajoS: 0, curAbajoS: 0, eraAbajo: false, e0: 0, n0: 0, e1: 0, n1: 0,
       acts: [], seen: new Set(), rms: [], umbral: s.cal.uon, cal: fotoCal(s), recal: 0, pausaS: 0
     };
     toast('La terapia empezó: ASTRA ya está midiendo.');
@@ -478,6 +502,17 @@
    * Terapia en curso
    * =================================================================== */
   $('lv-pausa').addEventListener('click', () => sendCmd('p'));
+  // Esfuerzo manual: el atril se queda en modo de esfuerzo mientras el switch esté encendido
+  $('sw-manual').addEventListener('change', e => {
+    const on = e.target.checked;
+    if (!atril || !atril.manual || !(equipoListo() || sim)) { e.target.checked = !on; toast('El atril no responde. Revisa que esté encendido.'); return; }
+    atril.manual(on).then(ok => toast(ok ? (on ? 'Esfuerzo manual encendido: el atril se queda en modo de esfuerzo.' : 'Esfuerzo manual apagado.') : 'El atril no recibió la orden.'));
+  });
+  // Solo línea amarilla: oculta la onda verde de las dos gráficas (se recuerda en este celular)
+  $('sw-solo-rms').addEventListener('change', e => {
+    S.soloRms = e.target.checked; E.Store.saveSettings(S);
+    chart.soloRms = chart2.soloRms = S.soloRms;
+  });
   // Zoom de la gráfica: Auto (×1) y de ×2 en ×2 (se recuerda en este celular)
   const ZOOMS = [0.25, 0.5, 1, 2, 4, 8, 16];
   function ponerZoom(z) {
@@ -498,6 +533,7 @@
     const senal = rec.rms; rec = null;
     fin.senal = senal;
     if (st && st.modo === 'SESION') sendCmd('p');
+    if (st && st.manual && atril && atril.manual) atril.manual(false);   // el esfuerzo manual no sigue después de la terapia
     renderEnd(); show('end');
   });
 
@@ -529,9 +565,11 @@
 
     const abajo = !!(st && st.modo === 'SESION' && st.abajo);
     const post = $('lv-postura');
-    post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo ? 'abajo' : 'arriba') : '');
-    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'Esfuerzo' : 'Reposo')
+    const manualOn = !!(st && st.modo === 'SESION' && st.manual);
+    post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo || manualOn ? 'abajo' : 'arriba') : '');
+    post.textContent = manualOn ? 'Esfuerzo (manual)' : st && st.modo === 'SESION' ? (abajo ? 'Esfuerzo' : 'Reposo')
       : st && st.modo === 'PAUSA' ? 'En pausa' : '—';
+    if (document.activeElement !== $('sw-manual') && st) $('sw-manual').checked = !!st.manual;
     $('lv-tiempo').textContent = clock(recTime());
     $('lv-caidas').textContent = rec ? rec.caidas : 0;
     const cal = st && st.cal && st.cal.ok;
@@ -550,6 +588,7 @@
       duracionS: t, umbralMV: rec.umbral, calibracion: rec.cal, recalibraciones: rec.recal, observaciones: '',
       resumen: {
         tiempoArribaS: arriba, tiempoAbajoS: abajo, caidas: rec.caidas, caidaMasLargaS: rec.maxAbajoS,
+        rmsIzqMV: rec.n0 ? Math.sqrt(rec.e0 / rec.n0) : null, rmsDerMV: rec.n1 ? Math.sqrt(rec.e1 / rec.n1) : null,
         pctArriba: t > 0 ? 100 * arriba / t : null, caidasMin: t > 0 ? rec.caidas / (t / 60) : null,
         duracionMin: t / 60
       },
@@ -563,9 +602,15 @@
       ['Tiempo con la cabeza erguida', clock(u.tiempoArribaS) + (u.pctArriba != null ? ' · ' + pct(u.pctArriba) : '')],
       ['Tiempo con la cabeza caída', clock(u.tiempoAbajoS)],
       ['Caídas de cabeza', String(u.caidas != null ? u.caidas : '—')],
-      ['Caída más larga', f1(u.caidaMasLargaS) + ' s'],
+      ['Lado más activo', ladoActivo(u)],
       ['Umbral de activación', f1(r.umbralMV) + ' mV']
     ];
+  }
+  // Lado más activo según el Arduino: A0 = izquierdo, A1 = derecho (actividad media de cada canal en la sesión)
+  function ladoActivo(u) {
+    const i = u.rmsIzqMV, d = u.rmsDerMV;
+    if (!(i > 0) || !(d > 0)) return '—';
+    return (i >= d ? 'Izquierdo' : 'Derecho') + ' · izq. ' + f1(i) + ' / der. ' + f1(d) + ' mV';
   }
   function pintarKpis(el, items) {
     el.innerHTML = items.map(() => '<div class="kpi"><span></span><b></b></div>').join('');
@@ -709,11 +754,11 @@
   function hojaSesion(r) {
     const u = res(r);
     return [['Fecha', fmtDateTime(r.fecha)], ['Fisioterapeuta responsable', r.fisio || ''],
-      ['Duración de la terapia', clock(r.duracionS)], ['Duración (minutos)', +(r.duracionS / 60).toFixed(2)],
+      ['Duración de la terapia', clock(r.duracionS)],
       ['Umbral de activación (mV)', r.umbralMV != null ? +(+r.umbralMV).toFixed(2) : ''],
-      ['Tiempo con la cabeza erguida', clock(u.tiempoArribaS)], ['Tiempo cabeza erguida (s)', u.tiempoArribaS != null ? +u.tiempoArribaS.toFixed(1) : ''],
+      ['Tiempo con la cabeza erguida', clock(u.tiempoArribaS)],
       ['% del tiempo con la cabeza erguida', u.pctArriba != null ? +u.pctArriba.toFixed(1) : ''],
-      ['Tiempo con la cabeza caída', clock(u.tiempoAbajoS)], ['Tiempo cabeza caída (s)', u.tiempoAbajoS != null ? +u.tiempoAbajoS.toFixed(1) : ''],
+      ['Tiempo con la cabeza caída', clock(u.tiempoAbajoS)],
       ['Número de caídas de cabeza', u.caidas != null ? u.caidas : ''], ['Caída más larga (s)', u.caidaMasLargaS != null ? +u.caidaMasLargaS.toFixed(1) : ''],
       ['Caídas por minuto', u.caidasMin != null ? +u.caidasMin.toFixed(2) : ''],
       ['Veces que se volvió a calibrar', r.recalibraciones || 0],
@@ -783,6 +828,8 @@
   /* ---------- arranque ---------- */
   chart = new E.LiveChart($('live'), S.fs);
   chart2 = new E.LiveChart($('live2'), S.fs);
+  chart.soloRms = chart2.soloRms = !!S.soloRms;
+  $('sw-solo-rms').checked = !!S.soloRms;
   chart.zoom = [0.25, 0.5, 1, 2, 4, 8, 16].includes(S.zoom) ? S.zoom : 1;
   ponerZoom(chart.zoom);
   progChart = new E.ProgressChart($('prog'), $('prog-tip'));

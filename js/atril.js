@@ -69,6 +69,9 @@
       try { await this.be.sensibilidad(n); return true; } catch (e) { return false; }
     }
     async senal() { return true; }
+    async manual(on) {
+      try { await this.be.manual(on); return true; } catch (e) { return false; }
+    }
     async volumen(v) {
       try { await this.be.volumen(v); return true; } catch (e) { return false; }
     }
@@ -98,7 +101,8 @@
       this.sumaAct = 0; this.nRmsAct = 0; this.sumaCola = 0; this.nCola = 0;
       this.nActiv = 0; this.tActMs = 0; this.sid = 0; this.msSes = 0; this.msSesIni = 0;
       this.tCambio = 0; this.abajoAntes = false; this.tIniAbajo = 0; this.tUltCancion = -1e9; this.cancion = 4; this.orden = 0;
-      this.mus = { abajo: [7, 8, 9, 10, 11, 12], arriba: [1, 2, 3, 4, 5, 6], orden: { abajo: [], arriba: [] }, idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
+      this.manualOn = false;
+      this.mus = { abajo: [7, 8, 9, 10, 11, 12], arriba: [1, 2, 3, 4, 5, 6], fija: { abajo: 0, arriba: 0 }, orden: { abajo: [], arriba: [] }, idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
         tAviso: 0, tPista: 0, subio: false, reiniciar: false, tLista: performance.now() + 2300, tCmd: 0, vol: 15 };
       this.tPrev = performance.now();
       this._msg('=== ASTRA - atril v5.1 (simulado) ===');
@@ -250,7 +254,7 @@
         m.idx[l]++;
         if (m.idx[l] >= m.orden[l].length) { this._barajar(l); m.idx[l] = 0; }
       }
-      this.cancion = m.orden[l][m.idx[l]]; m.lista = l; m.sonando = true; m.aviso = false; m.tPista = this._ms(); m.tCmd = this._ms();
+      this.cancion = m.fija[l] || m.orden[l][m.idx[l]]; m.lista = l; m.sonando = true; m.aviso = false; m.tPista = this._ms(); m.tCmd = this._ms();
       this._msg('   >> Musica (cabeza ' + (abajo ? 'ABAJO' : 'arriba') + '): /01/' + String(this.cancion).padStart(3, '0') + '.mp3');
     }
     _musica(ahora, ok) {
@@ -275,13 +279,14 @@
         this._msg('   >> Cabeza arriba: aviso /ADVERT/0001.mp3');
       }
     }
-    musica(lista, p) {
-      if ((lista !== 'abajo' && lista !== 'arriba') || p.length !== 3 || p.some(v => !(v >= 1 && v <= 255))) return Promise.reject(new Error('HTTP 400'));
-      this.mus[lista] = p.slice();
-      this._msg('>> Lista CABEZA ' + lista.toUpperCase() + ': ' + p.map(v => String(v).padStart(3, '0')).join(', '));
+    musica(lista, p) {   // como el atril v8.3-2C: p[0] = 0 aleatorio, o una canción fija de ese grupo
+      if ((lista !== 'abajo' && lista !== 'arriba') || p.length !== 3 || !(p[0] === 0 || this.mus[lista].includes(p[0]))) return Promise.reject(new Error('HTTP 400'));
+      this.mus.fija[lista] = p[0];
+      this._msg('>> Musica de ' + (lista === 'abajo' ? 'reposo' : 'esfuerzo') + ': ' + (p[0] ? '/01/' + String(p[0]).padStart(3, '0') + '.mp3' : 'aleatoria'));
       if (this.mus.sonando && this.mus.lista === lista) this.mus.reiniciar = true;
       return Promise.resolve({ ok: true });
     }
+    manual(on) { this.manualOn = !!on; this._msg('>> Esfuerzo manual: ' + (on ? 'encendido' : 'apagado')); return Promise.resolve({ ok: true }); }
     volumen(v) { this.mus.vol = Math.max(0, Math.min(30, Math.round(v))); this._msg('>> Volumen: ' + this.mus.vol + ' de 30'); return Promise.resolve({ ok: true }); }
     _velE() {
       if (this.modo === 'SESION' && this._datosOK() && this._abajo()) {
@@ -306,7 +311,9 @@
         sid: this.sid, nAct: this.nActiv, tAct: r1(this.tActMs / 1000), tSes: r1(this.msSes / 1000), velE: this._velE(),
         cancion: this.cancion, orden: this.orden, malas: 0, rssi: -40,
         musica: { carpeta: 1, abajo: this.mus.abajo.slice(), arriba: this.mus.arriba.slice(), sonando: this.mus.sonando ? 1 : 0,
-          lista: this.mus.lista, pista: this.cancion, aviso: this.mus.aviso ? 1 : 0, avisoPista: 1, vol: this.mus.vol },
+          lista: this.mus.lista, pista: this.cancion, aviso: this.mus.aviso ? 1 : 0, avisoPista: 1, vol: this.mus.vol,
+          fijaAbajo: this.mus.fija.abajo, fijaArriba: this.mus.fija.arriba },
+        manual: this.manualOn ? 1 : 0,
         bn: this.nBlq, b: pick(this.blq, this.nBlq, q.b),
         an: this.nAct, acts: pick(this.acts, this.nAct, q.a),
         ln: this.nLog, logs: pick(this.logs, this.nLog, q.l)
@@ -332,7 +339,8 @@
       this.emg = { kind: 'servidor', get lost() { return link.parser.lost; }, stop() { link.stop(); } };
       this.atril = { kind: 'servidor', cmd: c => link._enviar({ type: 'cmd', c }), musica: (l, p) => link._enviar({ type: 'musica', l, p }),
         volumen: v => link._enviar({ type: 'volumen', v }), sensibilidad: n => link._enviar({ type: 'sensibilidad', n }),
-        senal: on => link._enviar({ type: 'senal', on: !!on }), stop() { link.stop(); } };
+        senal: on => link._enviar({ type: 'senal', on: !!on }), manual: on => link._enviar({ type: 'manual', on: !!on }),
+        stop() { link.stop(); } };
       this._conectar();
     }
     _conectar() {

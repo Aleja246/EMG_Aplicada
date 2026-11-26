@@ -178,6 +178,10 @@
         <span id="lv-cal-txt">Mantén la cabeza del niño arriba, en la postura de la terapia, y quieta.</span>
         <div class="bar"><div id="lv-cal-bar"></div></div>
       </div>
+      <div class="vivo-switches">
+        <label class="switch" title="Deja el atril en modo de esfuerzo (premio) hasta que lo apagues"><input type="checkbox" id="sw-manual"><span class="sw"></span> Esfuerzo manual</label>
+        <label class="switch" title="Oculta la onda verde y deja solo la línea amarilla"><input type="checkbox" id="sw-solo-rms"><span class="sw"></span> Solo línea amarilla</label>
+      </div>
       <div class="row-between graf-cab">
         <div><h3>Señal EMG en tiempo real</h3>
           <p class="leyenda" title="Línea amarilla: RMS de ~100 ms, como en el Serial Plotter"><span class="linea-act"></span> activación (RMS)</p></div>
@@ -229,6 +233,10 @@
     <h2>Ajustes</h2>
     <h3>Música del atril</h3>
     <p class="muted small-text" id="mus-estado"></p>
+    <div class="grid2">
+      <label>Canción de esfuerzo<select id="mus-arriba"></select></label>
+      <label>Canción de reposo<select id="mus-abajo"></select></label>
+    </div>
     <label>Volumen <b id="vol-val">—</b><input type="range" id="vol" min="0" max="30" step="1"></label>
     <label>Sensibilidad de la detección (se aplica al momento, sin volver a calibrar)
       <select id="aj-sens">
