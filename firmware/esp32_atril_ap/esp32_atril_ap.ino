@@ -19,6 +19,11 @@
 //   0xAA 0x56). La calibracion, la deteccion, el premio sostenido, las
 //   estrellas, la luz y la musica son exactamente los del v8.3: siguen usando
 //   el RMS que llega por el opto (el Arduino manda ahi el promedio de A0 y A1).
+//  v8.3-2C MUSICA ALEATORIA: /01/001-006 = canciones DINAMICAS (premio,
+//   esfuerzo) y /01/007-012 = canciones de REPOSO. En cada cambio suena una
+//   cancion distinta de su grupo, en orden aleatorio, y no se repite ninguna
+//   hasta que sonaron las 6 (luego se vuelven a barajar). La pagina ya no
+//   elige las canciones (solo el volumen).
 //  Lo de abajo describe el v8.2; donde no coincida, manda esta nota.
 // ---------------------------------------------------------------------
 //  Entrada: el Arduino UNO R4 (arduino_emg_ap.ino) manda por el
@@ -243,19 +248,20 @@ const int VOLUMEN    = 15;         // 0 a 30
 const unsigned long PAUSA_SONIDO = 3000;  // ms minimos entre sonidos
 // Musica: SIEMPRE sonando desde el encendido (arranque, calibracion y sesion).
 // Solo se detiene con el PARO. MicroSD (FAT32):
-//   /01/001.mp3 ... /01/006.mp3   canciones
+//   /01/001.mp3 ... /01/012.mp3   canciones
 //   /ADVERT/0001.mp3               aviso "subio la cabeza"
-// Hay DOS listas de 3 pistas (numero de archivo dentro de /01):
-//   CABEZA ABAJO  -> pistasAbajo   (por defecto 004, 005, 006)
-//   CABEZA ARRIBA -> pistasArriba  (por defecto 001, 002, 003)
-// Al cambiar la cabeza de posicion, pasa a la SIGUIENTE pista de la otra lista.
-// Cuando una pista termina, sigue la siguiente de la misma lista.
+// v8.3-2C: DOS grupos de 6 pistas (numero de archivo dentro de /01):
+//   DINAMICAS (esfuerzo / premio) -> pistasArriba = 001 ... 006
+//   REPOSO                        -> pistasAbajo  = 007 ... 012
+// Cada grupo se toca en orden ALEATORIO sin repetir: suenan las 6 y luego se
+// vuelven a barajar (la primera nueva nunca es la ultima que sono).
+// Al cambiar de estado, suena la SIGUIENTE pista (aleatoria) del otro grupo.
+// Cuando una pista termina, sigue la siguiente (aleatoria) del mismo grupo.
 // Cada vez que SUBE la cabeza suena /ADVERT/0001.mp3 encima de la musica y, al
 // terminar, el DFPlayer continua la pista que estaba sonando.
-// PAGINA WEB: la pagina elige las 3 pistas de cada lista; el atril llama a
-// configurarPistas() y las guarda en su memoria (ver aplicarMusica()).
+// v8.3-2C: la pagina ya NO elige las pistas (las ordenes "M ..." se ignoran).
 const int CARPETA_MUSICA   = 1;     // carpeta /01
-const int PISTAS_POR_LISTA = 3;
+const int PISTAS_POR_LISTA = 6;
 const int PISTA_AVISO      = 1;     // /ADVERT/0001.mp3
 const unsigned long AVISO_MAX_MS = 10000;   // duracion maxima del aviso (si el DFPlayer no avisa el final)
 const unsigned long T_ABAJO_MIN_MS  = 1000;  // la cabeza debe haber estado abajo al menos esto
@@ -395,10 +401,11 @@ float luzR = 0, luzG = 0, luzB = 0;
 float faseColor = 0;                // 0..1, posicion en la rueda de colores
 bool musicaSonando = false;
 int cancion = 4;                    // archivo de /01 que esta sonando (001..255)
-// Listas de musica (las podra cambiar la pagina web con configurarPistas)
-int pistasAbajo[PISTAS_POR_LISTA]  = {4, 5, 6};   // v8.2: /01/004, 005, 006 con la CABEZA ABAJO
-int pistasArriba[PISTAS_POR_LISTA] = {1, 2, 3};   // v8.2: /01/001, 002, 003 con la CABEZA ARRIBA
-int idxAbajo = -1, idxArriba = -1;  // posicion en cada lista (-1 = aun no suena)
+// v8.3-2C: grupos fijos de 6 canciones, tocados en orden aleatorio sin repetir
+int pistasAbajo[PISTAS_POR_LISTA]  = {7, 8, 9, 10, 11, 12};   // REPOSO:    /01/007 ... 012
+int pistasArriba[PISTAS_POR_LISTA] = {1, 2, 3, 4, 5, 6};      // DINAMICAS: /01/001 ... 006
+int ordenAbajo[PISTAS_POR_LISTA], ordenArriba[PISTAS_POR_LISTA];   // orden barajado de cada grupo
+int idxAbajo = -1, idxArriba = -1;  // posicion en cada orden (-1 = aun no suena)
 bool listaAbajoSonando = false;     // que lista esta sonando
 bool pistaTerminada = false;        // el DFPlayer aviso que termino la pista
 bool avisoSonando = false;          // esta sonando /ADVERT/0001.mp3
@@ -526,45 +533,29 @@ void sonar(int pista) {
   pistaPendiente = 0;
 }
 
-// ---------------- Configuracion de las listas de musica ----------------
-// Para la PAGINA WEB: cambia las 3 pistas de una lista (numero de archivo en /01,
-// de 1 a 255). abajo = true -> lista de CABEZA ABAJO; false -> CABEZA ARRIBA.
-// El cambio se oye en la siguiente pista de esa lista. Devuelve false si algun
-// numero no es valido (y no cambia nada).
-bool configurarPistas(bool abajo, int p1, int p2, int p3) {
-  int nuevas[PISTAS_POR_LISTA] = {p1, p2, p3};
-  for (int k = 0; k < PISTAS_POR_LISTA; k++) if (nuevas[k] < 1 || nuevas[k] > 255) return false;
-  int *lista = abajo ? pistasAbajo : pistasArriba;
-  for (int k = 0; k < PISTAS_POR_LISTA; k++) lista[k] = nuevas[k];
-  Log.printf(">> Lista CABEZA %s: %03d, %03d, %03d\n", abajo ? "ABAJO" : "ARRIBA", p1, p2, p3);
-  return true;
+// ---------------- Musica aleatoria (v8.3-2C) ----------------
+// Baraja el orden de un grupo (Fisher-Yates con el generador del ESP32).
+// La primera del nuevo orden nunca es la que acaba de sonar.
+void barajar(int *orden, const int *pistas, int ultima) {
+  for (int k = 0; k < PISTAS_POR_LISTA; k++) orden[k] = pistas[k];
+  for (int k = PISTAS_POR_LISTA - 1; k > 0; k--) {
+    int j = (int)(esp_random() % (uint32_t)(k + 1));
+    int t = orden[k]; orden[k] = orden[j]; orden[j] = t;
+  }
+  if (orden[0] == ultima) { int j = 1 + (int)(esp_random() % (PISTAS_POR_LISTA - 1)); int t = orden[0]; orden[0] = orden[j]; orden[j] = t; }
 }
 
-// Listas guardadas en la memoria del ESP32 (las eligio la pagina)
+// Solo el volumen se guarda en la memoria del ESP32 (las pistas ya son fijas)
 void cargarListas() {
-  uint8_t a[PISTAS_POR_LISTA], b[PISTAS_POR_LISTA];
   prefs.begin("astra", false);
-  size_t na = prefs.getBytes("abajo", a, sizeof a), nb = prefs.getBytes("arriba", b, sizeof b);
   volumen = constrain((int)prefs.getUChar("vol", VOLUMEN), 0, 30);
   prefs.end();
-  if (na == sizeof a && a[0] && a[1] && a[2]) for (int k = 0; k < PISTAS_POR_LISTA; k++) pistasAbajo[k] = a[k];
-  if (nb == sizeof b && b[0] && b[1] && b[2]) for (int k = 0; k < PISTAS_POR_LISTA; k++) pistasArriba[k] = b[k];
+  barajar(ordenAbajo, pistasAbajo, 0);
+  barajar(ordenArriba, pistasArriba, 0);
 }
 
-void guardarLista(bool abajo) {
-  uint8_t v[PISTAS_POR_LISTA];
-  for (int k = 0; k < PISTAS_POR_LISTA; k++) v[k] = (uint8_t)(abajo ? pistasAbajo : pistasArriba)[k];
-  prefs.begin("astra", false);
-  prefs.putBytes(abajo ? "abajo" : "arriba", v, sizeof v);
-  prefs.end();
-}
-
-// Pedido de la pagina: cambia, guarda y, si esa lista es la que suena, empieza ya con ella
-void aplicarMusica(const PedidoMusica &m) {
-  if (!configurarPistas(m.abajo, m.p[0], m.p[1], m.p[2])) return;
-  guardarLista(m.abajo);
-  if (musicaSonando && (bool)m.abajo == listaAbajoSonando) reiniciarLista = true;
-}
+// v8.3-2C: la pagina ya no elige las canciones; un pedido viejo se ignora
+void aplicarMusica(const PedidoMusica &) {}
 
 // Volumen pedido por la pagina (0 a 30): se aplica ya y se guarda
 void aplicarVolumen(int v) {
@@ -577,19 +568,27 @@ void aplicarVolumen(int v) {
   Log.printf(">> Volumen: %d de 30\n", volumen);
 }
 
-// Toca una pista de la lista de cabeza abajo / arriba (carpeta /01).
-// avanzar = true: la siguiente de la lista; false: la que tocaba (o la primera).
+// Toca una pista del grupo de REPOSO (abajo) o DINAMICAS (arriba), carpeta /01.
+// avanzar = true: la siguiente del orden aleatorio; false: la que tocaba (o la primera).
+// v8.3-2C: al terminar las 6 se vuelven a barajar.
 void tocarLista(bool abajo, bool avanzar) {
   int &idx = abajo ? idxAbajo : idxArriba;
-  if (avanzar || idx < 0) idx = (idx + 1) % PISTAS_POR_LISTA;
-  cancion = (abajo ? pistasAbajo : pistasArriba)[idx];
+  int *orden = abajo ? ordenAbajo : ordenArriba;
+  if (avanzar || idx < 0) {
+    idx++;
+    if (idx >= PISTAS_POR_LISTA) {
+      barajar(orden, abajo ? pistasAbajo : pistasArriba, orden[PISTAS_POR_LISTA - 1]);
+      idx = 0;
+    }
+  }
+  cancion = orden[idx];
   listaAbajoSonando = abajo;
   dfEnviar(0x0F, (CARPETA_MUSICA << 8) | cancion);   // carpeta + archivo
   musicaSonando = true;
   pistaTerminada = false;
   avisoSonando = false;
   ultimoCmdMusica = millis();
-  Log.printf("   >> Musica (cabeza %s): /%02d/%03d.mp3\n", abajo ? "ABAJO" : "arriba", CARPETA_MUSICA, cancion);
+  Log.printf("   >> Musica (%s): /%02d/%03d.mp3\n", abajo ? "reposo" : "dinamica", CARPETA_MUSICA, cancion);
 }
 
 // Lee las respuestas del DFPlayer: solo interesa "termino una pista" (0x3D).
@@ -1082,8 +1081,7 @@ void actualizarModo() {
       tocarLista(quiereAbajo, true);             // cambio de cabeza: siguiente pista de la otra lista
     } else if (reiniciarLista && !avisoSonando) {
       reiniciarLista = false;                    // la pagina cambio la lista que suena: empieza con la nueva
-      (listaAbajoSonando ? idxAbajo : idxArriba) = -1;
-      tocarLista(listaAbajoSonando, false);
+      tocarLista(listaAbajoSonando, true);
     } else if (pistaTerminada) {
       tocarLista(listaAbajoSonando, true);       // termino la pista: siguiente de la misma lista
     } else if (cambiarCancion && ahora - ultimoCmdMusica >= 600) {
@@ -1325,8 +1323,9 @@ void armarEstado(uint32_t &sb, uint32_t &sa, uint32_t &sl) {
   ja(",\"sid\":%d,\"nAct\":%d,\"tAct\":%.1f,\"tSes\":%.1f,\"velE\":%.0f,\"cancion\":%d,\"orden\":%d,\"malas\":%lu,\"rssi\":0",
      sesionId, nActivaciones, tiempoActivoTotal / 1000.0f, msSesion / 1000.0f, velE, cancion, ordenP,
      lineasMalas);
-  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d],\"arriba\":[%d,%d,%d],\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d,\"vol\":%d}",
-     CARPETA_MUSICA, pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasArriba[0], pistasArriba[1], pistasArriba[2],
+  ja(",\"musica\":{\"carpeta\":%d,\"abajo\":[%d,%d,%d,%d,%d,%d],\"arriba\":[%d,%d,%d,%d,%d,%d],\"aleatoria\":1,\"sonando\":%d,\"lista\":\"%s\",\"pista\":%d,\"aviso\":%d,\"avisoPista\":%d,\"vol\":%d}",
+     CARPETA_MUSICA, pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasAbajo[3], pistasAbajo[4], pistasAbajo[5],
+     pistasArriba[0], pistasArriba[1], pistasArriba[2], pistasArriba[3], pistasArriba[4], pistasArriba[5],
      musicaSonando ? 1 : 0, listaAbajoSonando ? "abajo" : "arriba", cancion, avisoSonando ? 1 : 0, PISTA_AVISO, volumen);
   ja(",\"bn\":%lu,\"b\":[", (unsigned long)nb);
   for (uint32_t i = 0; i < nb - b0; i++) ja(i ? ",[%ld,%.1f,%d]" : "[%ld,%.1f,%d]", (long)br[i], bm[i], bf[i]);
@@ -1827,9 +1826,8 @@ void setup() {
   Serial1.begin(9600, SERIAL_8N1, DF_RX, DF_TX);     // DFPlayer
   // El volumen se manda 2 s despues (iniciarArranque), sin detener el arranque
 
-  cargarListas();                                     // las listas que eligio la pagina
-  Serial.printf(">> Musica: cabeza ABAJO %03d %03d %03d | cabeza ARRIBA %03d %03d %03d\n",
-                pistasAbajo[0], pistasAbajo[1], pistasAbajo[2], pistasArriba[0], pistasArriba[1], pistasArriba[2]);
+  cargarListas();                                     // volumen guardado + primer orden aleatorio
+  Serial.println(">> Musica aleatoria: DINAMICAS /01/001-006 (esfuerzo) | REPOSO /01/007-012");
   idArranque = (uint32_t)random(1, 2000000000);
   colaCmd = xQueueCreate(16, sizeof(char));
   colaMusica = xQueueCreate(4, sizeof(PedidoMusica));

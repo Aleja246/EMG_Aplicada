@@ -98,7 +98,7 @@
       this.sumaAct = 0; this.nRmsAct = 0; this.sumaCola = 0; this.nCola = 0;
       this.nActiv = 0; this.tActMs = 0; this.sid = 0; this.msSes = 0; this.msSesIni = 0;
       this.tCambio = 0; this.abajoAntes = false; this.tIniAbajo = 0; this.tUltCancion = -1e9; this.cancion = 4; this.orden = 0;
-      this.mus = { abajo: [4, 5, 6], arriba: [1, 2, 3], idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
+      this.mus = { abajo: [7, 8, 9, 10, 11, 12], arriba: [1, 2, 3, 4, 5, 6], orden: { abajo: [], arriba: [] }, idx: { abajo: -1, arriba: -1 }, lista: 'arriba', sonando: false, aviso: false,
         tAviso: 0, tPista: 0, subio: false, reiniciar: false, tLista: performance.now() + 2300, tCmd: 0, vol: 15 };
       this.tPrev = performance.now();
       this._msg('=== ASTRA - atril v5.1 (simulado) ===');
@@ -237,10 +237,20 @@
     }
     // Igual que la musica del firmware v6: dos listas (cabeza abajo / arriba) y el aviso al subir la cabeza.
     // Una pista simulada dura 40 s; el aviso, 3 s.
+    // Como el firmware v8.3-2C: cada grupo de 6 en orden aleatorio, sin repetir hasta que suenan todas.
+    _barajar(l) {
+      const o = this.mus[l].slice(), ult = this.mus.orden[l][this.mus.orden[l].length - 1];
+      for (let k = o.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [o[k], o[j]] = [o[j], o[k]]; }
+      if (o[0] === ult) { const j = 1 + Math.floor(Math.random() * (o.length - 1)); [o[0], o[j]] = [o[j], o[0]]; }
+      this.mus.orden[l] = o;
+    }
     _tocar(abajo, avanzar) {
       const m = this.mus, l = abajo ? 'abajo' : 'arriba';
-      if (avanzar || m.idx[l] < 0) m.idx[l] = (m.idx[l] + 1) % 3;
-      this.cancion = m[l][m.idx[l]]; m.lista = l; m.sonando = true; m.aviso = false; m.tPista = this._ms(); m.tCmd = this._ms();
+      if (avanzar || m.idx[l] < 0) {
+        m.idx[l]++;
+        if (m.idx[l] >= m.orden[l].length) { this._barajar(l); m.idx[l] = 0; }
+      }
+      this.cancion = m.orden[l][m.idx[l]]; m.lista = l; m.sonando = true; m.aviso = false; m.tPista = this._ms(); m.tCmd = this._ms();
       this._msg('   >> Musica (cabeza ' + (abajo ? 'ABAJO' : 'arriba') + '): /01/' + String(this.cancion).padStart(3, '0') + '.mp3');
     }
     _musica(ahora, ok) {

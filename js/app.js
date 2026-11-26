@@ -249,25 +249,10 @@
   }
 
   /* ---------- música y volumen (lo único técnico que ve el fisio) ---------- */
-  // Cabeza ARRIBA: pistas 001-003 del DFPlayer; cabeza ABAJO: 004-006
-  const MUS_OPC = {
-    abajo: [['4,4,4', 'Canción 1'], ['5,5,5', 'Canción 2'], ['6,6,6', 'Canción 3']],
-    arriba: [['1,1,1', 'Canción 1'], ['2,2,2', 'Canción 2'], ['3,3,3', 'Canción 3']]
-  };
-  const musValida = (l, v) => MUS_OPC[l].some(o => o[0] === v);
-  // Lo elegido en esta página (o Canción 1 si no hay elección válida: p. ej. la lista vieja "las tres")
-  function musElegida(l) {
-    if (!musValida(l, S['mus_' + l])) { S['mus_' + l] = MUS_OPC[l][0][0]; E.Store.saveSettings(S); }
-    return S['mus_' + l];
-  }
-  const musEnviado = { abajo: 0, arriba: 0 };
+  // Las canciones las elige el atril al azar: 001-006 dinámicas (esfuerzo) y 007-012 de reposo.
+  // Desde aquí solo se ajusta el volumen.
+  const musEnviado = {};
   function initMusica() {
-    for (const l of ['abajo', 'arriba']) {
-      const sel = $('mus-' + l);
-      sel.innerHTML = MUS_OPC[l].map(() => '<option></option>').join('');
-      sel.querySelectorAll('option').forEach((o, i) => { o.value = MUS_OPC[l][i][0]; o.textContent = MUS_OPC[l][i][1]; });
-      sel.addEventListener('change', () => { S['mus_' + l] = sel.value; E.Store.saveSettings(S); enviarMusica(l, sel.value, true); });
-    }
     const v = $('vol');
     v.addEventListener('input', () => { $('vol-val').textContent = v.value; });
     v.addEventListener('change', () => {
@@ -276,28 +261,13 @@
       atril.volumen(+v.value).then(ok => toast(ok ? 'Volumen ajustado a ' + v.value + ' de 30.' : 'El atril no recibió el volumen.'));
     });
   }
-  function enviarMusica(l, v, avisar) {
-    if (!equipoListo()) { if (avisar) toast('Se mandará al atril en cuanto esté encendido.'); return; }
-    musEnviado[l] = performance.now();
-    atril.musica(l, v.split(',').map(Number)).then(ok => {
-      if (avisar) toast(ok ? 'Música de la cabeza ' + l + ' guardada.' : 'El atril no recibió la música.');
-    });
-  }
   function syncMusica(s) {
     if (!s.musica) return;
-    for (const l of ['abajo', 'arriba']) {
-      const q = musElegida(l);
-      if (q !== s.musica[l].join(',') && performance.now() - musEnviado[l] > 4000) enviarMusica(l, q, false);
-    }
     if (S.volumen !== undefined && s.musica.vol !== undefined && s.musica.vol !== S.volumen &&
         performance.now() - (musEnviado.vol || 0) > 4000) { musEnviado.vol = performance.now(); atril.volumen(S.volumen); }
   }
   function renderAjustes() {
     const m = st && st.musica, on = !!m && equipoListo();
-    for (const l of ['abajo', 'arriba']) {
-      const sel = $('mus-' + l);
-      if (document.activeElement !== sel) sel.value = musElegida(l);
-    }
     const vol = S.volumen !== undefined ? S.volumen : (m && m.vol !== undefined ? m.vol : 15);
     if (document.activeElement !== $('vol')) $('vol').value = vol;
     $('vol-val').textContent = vol;
@@ -305,8 +275,8 @@
     if (document.activeElement !== $('aj-sens')) $('aj-sens').value = String(sens);
     $('aj-sens').disabled = !(equipoListo() || sim);
     $('mus-estado').textContent = on
-      ? 'Guardado en el atril. Suena una canción cuando el niño sostiene la cabeza y otra cuando se le cae.'
-      : 'El atril no está encendido: los cambios se mandarán en cuanto lo esté.';
+      ? 'Las canciones cambian solas y al azar: 6 dinámicas durante el esfuerzo y 6 tranquilas en reposo, sin repetir hasta que suenan todas.'
+      : 'El atril no está encendido: el volumen se mandará en cuanto lo esté.';
     const ed = E.Store.estado;
     $('datos-estado').textContent = ed.modo === 'indexeddb'
       ? 'Se guardan solo en este dispositivo y este navegador: ' + ed.pacientes + ' paciente(s), ' + ed.sesiones + ' sesión(es). ' +
@@ -560,10 +530,9 @@
     const abajo = !!(st && st.modo === 'SESION' && st.abajo);
     const post = $('lv-postura');
     post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo ? 'abajo' : 'arriba') : '');
-    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'Cabeza abajo' : 'Cabeza arriba')
+    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'Reposo' : 'Esfuerzo')
       : st && st.modo === 'PAUSA' ? 'En pausa' : '—';
     $('lv-tiempo').textContent = clock(recTime());
-    $('lv-abajo').textContent = clock(rec ? rec.abajoS : 0);
     $('lv-caidas').textContent = rec ? rec.caidas : 0;
     const cal = st && st.cal && st.cal.ok;
     $('lv-pie').textContent = (cal ? 'Calibración completada' : 'Falta calibrar') + ' · ' +

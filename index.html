@@ -170,7 +170,7 @@
       </div>
       <hr>
       <div class="vivo-top">
-        <div><span class="muted">Postura estimada</span><b class="postura" id="lv-postura">—</b></div>
+        <div><span class="muted">Estado</span><b class="postura" id="lv-postura">—</b></div>
         <div><span class="muted">Tiempo de sesión</span><b class="reloj" id="lv-tiempo">00:00</b></div>
       </div>
       <div class="calibrando" id="lv-cal" hidden>
@@ -192,8 +192,7 @@
       <p class="canal-tit"><b>Canal 2 · A1</b> <span id="lv-c2"></span></p>
       <canvas id="live2" class="live"></canvas>
       <div class="vivo-kpis">
-        <div class="kpi"><span>Tiempo cabeza abajo</span><b id="lv-abajo">00:00</b></div>
-        <div class="kpi"><span>Episodios de cabeza abajo</span><b id="lv-caidas">0</b></div>
+        <div class="kpi"><span>Episodios de reposo</span><b id="lv-caidas">0</b></div>
       </div>
       <p class="pie" id="lv-pie"></p>
       <div class="form-actions">
@@ -230,10 +229,6 @@
     <h2>Ajustes</h2>
     <h3>Música del atril</h3>
     <p class="muted small-text" id="mus-estado"></p>
-    <div class="grid2">
-      <label>Canción con la cabeza ARRIBA<select id="mus-arriba"></select></label>
-      <label>Canción con la cabeza ABAJO<select id="mus-abajo"></select></label>
-    </div>
     <label>Volumen <b id="vol-val">—</b><input type="range" id="vol" min="0" max="30" step="1"></label>
     <label>Sensibilidad de la detección (se aplica al momento, sin volver a calibrar)
       <select id="aj-sens">
