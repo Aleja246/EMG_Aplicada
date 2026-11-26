@@ -170,7 +170,8 @@
       </div>
       <hr>
       <div class="vivo-top">
-        <div><span class="muted">Estado</span><b class="postura" id="lv-postura">—</b></div>
+        <div><span class="muted">Estado</span><b class="postura" id="lv-postura">—</b>
+          <label class="switch sw-esfuerzo" title="Deja el atril en modo de esfuerzo (premio) hasta que lo apagues"><input type="checkbox" id="sw-manual"><span class="sw"></span> Esfuerzo manual</label></div>
         <div><span class="muted">Tiempo de sesión</span><b class="reloj" id="lv-tiempo">00:00</b></div>
       </div>
       <div class="calibrando" id="lv-cal" hidden>
@@ -178,17 +179,16 @@
         <span id="lv-cal-txt">Mantén la cabeza del niño arriba, en la postura de la terapia, y quieta.</span>
         <div class="bar"><div id="lv-cal-bar"></div></div>
       </div>
-      <div class="vivo-switches">
-        <label class="switch" title="Deja el atril en modo de esfuerzo (premio) hasta que lo apagues"><input type="checkbox" id="sw-manual"><span class="sw"></span> Esfuerzo manual</label>
-        <label class="switch" title="Oculta la onda verde y deja solo la línea amarilla"><input type="checkbox" id="sw-solo-rms"><span class="sw"></span> Solo línea amarilla</label>
-      </div>
       <div class="row-between graf-cab">
         <div><h3>Señal EMG en tiempo real</h3>
           <p class="leyenda" title="Línea amarilla: RMS de ~100 ms, como en el Serial Plotter"><span class="linea-act"></span> activación (RMS)</p></div>
-        <div class="zoom" role="group" aria-label="Zoom de la gráfica">
-          <button class="btn small ghost" id="zoom-menos" type="button" aria-label="Alejar">−</button>
-          <button class="btn small ghost" id="zoom-auto" type="button">Auto</button>
-          <button class="btn small ghost" id="zoom-mas" type="button" aria-label="Acercar">+</button>
+        <div class="graf-ctrl">
+          <div class="zoom" role="group" aria-label="Zoom de la gráfica">
+            <button class="btn small ghost" id="zoom-menos" type="button" aria-label="Alejar">−</button>
+            <button class="btn small ghost" id="zoom-auto" type="button">Auto</button>
+            <button class="btn small ghost" id="zoom-mas" type="button" aria-label="Acercar">+</button>
+          </div>
+          <label class="switch sw-rms" title="Oculta la onda verde y deja solo la línea amarilla (RMS)"><input type="checkbox" id="sw-solo-rms"><span class="sw"></span> Visualizar únicamente RMS</label>
         </div>
       </div>
       <p class="canal-tit"><b>Canal 1 · A0</b> <span id="lv-c1"></span></p>
@@ -196,7 +196,7 @@
       <p class="canal-tit"><b>Canal 2 · A1</b> <span id="lv-c2"></span></p>
       <canvas id="live2" class="live"></canvas>
       <div class="vivo-kpis">
-        <div class="kpi"><span>Episodios de reposo</span><b id="lv-caidas">0</b></div>
+        <div class="kpi"><span>Episodios de esfuerzo</span><b id="lv-caidas">0</b></div>
       </div>
       <p class="pie" id="lv-pie"></p>
       <div class="form-actions">

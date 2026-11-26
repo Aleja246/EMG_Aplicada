@@ -566,12 +566,13 @@
     const abajo = !!(st && st.modo === 'SESION' && st.abajo);
     const post = $('lv-postura');
     const manualOn = !!(st && st.modo === 'SESION' && st.manual);
-    post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo || manualOn ? 'abajo' : 'arriba') : '');
-    post.textContent = manualOn ? 'Esfuerzo (manual)' : st && st.modo === 'SESION' ? (abajo ? 'Esfuerzo' : 'Reposo')
+    // Reposo en amarillo y esfuerzo en verde
+    post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo && !manualOn ? 'abajo' : 'arriba') : '');
+    post.textContent = manualOn ? 'Esfuerzo (manual)' : st && st.modo === 'SESION' ? (abajo ? 'Reposo' : 'Esfuerzo')
       : st && st.modo === 'PAUSA' ? 'En pausa' : '—';
     if (document.activeElement !== $('sw-manual') && st) $('sw-manual').checked = !!st.manual;
     $('lv-tiempo').textContent = clock(recTime());
-    $('lv-caidas').textContent = rec ? rec.caidas : 0;
+    $('lv-caidas').textContent = rec ? rec.acts.length : 0;   // esfuerzos detectados por el atril (el modo manual no cuenta)
     const cal = st && st.cal && st.cal.ok;
     $('lv-pie').textContent = (cal ? 'Calibración completada' : 'Falta calibrar') + ' · ' +
       (!senalVivo ? 'Señal en vivo apagada (Ajustes)' : emgConn.status === 'connected' || sim ? 'Señal disponible' : 'Sin señal del sensor');
