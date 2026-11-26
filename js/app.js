@@ -530,7 +530,7 @@
     const abajo = !!(st && st.modo === 'SESION' && st.abajo);
     const post = $('lv-postura');
     post.className = 'postura ' + (st && st.modo === 'SESION' ? (abajo ? 'abajo' : 'arriba') : '');
-    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'Reposo' : 'Esfuerzo')
+    post.textContent = st && st.modo === 'SESION' ? (abajo ? 'Esfuerzo' : 'Reposo')
       : st && st.modo === 'PAUSA' ? 'En pausa' : '—';
     $('lv-tiempo').textContent = clock(recTime());
     $('lv-caidas').textContent = rec ? rec.caidas : 0;
@@ -731,8 +731,8 @@
         filas: [['N.º', 'Inicio (s)', 'Duración (s)', 'Intensidad media (mV)']].concat(
           (r.episodios || []).map(a => [a.n, +a.inicioS.toFixed(1), +a.durS.toFixed(1), Math.round(a.rms)])), titulos: 1 }
     ];
-    if (senal && senal.length) hojas.push({ nombre: 'Señal', anchos: [12, 14, 14, 12],
-      filas: [['Tiempo (s)', 'Señal (mV)', 'Promedio (mV)', 'Cabeza caída']].concat(senal.map(f => [f[0], f[1], f[2], f[3] ? 1 : 0])), titulos: 1 });
+    if (senal && senal.length) hojas.push({ nombre: 'Señal', anchos: [12, 14, 14],
+      filas: [['Tiempo (s)', 'Señal (mV)', 'Promedio (mV)']].concat(senal.map(f => [f[0], f[1], f[2]])), titulos: 1 });
     E.xlsx(archivo(p, r.fecha.slice(0, 16).replace(/[:T]/g, '-')), hojas);
   }
   async function descargarSesion(s, p) {
